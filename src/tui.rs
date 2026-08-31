@@ -130,6 +130,17 @@ fn random_tip() -> &'static str {
     TIPS[n % TIPS.len()]
 }
 
+/// The tip after the current one, so two tip slots on screen never show the
+/// same line at once.
+fn next_tip() -> &'static str {
+    const ROTATE_SECS: u64 = 8;
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / ROTATE_SECS)
+        .unwrap_or(0) as usize;
+    TIPS[(n + 1) % TIPS.len()]
+}
+
 /// RGB components of a truecolor, for gradient maths. `None` for ANSI/named
 /// colours, where a gradient is not meaningful and callers fall back to flat.
 fn as_rgb(c: Color) -> Option<(u8, u8, u8)> {
@@ -450,7 +461,7 @@ impl App {
                 t.body(),
             )]);
             p.row(vec![Span::styled(
-                format!("Press /setup, or run `koda models` to see what {} has.", host_of(&self.endpoint)),
+                format!("Type /setup, or run `koda models` to see what {} has.", host_of(&self.endpoint)),
                 t.dim(),
             )]);
             let lines = p.render(&t, &g);
@@ -596,7 +607,8 @@ impl App {
                     return;
                 }
                 KeyCode::Down => {
-                    self.mention_sel += 1;
+                    let n = self.mention_hits().len();
+                    self.mention_sel = (self.mention_sel + 1).min(n.saturating_sub(1));
                     return;
                 }
                 KeyCode::Tab | KeyCode::Enter => {
@@ -1062,7 +1074,7 @@ impl App {
         self.plan_blocked = false;
         if self.busy {
             self.queued.push_back(trimmed);
-            self.note(format!("queued ({} waiting) — added to the plan after the current task", self.queued.len()));
+            self.note(format!("queued ({})", self.queued.len()));
         } else {
             self.send(Command::User(trimmed));
         }
@@ -1170,7 +1182,7 @@ impl App {
                 self.follow = true;
                 if self.busy {
                     self.queued.push_back(brief);
-                    self.note(format!("queued ({} waiting) — added to the plan after the current task", self.queued.len()));
+                    self.note(format!("queued ({})", self.queued.len()));
                 } else {
                     self.send(Command::User(brief));
                 }
@@ -1250,7 +1262,8 @@ impl App {
             }
             "tools" => {
                 let width = self.panel_width();
-                let mut p = Panel::new("Tools", width).footer("the agent picks these itself");
+                let mut p = Panel::new("Tools", width)
+                    .footer("the agent picks these · ● asks approval");
                 for spec in crate::tools::specs() {
                     let desc: String = spec
                         .desc
@@ -1258,9 +1271,16 @@ impl App {
                         .collect::<Vec<_>>()
                         .join(" ")
                         .chars()
-                        .take(p.inner().saturating_sub(14))
+                        .take(p.inner().saturating_sub(18))
                         .collect();
+                    // A dot marks tools that pause for your approval.
+                    let mark = if spec.mutating {
+                        Span::styled("● ".to_string(), self.theme.fg(self.theme.warning))
+                    } else {
+                        Span::styled("  ".to_string(), self.theme.dim())
+                    };
                     p.row(vec![
+                        mark,
                         Span::styled(
                             format!("{:<12}", spec.name),
                             if spec.mutating {
@@ -1890,7 +1910,9 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
             // teaches the app instead of sitting blank. Kept short and dim.
             if app.editor.is_empty() && !m.tiny {
                 left.push(Span::styled(format!("  {} ", g.sep), t.dim()));
-                left.push(Span::styled(random_tip().to_string(), t.dim()));
+                // Offset so the status tip never echoes the welcome banner's tip
+                // (both draw from the same rotating list).
+                left.push(Span::styled(next_tip().to_string(), t.dim()));
             }
         }
     }
@@ -1916,7 +1938,7 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
 
     // Only the keys that apply to the current state.
     let hints: &[(&str, &str)] = if app.pending.is_some() {
-        &[("y", "once"), ("a", "always"), ("n", "deny")]
+        &[("y", "allow"), ("a", "always"), ("n", "decline")]
     } else if app.asking.is_some() {
         &[("type", "your answer"), ("enter", "send")]
     } else if app.picker.is_some() || app.setup.is_some() {
@@ -2245,7 +2267,7 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let g = &app.glyphs;
 
-    let w = area.width.saturating_sub(6).clamp(40, 96);
+    let w = area.width.saturating_sub(6).clamp(40, 96).min(area.width);
     let rows = (list.len() as u16).min(12);
     let h = (rows + 2).min(area.height.saturating_sub(2));
     let rect = Rect {

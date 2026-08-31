@@ -56,14 +56,19 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Sortable, readable, and unique enough for one machine.
+/// Sortable, readable, and unique on one machine. The seconds keep it sortable;
+/// a process-wide atomic counter makes two ids created in the same second
+/// distinct (the old subsec-nanos mod 10000 could collide ~1/10000).
 fn new_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEQ: AtomicU32 = AtomicU32::new(0);
     let secs = now();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    format!("{secs:010}-{:04}", nanos % 10_000)
+    format!("{secs:010}-{:04}-{:04}", nanos % 10_000, seq % 10_000)
 }
 
 pub struct Store {

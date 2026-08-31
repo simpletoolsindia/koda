@@ -338,7 +338,7 @@ pub fn status_line(
 
 /// `[Ctrl+O: Expand]` — shown only when there is genuinely more to see.
 pub fn expand_hint(t: &Theme) -> Span<'static> {
-    Span::styled("  [ctrl+o expand]".to_string(), t.dim())
+    Span::styled("  ctrl+r expand".to_string(), t.dim())
 }
 
 /// One coloured segment of the status bar.

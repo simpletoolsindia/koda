@@ -1350,8 +1350,26 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
     }
 }
 
-fn first_line(s: &str) -> String {
+pub fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").chars().take(80).collect()
+}
+
+/// Substitute `{arg}` placeholders in a custom tool's command template with the
+/// call's argument values, single-quoted so a value can't break out of the
+/// command (spaces, metacharacters, injection). A missing arg becomes empty.
+pub fn expand_custom_command(template: &str, arg_names: &[String], args: &Value) -> String {
+    let mut out = template.to_string();
+    for name in arg_names {
+        let val = args.get(name).and_then(|v| v.as_str()).unwrap_or("");
+        out = out.replace(&format!("{{{name}}}"), &shell_quote(val));
+    }
+    out
+}
+
+/// POSIX single-quote a value so the shell treats it as one literal argument.
+fn shell_quote(s: &str) -> String {
+    // Wrap in single quotes; a literal single quote becomes '\'' .
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// The image extensions koda will attach to a vision request, mapped to their
@@ -1474,6 +1492,22 @@ mod tests {
     fn apply_edit_reports_missing_text_clearly() {
         let err = apply_edit("hello\n", "nonexistent", "x", false).unwrap_err().to_string();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn custom_command_expands_and_quotes() {
+        let args = json!({"pkg": "serde", "note": "it's fine; rm -rf /"});
+        let cmd = expand_custom_command(
+            "cargo add {pkg} # {note}",
+            &["pkg".into(), "note".into()],
+            &args,
+        );
+        // Values are single-quoted so metacharacters and quotes can't break out.
+        assert!(cmd.contains("cargo add 'serde'"), "{cmd}");
+        assert!(cmd.contains(r"'it'\''s fine; rm -rf /'"), "{cmd}");
+        // A missing arg becomes an empty quoted string, not a leftover brace.
+        let cmd2 = expand_custom_command("echo {missing}", &["missing".into()], &json!({}));
+        assert_eq!(cmd2, "echo ''");
     }
 
     #[test]

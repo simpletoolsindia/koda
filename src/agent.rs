@@ -641,9 +641,42 @@ impl Agent {
             // these outcomes instead of re-doing the I/O one at a time.
             self.prefetch_parallel(&result.calls).await;
 
+            // Track which tool_calls got a response. In native mode every
+            // tool_calls entry MUST be followed by a matching tool message or
+            // the next request is rejected — so if we break early (cancel, or
+            // the repeated-failure breaker) we backfill the rest afterward.
+            let mut answered: HashSet<String> = HashSet::new();
+            // Files already written by an earlier call in THIS step. A model
+            // that batches two writes/edits to the same path would have the
+            // second clobber or mis-match the first (its `old` was computed
+            // against the pre-batch content); warn instead of silently corrupt.
+            let mut written_this_step: HashSet<String> = HashSet::new();
             for call in &result.calls {
                 if self.cancelled() {
                     break;
+                }
+                // Guard same-file conflicts within a batch.
+                if matches!(call.function.name.as_str(), "write_file" | "edit_file") {
+                    if let Some(p) = call.args().get("path").and_then(|p| p.as_str()) {
+                        let key = p.to_string();
+                        if !written_this_step.insert(key) {
+                            self.history.push(Message::tool(
+                                &call.id,
+                                &call.function.name,
+                                format!(
+                                    "ERROR: {p} was already modified earlier in this same step. \
+                                     Editing it again now would race the previous change. Re-read \
+                                     {p} and make one combined edit (use edit_file's `edits` array \
+                                     for several changes to one file).",
+                                ),
+                            ));
+                            answered.insert(call.id.clone());
+                            let _ = tx.send(Event::Notice(format!(
+                                "skipped a second edit to {p} in one step — ask for one combined edit"
+                            )));
+                            continue;
+                        }
+                    }
                 }
                 let outcome = self.execute(call, tx).await;
                 let mut content = outcome.content;
@@ -676,6 +709,7 @@ impl Agent {
                                  Summarise what you were trying to do and what is blocking you."
                             ),
                         ));
+                        answered.insert(call.id.clone());
                         let _ = tx.send(Event::Notice(format!(
                             "{} failed {n}× with the same input — stopping the loop",
                             call.function.name
@@ -695,6 +729,21 @@ impl Agent {
                 } else {
                     self.history
                         .push(Message::tool(&call.id, &call.function.name, content));
+                }
+                answered.insert(call.id.clone());
+            }
+
+            // Backfill any tool_calls left unanswered by an early break, so the
+            // native tool protocol stays well-formed (no orphaned tool_calls).
+            if !self.text_mode {
+                for call in &result.calls {
+                    if !answered.contains(&call.id) {
+                        self.history.push(Message::tool(
+                            &call.id,
+                            &call.function.name,
+                            "Not run — the turn was interrupted before this tool executed.",
+                        ));
+                    }
                 }
             }
         }
@@ -745,6 +794,34 @@ impl Agent {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("codegraph")
             });
+        }
+        // User-defined tools (config `[[tools]]`). Only for the top-level agent
+        // and never in plan mode, since they run shell commands.
+        if self.depth == 0 && !self.mode.read_only() {
+            for ct in &self.cfg.custom_tools {
+                let props: serde_json::Map<String, Value> = ct
+                    .args
+                    .iter()
+                    .map(|a| {
+                        (
+                            a.clone(),
+                            serde_json::json!({"type": "string", "description": a}),
+                        )
+                    })
+                    .collect();
+                list.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": ct.name,
+                        "description": ct.description,
+                        "parameters": {
+                            "type": "object",
+                            "properties": props,
+                            "required": ct.args,
+                        }
+                    }
+                }));
+            }
         }
         list
     }
@@ -994,6 +1071,53 @@ impl Agent {
                     view: tools::ToolView::Plain,
                 };
             }
+        }
+        // User-defined tool? Run its shell-command template. Only the top-level
+        // agent has them, and never in plan mode (advertised_tools enforces the
+        // same, this is defence in depth).
+        if let Some(ct) = self
+            .cfg
+            .custom_tools
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+        {
+            if self.depth > 0 || self.mode.read_only() {
+                return tools::Outcome {
+                    ok: false,
+                    content: format!("ERROR: custom tool `{name}` is not available here."),
+                    summary: format!("{name}: unavailable"),
+                    view: tools::ToolView::Plain,
+                };
+            }
+            let command = tools::expand_custom_command(&ct.command, &ct.args, &args);
+            // Route through the same approval + run path as run_command.
+            let run_args = serde_json::json!({ "command": command });
+            if ct.mutating && !self.approve("run_command", &run_args, tx).await {
+                return tools::Outcome {
+                    ok: false,
+                    content: "ERROR: the user denied this action.".into(),
+                    summary: format!("{name}: denied"),
+                    view: tools::ToolView::Plain,
+                };
+            }
+            let _ = tx.send(Event::ToolStart {
+                id: call.id.clone(),
+                name: name.clone(),
+                label: format!("{name}: {}", tools::first_line(&command)),
+                depth: self.depth,
+            });
+            let started = std::time::Instant::now();
+            let outcome = tools::run("run_command", run_args, &self.ctx).await;
+            let _ = tx.send(Event::ToolEnd {
+                id: call.id.clone(),
+                ok: outcome.ok,
+                summary: format!("{name} → {}", outcome.summary),
+                detail: outcome.content.clone(),
+                view: outcome.view.clone(),
+            });
+            crate::tel_info!("tool", "custom tool ran", "name" => name, "ms" => started.elapsed().as_millis());
+            return outcome;
         }
         if tools::spec(&name).is_none() {
             let names: Vec<&str> = tools::specs().iter().map(|s| s.name).collect();

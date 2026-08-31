@@ -201,10 +201,11 @@ pub struct Config {
     /// want spinners and gauges but find the text reveal distracting. Requires
     /// `motion` to have any effect.
     pub reveal: bool,
-    /// Capture the mouse for wheel-scrolling. On (default) means the wheel
-    /// scrolls the transcript, but the terminal's own click-drag text selection
-    /// is suppressed. Turn it off (`/mouse`) to select and copy text with the
-    /// mouse the normal way; scroll then uses pgup/pgdn or the keyboard.
+    /// Capture the mouse for wheel-scrolling. Off by default so the terminal's
+    /// own click-drag text selection and copy work normally — the thing most
+    /// people reach for. Turn it on (`/mouse`, or here) if you would rather the
+    /// wheel scroll the transcript; you then scroll with pgup/pgdn or the
+    /// keyboard when selecting.
     pub mouse_capture: bool,
 
     /// Palette name, or "auto"/"" for the terminal's own 16 colours.
@@ -257,6 +258,35 @@ pub struct Config {
     pub subagent_review_rounds: u32,
     /// How deep delegation may nest. 1 = subagents cannot delegate further.
     pub max_subagent_depth: u8,
+
+    /// User-defined tools, each backed by a shell command. Declared in config as
+    /// `[[tools]]` tables; the agent can call them like any built-in.
+    #[serde(default, rename = "tools")]
+    pub custom_tools: Vec<CustomTool>,
+}
+
+/// A user-defined tool: a named, described shell command the agent may call.
+/// `{arg}` placeholders in `command` are filled from the call's arguments (and
+/// shell-quoted), so a user can teach koda a project-specific action without
+/// touching Rust. Runs through the same approval + shell path as run_command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomTool {
+    /// Tool name the model calls (letters, digits, underscores).
+    pub name: String,
+    /// One line telling the model what it does and when to use it.
+    pub description: String,
+    /// Shell command with `{arg_name}` placeholders.
+    pub command: String,
+    /// Parameter names the command expects; each becomes a string argument.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Whether calling it needs approval (defaults to true — it runs a command).
+    #[serde(default = "default_true")]
+    pub mutating: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -282,7 +312,7 @@ impl Default for Config {
             sync_output: true,
             motion: true,
             reveal: true,
-            mouse_capture: true,
+            mouse_capture: false,
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,
@@ -301,6 +331,7 @@ impl Default for Config {
             subagent_max_steps: 12,
             subagent_review_rounds: 1,
             max_subagent_depth: 1,
+            custom_tools: Vec::new(),
         }
     }
 }
@@ -557,6 +588,21 @@ subagent_max_steps = 12
 # send it back for another pass this many times.
 subagent_review_rounds = 1
 max_subagent_depth = 1
+
+# Your own tools. Each [[tools]] entry adds a command the agent can call like a
+# built-in; {arg} placeholders are filled from the call and shell-quoted. Runs
+# through the normal approval + shell path.
+#
+# [[tools]]
+# name = "typecheck"
+# description = "Type-check the project and report errors."
+# command = "npm run -s typecheck"
+#
+# [[tools]]
+# name = "grep_todos"
+# description = "Find TODO comments matching a term."
+# command = "rg -n 'TODO.*{term}' ."
+# args = ["term"]
 "#;
 
 #[cfg(test)]

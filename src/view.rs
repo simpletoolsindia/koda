@@ -744,7 +744,7 @@ fn render_item(
                 Span::styled(format!("{} ", g.pending), t.dim()),
                 Span::styled(label, t.dim().add_modifier(Modifier::ITALIC)),
                 Span::styled(
-                    if *expanded { "" } else { "  ctrl+t" },
+                    if *expanded { "  ctrl+t hide" } else { "  ctrl+t expand" },
                     t.dim(),
                 ),
             ])];
