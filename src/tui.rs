@@ -52,13 +52,13 @@ const SPINNER_DELAY: Duration = Duration::from_millis(200);
 const WELCOME_ANIM: Duration = Duration::from_millis(1400);
 
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
-const BANNER_ART: [&str; 6] = [
-    "█  ██   ██████   ██████    █████  ",
-    "█ ██    ██   ██  ██   ██  ██   ██ ",
-    "███     ██   ██  ██   ██  ███████ ",
-    "█ ██    ██   ██  ██   ██  ██   ██ ",
-    "█  ██   ██████   ██████   ██   ██ ",
-    "                                  ",
+/// The KODA banner art, shared by the static welcome and its entrance shimmer.
+/// A condensed half-block ("▀▄█") face — sleeker and more modern than solid
+/// full-block letters, and only 3 rows tall so it stays compact.
+const BANNER_ART: [&str; 3] = [
+    "█ ▄  ▄▀▀▄  ▄▀▀▄  ▄▀▀█ ",
+    "█▀▄  █  █  █  █  █▄▄█ ",
+    "▀ ▀  ▀▄▄▀  ▀▄▄▀  ▀  ▀ ",
 ];
 
 const COMMANDS: &[(&str, &str)] = &[
@@ -197,6 +197,10 @@ pub struct App {
     /// so the status row can say "cancelling…" instead of pretending the work
     /// stopped instantly (a tool call in flight still has to unwind).
     cancelling: bool,
+    /// What the agent is doing right now (e.g. "reading cart.py", "running the
+    /// tests"), from the latest tool start — shown in the working status so the
+    /// user sees live activity, not a generic spinner.
+    activity: Option<String>,
     /// How much motion the environment and config allow.
     motion: anim::Motion,
     /// User preference for the streaming text reveal specifically. Gated by
@@ -285,6 +289,7 @@ impl App {
             Event::TurnStart => {
                 self.busy = true;
                 self.cancelling = false;
+                self.activity = None;
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
             }
@@ -300,6 +305,8 @@ impl App {
                 // under a running tool would read as though it were still being
                 // written.
                 self.transcript.finish_reveal();
+                // Surface what the agent is doing right now in the status row.
+                self.activity = Some(activity_label(&name, &label));
                 // `todo` has a dedicated plan card, so a tool row beside it
                 // would say the same thing twice.
                 if name != "todo" {
@@ -314,6 +321,9 @@ impl App {
                 detail,
                 view,
             } => {
+                // Done with this tool — back to a generic "working" until the
+                // next tool starts or the turn ends.
+                self.activity = None;
                 // A write may have created a file, so `@` completion is stale.
                 if summary.starts_with("created") || summary.starts_with("wrote") {
                     self.files.invalidate();
@@ -373,6 +383,7 @@ impl App {
                 self.transcript.finish_reveal();
                 self.busy = false;
                 self.cancelling = false;
+                self.activity = None;
                 self.turn_started = None;
                 self.tokens = history_tokens;
                 // Prompts the user queued while koda was working are picked up
@@ -470,20 +481,21 @@ impl App {
             return;
         }
 
-        // KODA as block-letter art with a diagonal colour gradient across the
-        // letters — the look modern CLIs (Claude Code, Gemini CLI, oh-my-logo)
-        // converged on. The gradient runs accent → accent-alt over row+col, so
-        // it reads as a single lit object rather than flat text. Falls back to a
-        // flat accent when the palette is not truecolor (ANSI/mono).
+        // KODA in a condensed half-block face with a horizontal 3-stop colour
+        // gradient (accent → accent-alt → info) so it reads as one lit object.
+        // Falls back to a flat accent on non-truecolor palettes (ANSI/mono).
         let art = BANNER_ART;
-        let rows = art.len();
         let cols = art.iter().map(|r| r.chars().count()).max().unwrap_or(1);
-        let grad = |row: usize, col: usize| -> ratatui::style::Color {
-            match (as_rgb(t.accent), as_rgb(t.accent_alt)) {
-                (Some(a), Some(b)) => {
-                    // Diagonal position 0..1 across the whole banner.
-                    let d = (row as f32 / rows as f32 + col as f32 / cols as f32) / 2.0;
-                    let (r, g, bl) = anim::lerp_rgb(a, b, d);
+        let grad = |col: usize| -> ratatui::style::Color {
+            match (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info)) {
+                (Some(a), Some(b), Some(c)) => {
+                    // 0..1 across the width; first half a→b, second half b→c.
+                    let x = col as f32 / cols.max(1) as f32;
+                    let (r, g, bl) = if x < 0.5 {
+                        anim::lerp_rgb(a, b, x * 2.0)
+                    } else {
+                        anim::lerp_rgb(b, c, (x - 0.5) * 2.0)
+                    };
                     ratatui::style::Color::Rgb(r, g, bl)
                 }
                 _ => t.accent,
@@ -492,9 +504,7 @@ impl App {
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::default());
-        for (i, row) in art.iter().enumerate() {
-            // Colour each character by its gradient position; group nothing, the
-            // banner is small enough that per-cell spans are cheap and paint once.
+        for row in art.iter() {
             let mut spans = vec![Span::raw("  ".to_string())];
             for (j, ch) in row.chars().enumerate() {
                 if ch == ' ' {
@@ -502,19 +512,12 @@ impl App {
                 } else {
                     spans.push(Span::styled(
                         ch.to_string(),
-                        Style::default().fg(grad(i, j)).add_modifier(Modifier::BOLD),
+                        Style::default().fg(grad(j)).add_modifier(Modifier::BOLD),
                     ));
                 }
             }
             lines.push(Line::from(spans));
         }
-        lines.push(Line::from(vec![
-            Span::raw("  ".to_string()),
-            Span::styled(
-                format!("terminal coding agent for local models  {}  v{}", g.sep, env!("CARGO_PKG_VERSION")),
-                t.dim(),
-            ),
-        ]));
         lines.push(Line::default());
         // One rotating tip so the first thing on screen also teaches a feature.
         lines.push(Line::from(vec![
@@ -1605,12 +1608,14 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let chunks = Layout::vertical([
         Constraint::Min(1),          // transcript
-        Constraint::Length(1),       // hint / state row
+        Constraint::Length(1),       // hint / state row (mode + status + keys)
+        Constraint::Length(if m.tiny { 0 } else { 1 }), // tip row (hidden on tiny)
         Constraint::Length(input_h), // input
         Constraint::Length(1),       // powerline status bar
     ])
     .split(area);
-    let (body, rule, input, status) = (chunks[0], chunks[1], chunks[2], chunks[3]);
+    let (body, rule, tip_area, input, status) =
+        (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4]);
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
     let total_before = app.transcript.total_lines();
@@ -1662,6 +1667,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let t = &app.theme;
     f.render_widget(Paragraph::new(hint_row(app, area.width, m)), rule);
+    f.render_widget(Paragraph::new(tip_row(app, area.width)), tip_area);
 
     // Input.
     let prompt_style = if app.busy {
@@ -1880,7 +1886,9 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 g.thinking[0]
             };
             left.push(Span::styled(format!(" {glyph} "), t.fg(t.accent)));
-            let label = format!("working {}", anim::short_elapsed(started.elapsed()));
+            // Show what the agent is doing right now, not a generic "working".
+            let verb = app.activity.as_deref().unwrap_or("working");
+            let label = format!("{verb}  {}", anim::short_elapsed(started.elapsed()));
             if app.motion.animates() {
                 // A highlight sweeping the label reads as ongoing activity
                 // without moving any text around.
@@ -1906,14 +1914,6 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
         (false, _) => {
             left.push(Span::styled(format!(" {} ", g.ready), t.emphasis(t.success)));
             left.push(Span::styled("ready".to_string(), t.dim()));
-            // When idle with an empty composer, rotate a feature tip so the bar
-            // teaches the app instead of sitting blank. Kept short and dim.
-            if app.editor.is_empty() && !m.tiny {
-                left.push(Span::styled(format!("  {} ", g.sep), t.dim()));
-                // Offset so the status tip never echoes the welcome banner's tip
-                // (both draw from the same rotating list).
-                left.push(Span::styled(next_tip().to_string(), t.dim()));
-            }
         }
     }
 
@@ -1971,6 +1971,54 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     if (width as usize) > lw + rw + 2 {
         spans.push(Span::raw(" ".repeat(width as usize - lw - rw - 1)));
         spans.extend(right);
+    }
+    truncate_line(spans, width)
+}
+
+/// A short present-tense phrase for what a tool is doing, shown live in the
+/// working status. `label` is the tool's own summary (e.g. a path or command);
+/// we pair it with a verb so the user sees "reading cart.py", "running tests".
+fn activity_label(name: &str, label: &str) -> String {
+    let target: String = label.trim().chars().take(48).collect();
+    let verb = match name {
+        "read_file" => "reading",
+        "write_file" => "writing",
+        "edit_file" => "editing",
+        "list_dir" => "listing",
+        "find_files" => "finding files",
+        "search" => "searching",
+        "run_command" => "running",
+        "codegraph" => "mapping the code",
+        "delegate" => "delegating",
+        "web_search" => "searching the web",
+        "skill" => "reading a skill",
+        "remember" => "noting",
+        "ask_user" => "waiting for you",
+        "todo" => "planning",
+        _ => "working on",
+    };
+    if target.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{verb} {target}")
+    }
+}
+
+/// A dedicated row for the rotating feature tip, below the hint row and above
+/// the input — so it has room and doesn't fight the mode/status/keys.
+fn tip_row(app: &App, width: u16) -> Line<'static> {
+    let t = &app.theme;
+    let tip = next_tip();
+    let mut spans = vec![
+        Span::styled(
+            " tip ".to_string(),
+            Style::default().fg(Color::Black).bg(t.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {tip}"), t.dim()),
+    ];
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if (width as usize) > used {
+        spans.push(Span::raw(" ".repeat(width as usize - used)));
     }
     truncate_line(spans, width)
 }
@@ -2178,10 +2226,9 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
 /// visible jump. Reduced-motion and non-TTY paths never reach here.
 fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration) {
     let t = &app.theme;
-    let (Some(a), Some(b)) = (as_rgb(t.accent), as_rgb(t.accent_alt)) else {
+    let (Some(a), Some(b), Some(c)) = (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info)) else {
         return; // No gradient on non-truecolor palettes; nothing to shimmer.
     };
-    let rows = BANNER_ART.len();
     let cols = BANNER_ART.iter().map(|r| r.chars().count()).max().unwrap_or(1);
     // A band that sweeps across the banner width over the animation window.
     let bright = anim::shimmer(cols, elapsed, WELCOME_ANIM);
@@ -2197,9 +2244,14 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
                 spans.push(Span::raw(" ".to_string()));
                 continue;
             }
-            let d = (i as f32 / rows as f32 + j as f32 / cols as f32) / 2.0;
-            let (mut r, mut gg, mut bl) = anim::lerp_rgb(a, b, d);
-            // Lift toward white where the band is brightest.
+            // Same horizontal 3-stop gradient as the static banner.
+            let x = j as f32 / cols.max(1) as f32;
+            let (mut r, mut gg, mut bl) = if x < 0.5 {
+                anim::lerp_rgb(a, b, x * 2.0)
+            } else {
+                anim::lerp_rgb(b, c, (x - 0.5) * 2.0)
+            };
+            // Lift toward white where the sweeping band is brightest.
             let lift = bright.get(j).copied().unwrap_or(0.0);
             if lift > 0.0 {
                 let (wr, wg, wb) = anim::lerp_rgb((r, gg, bl), (255, 255, 255), lift * 0.85);
@@ -2522,6 +2574,7 @@ pub async fn run(
         follow: true,
         busy: false,
         cancelling: false,
+        activity: None,
         motion: anim::Motion::Full,
         reveal_pref: cfg.reveal,
         turn_started: None,
