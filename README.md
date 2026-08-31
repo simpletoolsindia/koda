@@ -44,6 +44,17 @@ Requires Rust 1.82+ (`brew install rust` or [rustup](https://rustup.rs)).
 
 ```sh
 git clone https://github.com/simpletoolsindia/koda.git && cd koda
+./install.sh
+```
+
+`install.sh` builds the release binary and drops it in `~/.local/bin` (no sudo).
+Install elsewhere with `PREFIX=/usr/local ./install.sh`. If that directory is
+not on your `PATH`, the script tells you the one line to add.
+
+Or do it by hand:
+
+```sh
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
 cargo build --release
 cp target/release/koda ~/.local/bin/     # or /usr/local/bin
 ```
