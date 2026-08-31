@@ -3388,9 +3388,35 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
             true
         }
         event::Event::Paste(text) => {
-            // A large paste (long or multi-line) is stashed and shown as a short
-            // @pasteN token so the composer stays readable; it is expanded back
-            // to the full text on submit. Small pastes insert inline as before.
+            // Route the paste to whatever has focus. Pasting into the LLM setup
+            // fields (URL / model / API key) or an inline settings editor must
+            // land there, not in the chat composer behind the overlay.
+            if let Some(s) = app.setup.as_mut() {
+                // Setup fields are single-line; strip newlines so a copied line
+                // with a trailing return doesn't corrupt the field.
+                let clean: String = text.replace(['\n', '\r'], "");
+                s.focused().insert(&clean);
+                return true;
+            }
+            if let Some(s) = app.settings.as_mut() {
+                if s.editing.is_some() {
+                    let multiline = s.editing_multiline();
+                    for ch in text.chars() {
+                        if ch == '\r' {
+                            continue;
+                        }
+                        if ch == '\n' && !multiline {
+                            continue; // single-line field: drop newlines
+                        }
+                        s.edit_char(ch);
+                    }
+                    return true;
+                }
+            }
+            // Otherwise it's the chat composer. A large paste (long or
+            // multi-line) is stashed and shown as a short @pasteN token so the
+            // composer stays readable; it is expanded back to the full text on
+            // submit. Small pastes insert inline as before.
             let trimmed = text.trim_end_matches('\n');
             let big = trimmed.len() > 200 || trimmed.contains('\n');
             if big {
