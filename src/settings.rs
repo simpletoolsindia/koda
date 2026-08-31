@@ -169,7 +169,16 @@ impl Settings {
             if forward {
                 self.editing = Some(match row {
                     Row::SearxUrl => self.cfg.searx_url.clone(),
-                    Row::SystemPrompt => self.cfg.system_prompt.clone(),
+                    // Editing the system prompt: seed the textarea with the
+                    // current custom prompt, or the built-in one when none is
+                    // set, so the user edits from real text instead of a blank.
+                    Row::SystemPrompt => {
+                        if self.cfg.system_prompt.trim().is_empty() {
+                            crate::prompt::base_prompt().to_string()
+                        } else {
+                            self.cfg.system_prompt.clone()
+                        }
+                    }
                     _ => String::new(),
                 });
             }
@@ -251,10 +260,23 @@ impl Settings {
         }
     }
 
+    /// True when the open editor is a multi-line textarea (the system prompt),
+    /// so the key handler treats enter as a newline and ctrl+s as save.
+    pub fn editing_multiline(&self) -> bool {
+        self.editing.is_some() && self.current() == Row::SystemPrompt
+    }
+
     /// Backspace in the open inline editor.
     pub fn edit_backspace(&mut self) {
         if let Some(buf) = self.editing.as_mut() {
             buf.pop();
+        }
+    }
+
+    /// Clear the open inline editor (ctrl+u).
+    pub fn edit_clear(&mut self) {
+        if let Some(buf) = self.editing.as_mut() {
+            buf.clear();
         }
     }
 
@@ -269,7 +291,15 @@ impl Settings {
                     self.cfg.search_backend = "searxng".into();
                 }
             }
-            Row::SystemPrompt => self.cfg.system_prompt = val,
+            Row::SystemPrompt => {
+                // If the user left it identical to the built-in, store empty so
+                // it still reads as "(built-in)" and tracks future prompt updates.
+                self.cfg.system_prompt = if val.trim() == crate::prompt::base_prompt().trim() {
+                    String::new()
+                } else {
+                    val
+                };
+            }
             _ => {}
         }
         self.dirty = true;
@@ -326,6 +356,13 @@ impl Settings {
     }
 
     pub fn draw(&self, f: &mut Frame, area: Rect, t: &Theme, g: &Glyphs) {
+        // A dedicated, roomy textarea when editing the system prompt: the whole
+        // overlay becomes a wrapped multi-line editor showing the real prompt
+        // text, so the user can see and edit it rather than typing blind.
+        if self.editing_multiline() {
+            self.draw_prompt_editor(f, area, t);
+            return;
+        }
         let w = area.width.saturating_sub(8).clamp(30, 74);
         let h = (Row::ALL.len() as u16 + 4).min(area.height.saturating_sub(2).max(6));
         let rect = Rect {
@@ -394,6 +431,70 @@ impl Settings {
         f.render_widget(Clear, rect);
         f.render_widget(Paragraph::new(lines).block(block), rect);
     }
+
+    /// A full-size, wrapped multi-line editor for the system prompt. Shows the
+    /// current text (built-in when none was set) with a caret, scrolled so the
+    /// end stays in view. Enter inserts a newline; ctrl+s saves; esc cancels.
+    fn draw_prompt_editor(&self, f: &mut Frame, area: Rect, t: &Theme) {
+        let buf = self.editing.as_deref().unwrap_or("");
+        let w = area.width.saturating_sub(6).clamp(40, 100);
+        let h = area.height.saturating_sub(4).clamp(8, 40);
+        let rect = Rect {
+            x: area.width.saturating_sub(w) / 2,
+            y: area.height.saturating_sub(h) / 2,
+            width: w,
+            height: h,
+        };
+        let inner_w = rect.width.saturating_sub(2) as usize;
+        let body_h = rect.height.saturating_sub(2) as usize;
+
+        // Wrap the text (respecting explicit newlines), append a caret at the end.
+        let mut wrapped: Vec<String> = Vec::new();
+        for para in buf.split('\n') {
+            if para.is_empty() {
+                wrapped.push(String::new());
+                continue;
+            }
+            let mut line = String::new();
+            for word in para.split_inclusive(' ') {
+                if line.chars().count() + word.chars().count() > inner_w && !line.is_empty() {
+                    wrapped.push(std::mem::take(&mut line));
+                }
+                line.push_str(word);
+            }
+            wrapped.push(line);
+        }
+        if wrapped.is_empty() {
+            wrapped.push(String::new());
+        }
+        // Caret on the last line.
+        if let Some(last) = wrapped.last_mut() {
+            last.push('▏');
+        }
+        // Scroll so the caret (last line) is visible.
+        let skip = wrapped.len().saturating_sub(body_h);
+        let lines: Vec<Line> = wrapped
+            .into_iter()
+            .skip(skip)
+            .map(|l| Line::from(Span::styled(l, t.body())))
+            .collect();
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(t.fg(t.border_focus))
+            .title(Span::styled(
+                " Edit system prompt ",
+                Style::default().fg(t.border_focus).add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(Span::styled(
+                " enter = newline · ctrl+s save · ctrl+u clear · esc cancel ",
+                t.dim(),
+            ));
+
+        f.render_widget(Clear, rect);
+        f.render_widget(Paragraph::new(lines).block(block), rect);
+    }
 }
 
 const DETAIL: [&str; 3] = ["simple", "medium", "high"];
@@ -427,4 +528,59 @@ fn prev_mode(m: Mode) -> Mode {
 
 fn prev_tier(a: AutoTier) -> AutoTier {
     a.next().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings() -> Settings {
+        Settings::new(&Config::default())
+    }
+
+    fn select(s: &mut Settings, row: Row) {
+        s.sel = Row::ALL.iter().position(|r| *r == row).unwrap();
+    }
+
+    #[test]
+    fn editing_system_prompt_seeds_the_builtin_when_empty() {
+        let mut s = settings();
+        assert!(s.cfg.system_prompt.is_empty(), "default has no custom prompt");
+        select(&mut s, Row::SystemPrompt);
+        s.change(true); // enter -> open editor
+        let buf = s.editing.as_deref().unwrap_or("");
+        assert!(!buf.is_empty(), "editor should be seeded, not blank");
+        assert_eq!(buf, crate::prompt::base_prompt(), "seeded with the built-in prompt");
+        assert!(s.editing_multiline(), "system prompt is a multi-line edit");
+    }
+
+    #[test]
+    fn committing_the_unchanged_builtin_stores_empty() {
+        let mut s = settings();
+        select(&mut s, Row::SystemPrompt);
+        s.change(true);
+        // Commit without changing anything -> stays "(built-in)".
+        s.edit_commit();
+        assert!(s.cfg.system_prompt.is_empty(), "unchanged built-in stays empty");
+    }
+
+    #[test]
+    fn committing_a_real_edit_stores_the_custom_prompt() {
+        let mut s = settings();
+        select(&mut s, Row::SystemPrompt);
+        s.change(true);
+        s.edit_char('\n');
+        s.edit_char('X');
+        s.edit_commit();
+        assert!(s.cfg.system_prompt.ends_with('X'), "custom edit is stored: {:?}", s.cfg.system_prompt);
+        assert!(s.dirty);
+    }
+
+    #[test]
+    fn searx_url_edit_is_single_line() {
+        let mut s = settings();
+        select(&mut s, Row::SearxUrl);
+        s.change(true);
+        assert!(!s.editing_multiline(), "url field is single-line");
+    }
 }

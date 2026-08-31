@@ -885,11 +885,22 @@ impl App {
         let Some(s) = self.settings.as_mut() else { return };
         // Inline text editor open (SearXNG URL, system prompt): capture typing.
         if s.editing.is_some() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let multiline = s.editing_multiline();
             match key.code {
+                // In the multi-line system-prompt editor, enter inserts a
+                // newline and ctrl+s saves; a single-line field saves on enter.
+                KeyCode::Enter if multiline && !ctrl => s.edit_char('\n'),
+                KeyCode::Char('s') if ctrl => {
+                    s.edit_commit();
+                    self.apply_settings();
+                }
                 KeyCode::Enter => {
                     s.edit_commit();
                     self.apply_settings();
                 }
+                KeyCode::Char('j') if ctrl => s.edit_char('\n'),
+                KeyCode::Char('u') if ctrl => s.edit_clear(),
                 KeyCode::Esc => s.edit_cancel(),
                 KeyCode::Backspace => s.edit_backspace(),
                 KeyCode::Char(c) => s.edit_char(c),

@@ -37,6 +37,13 @@ Style: terse. No preamble, no restating the request, no summaries of what you ar
 to do. Reply in plain text; use fenced code blocks only for code. The user sees tool \
 calls and diffs already, so do not repeat them.";
 
+/// The built-in base system prompt, exposed so the settings editor can
+/// pre-populate its textarea when the user has no custom prompt yet — editing
+/// from the real text is far easier than starting from a blank field.
+pub fn base_prompt() -> &'static str {
+    BASE
+}
+
 const TEXT_PROTOCOL: &str = "\
 Tool calls use this exact format, one per message, at the end of your reply:
 
