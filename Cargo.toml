@@ -1,0 +1,46 @@
+[package]
+name = "koda"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Lightweight terminal coding agent for local OpenAI-compatible LLMs"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+globset = "0.4"
+ignore = "0.4"
+ratatui = "0.29"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+    "charset",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+similar = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "process",
+    "time",
+    "fs",
+    "io-util",
+] }
+toml = "0.8"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
