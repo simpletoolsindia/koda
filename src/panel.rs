@@ -337,6 +337,10 @@ pub fn status_line(
 }
 
 /// `[Ctrl+O: Expand]` — shown only when there is genuinely more to see.
+/// The affordance shown under a clipped block. When the block is already
+/// expanded (e.g. via the sticky ctrl+r/ctrl+t preference) the body is not
+/// clipped, so this hint is simply not emitted — it disappears once the work
+/// is done, rather than lying "expand" at something already open.
 pub fn expand_hint(t: &Theme) -> Span<'static> {
     Span::styled("  ctrl+r expand".to_string(), t.dim())
 }

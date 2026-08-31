@@ -59,6 +59,11 @@ pub enum Event {
         view: tools::ToolView,
     },
     Notice(String),
+    /// A lightweight, status-only note that a running subagent is doing
+    /// something (thinking, or a short prose beat). The transcript is left
+    /// clean — this only updates the working-status row so the user can see the
+    /// subagent is alive and what it is up to.
+    SubActivity(String),
     Error(String),
     Models(Vec<String>),
     Skills(Vec<(String, String)>),
@@ -1606,7 +1611,7 @@ impl Agent {
             let Some(raw) = tok.strip_prefix('@') else {
                 continue;
             };
-            let raw = raw.trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ':' | ';'));
+            let raw = raw.trim_end_matches(['.', ',', ')', ':', ';']);
             let path = std::path::Path::new(raw);
             if !tools::is_image_path(path) {
                 continue;
@@ -2709,6 +2714,10 @@ fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>,
                 acc.text.push_str(&display);
                 if !quiet {
                     let _ = tx.send(Event::Text(display));
+                } else {
+                    // A subagent's prose is kept out of the transcript, but a
+                    // status beat tells the user it is actively working.
+                    let _ = tx.send(Event::SubActivity("working".into()));
                 }
             }
             acc.text_calls.extend(blocks);
@@ -2717,6 +2726,8 @@ fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>,
             acc.reasoning_len += chunk.len();
             if !quiet {
                 let _ = tx.send(Event::Reasoning(chunk));
+            } else {
+                let _ = tx.send(Event::SubActivity("thinking".into()));
             }
         }
         StreamEvent::ToolCallDelta {

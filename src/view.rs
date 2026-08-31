@@ -774,18 +774,28 @@ fn render_item(
                 return Vec::new();
             }
             let open = *expanded || expand_reasoning;
+            // Roughly 4 characters per token — the same convention koda uses to
+            // budget context — so the user sees how much thinking a model spent,
+            // not just how long it took.
+            let toks = text.chars().count() / 4;
             let label = match elapsed {
+                Some(d) if toks > 0 => format!("thought for {} · ~{} tokens", human_ms(*d), toks),
                 Some(d) => format!("thought for {}", human_ms(*d)),
+                None if toks > 0 => format!("thinking {} · ~{} tokens", human_ms(started.elapsed()), toks),
                 None => format!("thinking {}", human_ms(started.elapsed())),
             };
-            let mut lines = vec![Line::from(vec![
-                Span::styled(format!("{} ", g.pending), t.dim()),
-                Span::styled(label, t.dim().add_modifier(Modifier::ITALIC)),
-                Span::styled(
-                    if open { "  ctrl+t hide" } else { "  ctrl+t expand" },
-                    t.dim(),
-                ),
-            ])];
+            let mut lines = vec![Line::from({
+                let mut row = vec![
+                    Span::styled(format!("{} ", g.pending), t.dim()),
+                    Span::styled(label, t.dim().add_modifier(Modifier::ITALIC)),
+                ];
+                // Only advertise the toggle when it would do something new:
+                // show "ctrl+t expand" while collapsed, nothing once expanded.
+                if !open {
+                    row.push(Span::styled("  ctrl+t expand".to_string(), t.dim()));
+                }
+                row
+            })];
             if open {
                 for para in text.split('\n') {
                     for l in md::wrap_spans(
@@ -1325,22 +1335,34 @@ fn render_tool(
             out
         }
     };
-    // Running tool: show an indeterminate progress bar under the header so a
-    // long call (a build, a test run) visibly pulses rather than looking hung.
-    // The band position is derived from elapsed time, so it moves smoothly as
-    // the animation clock ticks.
+    // Running tool: show a clear indeterminate progress bar under the header so
+    // a long call (a build, a test run) visibly moves rather than looking hung.
+    // A bright block of fixed width sweeps back and forth across a track — a
+    // distinct "marquee" style that reads unmistakably as in-progress, derived
+    // from elapsed time so it animates on the frame clock.
     let mut lines = lines;
-    if ok.is_none() && started.elapsed().as_millis() > 300 {
-        let bar_w = avail.saturating_sub(6).clamp(8, 40);
-        let bar = crate::anim::shimmer(bar_w, started.elapsed(), Duration::from_millis(1100));
+    if ok.is_none() && started.elapsed().as_millis() > 250 {
+        let track = avail.saturating_sub(4).clamp(10, 36);
+        let block = (track / 5).max(3);
+        let span = track.saturating_sub(block).max(1);
+        let period = 1600u128;
+        let phase = (started.elapsed().as_millis() % period) as f32 / period as f32;
+        let tri = if phase < 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
+        let pos = (tri * span as f32).round() as usize;
         let mut spans = vec![Span::styled(" ".to_string(), t.dim())];
-        for b in bar {
-            let ch = if b > 0.5 { '█' } else if b > 0.15 { '▓' } else { '░' };
-            let colour = crate::theme::mix(t.muted, t.accent, b);
-            spans.push(Span::styled(ch.to_string(), t.fg(colour)));
+        for i in 0..track {
+            let on = i >= pos && i < pos + block;
+            if on {
+                spans.push(Span::styled("━".to_string(), t.fg(t.accent)));
+            } else {
+                spans.push(Span::styled("─".to_string(), t.dim()));
+            }
         }
         lines.push(Line::from(spans));
     }
+    // A blank line after every tool block gives the transcript breathing room,
+    // so tool calls, diffs and prose don't run together into a dense wall.
+    lines.push(Line::default());
     indent_all(lines, indent_w, t, g, depth)
 }
 
@@ -1687,6 +1709,31 @@ mod tests {
         assert!(t.toggle_last_reasoning());
         t.relayout(60);
         assert!(flat(&t.window(0, 20)).contains("carefully"));
+    }
+
+    #[test]
+    fn reasoning_shows_a_token_estimate() {
+        let mut t = tr();
+        // ~120 chars of reasoning -> ~30 tokens at 4 chars/token.
+        t.reasoning_delta(&"analyze the failing case and pick the fix. ".repeat(3));
+        t.assistant_delta("done");
+        t.relayout(80);
+        let text = flat(&t.window(0, 20));
+        assert!(text.contains("thought for"), "{text}");
+        assert!(text.contains("tokens"), "reasoning should show token estimate: {text}");
+    }
+
+    #[test]
+    fn running_tool_shows_a_progress_bar() {
+        let mut t = tr();
+        t.tool_start("1".into(), "run_command".into(), "cargo build".into(), 0);
+        // Backdate the start so it's past the 250ms reveal threshold.
+        if let Item::Tool { started, .. } = &mut t.blocks.last_mut().unwrap().item {
+            *started = Instant::now() - Duration::from_millis(600);
+        }
+        t.relayout(80);
+        let text = flat(&t.window(0, 20));
+        assert!(text.contains('━') || text.contains('─'), "running tool should show a progress track: {text}");
     }
 
     #[test]

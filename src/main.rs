@@ -368,6 +368,7 @@ async fn headless(
                 drop(reply);
             }
             Event::Notice(msg) => eprintln!("· {msg}"),
+            Event::SubActivity(_) => {}
             Event::Error(msg) => {
                 eprintln!("✗ {msg}");
                 failed = true;

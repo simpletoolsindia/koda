@@ -381,6 +381,12 @@ impl App {
                     self.note(msg);
                 }
             }
+            Event::SubActivity(what) => {
+                // A subagent is alive and doing something — surface it in the
+                // status row so the user isn't staring at a frozen "working".
+                self.activity = Some(format!("↳ subagent: {what}"));
+                self.follow = true;
+            }
             Event::Error(msg) => {
                 self.transcript.error(msg);
                 self.follow = true;
@@ -1027,9 +1033,21 @@ impl App {
     }
 
     fn key_up(&mut self) {
+        // Multi-line composing: move the caret up within the input first.
         if !self.editor.on_first_line() {
             self.editor.up();
-        } else if !self.editor.history_prev() {
+            return;
+        }
+        // Empty input is the common case when the user wants to read back through
+        // the agent's responses — scroll the transcript, don't hijack it for
+        // input history. History recall stays available while composing (below).
+        if self.editor.is_empty() {
+            self.scroll_by(-1);
+            return;
+        }
+        // There is text and the caret is on the first line: recall older history,
+        // falling back to a scroll once history is exhausted.
+        if !self.editor.history_prev() {
             self.scroll_by(-1);
         }
     }
@@ -1037,7 +1055,13 @@ impl App {
     fn key_down(&mut self) {
         if !self.editor.on_last_line() {
             self.editor.down();
-        } else if !self.editor.history_next() {
+            return;
+        }
+        if self.editor.is_empty() {
+            self.scroll_by(1);
+            return;
+        }
+        if !self.editor.history_next() {
             self.scroll_by(1);
         }
     }
