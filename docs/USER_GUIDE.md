@@ -547,6 +547,14 @@ file under `<project>/.koda/learning/` you can read, edit, or delete.
   here (and ones that only ever failed), the project's function-naming convention,
   and library preferences. A rule needs repeated evidence before it is proposed,
   so one-offs are ignored.
+- **Learning from your corrections** — koda remembers what it last wrote to each
+  file (under `.koda/learning/last_writes/`, so it works across sessions). When
+  you change that file yourself — swapping koda's `logging` for your internal
+  `log.audit`, say — koda notices the difference next time it reads or edits the
+  file and, once you've made the same kind of change a couple of times, proposes a
+  rule like *"prefer `log.audit` over `logging`."* This is the strongest signal
+  for adapting to your style; koda only acts on changes it can attribute clearly
+  (a single swapped token), never guesses.
 - **Human-in-the-loop promotion** — candidates never touch the prompt on their
   own. Run `/learn` to review them, then `/learn accept <n>` (or `/learn all`) to
   accept, or `/learn reject <n>` to drop one. Accepted rules are written to
@@ -556,7 +564,7 @@ file under `<project>/.koda/learning/` you can read, edit, or delete.
   whole loop is gone with no residue. If you edit or delete a rule, that is
   authoritative.
 
-This is Phase 1 of a larger self-improvement design (see
+This is Phases 1–2 of a larger self-improvement design (see
 `docs/research-self-improvement.md`): later phases add a project-idiom miner for
 custom syntax/DSLs and a local semantic example library, all on the same
 all-local, fully-inspectable footing.

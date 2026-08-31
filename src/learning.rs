@@ -29,6 +29,10 @@ pub enum Observation {
     Command { command: String, ok: bool },
     /// The user denied an approval for a tool.
     Denied { tool: String },
+    /// The user changed a file *after* koda wrote it. `koda_wrote` is what koda
+    /// left; `user_has` is what the file holds now. The delta is the user's
+    /// correction of koda's output — the richest "vibe" signal there is.
+    Correction { path: String, koda_wrote: String, user_has: String },
 }
 
 /// A distilled rule. Candidate rules await the user's nod; accepted rules are
@@ -64,6 +68,43 @@ fn rules_path(root: &Path) -> PathBuf {
 }
 fn obs_path(root: &Path) -> PathBuf {
     dir(root).join("observations.jsonl")
+}
+/// Directory holding koda's last-written content per file, so a correction can
+/// be detected even across sessions (koda writes today, you edit in your
+/// editor, koda notices tomorrow). Files are named by a hash of the path.
+fn writes_dir(root: &Path) -> PathBuf {
+    dir(root).join("last_writes")
+}
+
+/// Record what koda just wrote to `rel_path`, keyed by a hash of the path.
+/// Survives across sessions so a later divergence is attributable to the user.
+pub fn record_write(root: &Path, rel_path: &str, content: &str) {
+    let d = writes_dir(root);
+    if std::fs::create_dir_all(&d).is_err() {
+        return;
+    }
+    let f = d.join(format!("{}.txt", path_key(rel_path)));
+    let _ = std::fs::write(f, content);
+}
+
+/// Return what koda last wrote to `rel_path`, if tracked.
+pub fn last_write(root: &Path, rel_path: &str) -> Option<String> {
+    std::fs::read_to_string(writes_dir(root).join(format!("{}.txt", path_key(rel_path)))).ok()
+}
+
+/// Forget the tracked write for `rel_path` (after a correction is counted).
+pub fn clear_write(root: &Path, rel_path: &str) {
+    let _ = std::fs::remove_file(writes_dir(root).join(format!("{}.txt", path_key(rel_path))));
+}
+
+/// A filesystem-safe, collision-resistant key for a path (FNV-1a hex).
+fn path_key(s: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
 }
 
 impl Learning {
@@ -268,6 +309,7 @@ pub fn induce_rules(obs: &[Observation]) -> Vec<Rule> {
     rules.extend(command_substitutions(obs));
     rules.extend(naming_convention(obs));
     rules.extend(import_preferences(obs));
+    rules.extend(correction_rules(obs));
     rules
 }
 
@@ -388,9 +430,121 @@ fn import_preferences(obs: &[Observation]) -> Vec<Rule> {
 }
 
 // ---------------------------------------------------------------------------
-// Small deterministic helpers.
+// Correction mining (Phase 2). When the user changes a file after koda wrote
+// it, the diff is their correction. We look for lines koda wrote that the user
+// replaced by changing exactly one identifier/token, and count recurring
+// substitutions across all corrections. A substitution seen MIN_SUPPORT times
+// becomes a rule ("use X, not Y"). This is deterministic and inspectable — no
+// model, no fuzzy matching beyond token equality.
 // ---------------------------------------------------------------------------
 
+fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
+    // (removed_token, added_token) -> count
+    let mut subs: BTreeMap<(String, String), u32> = BTreeMap::new();
+    // Also: a whole import line the user swapped, mined as a library preference.
+    for o in obs {
+        if let Observation::Correction { koda_wrote, user_has, path } = o {
+            if !is_code_file(path) {
+                continue;
+            }
+            for (k_line, u_line) in aligned_changed_lines(koda_wrote, user_has) {
+                if let Some((removed, added)) = single_token_swap(&k_line, &u_line) {
+                    // Ignore trivial/short tokens and pure whitespace churn.
+                    if removed.len() >= 2 && added.len() >= 2 && removed != added {
+                        *subs.entry((removed, added)).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for ((removed, added), n) in subs {
+        if n >= MIN_SUPPORT {
+            out.push(Rule {
+                key: format!("correction.sub.{}.{}", slug(&removed), slug(&added)),
+                text: format!(
+                    "In this project, prefer `{added}` over `{removed}` — the user has changed that {n} time(s)."
+                ),
+                support: n,
+                accepted: false,
+            });
+        }
+    }
+    out
+}
+
+/// Pair up lines that changed between two versions, in order. Lines present in
+/// both (unchanged) are skipped. This is a coarse positional diff — good enough
+/// to catch "koda wrote line X, the user replaced it with line Y" without a
+/// full LCS. Returns (koda_line, user_line) pairs of the same 1:1 position
+/// among the lines that differ.
+fn aligned_changed_lines(koda: &str, user: &str) -> Vec<(String, String)> {
+    let k: Vec<&str> = koda.lines().collect();
+    let u: Vec<&str> = user.lines().collect();
+    // Lines the user kept verbatim are not corrections; drop the common set.
+    let common: std::collections::HashSet<&str> = k
+        .iter()
+        .filter(|l| u.contains(l))
+        .copied()
+        .collect();
+    let k_changed: Vec<String> = k
+        .iter()
+        .filter(|l| !common.contains(**l) && !l.trim().is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    let u_changed: Vec<String> = u
+        .iter()
+        .filter(|l| !common.contains(**l) && !l.trim().is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    // Pair positionally; only the overlap length matters.
+    k_changed
+        .into_iter()
+        .zip(u_changed)
+        .collect()
+}
+
+/// If two lines differ by exactly one token (same tokens otherwise, in order),
+/// return (removed, added). Tokens are identifier-ish runs.
+fn single_token_swap(a: &str, b: &str) -> Option<(String, String)> {
+    let ta = tokenize(a);
+    let tb = tokenize(b);
+    if ta.len() != tb.len() {
+        return None;
+    }
+    let mut diff: Option<(String, String)> = None;
+    for (x, y) in ta.iter().zip(tb.iter()) {
+        if x != y {
+            if diff.is_some() {
+                return None; // more than one token changed — too ambiguous
+            }
+            diff = Some((x.clone(), y.clone()));
+        }
+    }
+    diff
+}
+
+/// Split a line into identifier-ish tokens (letters, digits, underscore, dot),
+/// dropping punctuation and whitespace.
+fn tokenize(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in line.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Small deterministic helpers.
+// ---------------------------------------------------------------------------
 fn command_head(cmd: &str) -> String {
     // First two words capture "npm test" / "just build" without arg noise.
     cmd.trim()
@@ -562,6 +716,17 @@ fn encode(obs: &Observation) -> Option<String> {
         Observation::Denied { tool } => {
             format!(r#"{{"t":"denied","tool":"{}"}}"#, esc(tool))
         }
+        Observation::Correction { path, koda_wrote, user_has } => {
+            if path.trim().is_empty() {
+                return None;
+            }
+            let k: String = koda_wrote.chars().take(4000).collect();
+            let u: String = user_has.chars().take(4000).collect();
+            format!(
+                r#"{{"t":"correction","path":"{}","koda_wrote":"{}","user_has":"{}"}}"#,
+                esc(path), esc(&k), esc(&u)
+            )
+        }
     };
     Some(line)
 }
@@ -580,6 +745,11 @@ fn decode(line: &str) -> Option<Observation> {
         }),
         "denied" => Some(Observation::Denied {
             tool: v.get("tool")?.as_str()?.to_string(),
+        }),
+        "correction" => Some(Observation::Correction {
+            path: v.get("path")?.as_str()?.to_string(),
+            koda_wrote: v.get("koda_wrote").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            user_has: v.get("user_has").and_then(|x| x.as_str()).unwrap_or("").to_string(),
         }),
         _ => None,
     }
@@ -704,6 +874,89 @@ mod tests {
     fn empty_learning_contributes_nothing_to_the_prompt() {
         let d = tmp("empty");
         assert!(Learning::load(&d).brief().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn induces_a_substitution_rule_from_repeated_corrections() {
+        // koda wrote `logging`; the user changed it to the internal `log.audit`
+        // twice across two files. That recurring swap should become a rule.
+        let obs = vec![
+            Observation::Correction {
+                path: "a.py".into(),
+                koda_wrote: "x = logging".into(),
+                user_has: "x = log.audit".into(),
+            },
+            Observation::Correction {
+                path: "b.py".into(),
+                koda_wrote: "y = logging".into(),
+                user_has: "y = log.audit".into(),
+            },
+        ];
+        let rules = induce_rules(&obs);
+        assert!(
+            rules.iter().any(|r| r.text.contains("prefer `log.audit` over `logging`")),
+            "{rules:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_correction_is_not_enough() {
+        let obs = vec![Observation::Correction {
+            path: "a.py".into(),
+            koda_wrote: "x = requests".into(),
+            user_has: "x = httpx".into(),
+        }];
+        let rules = induce_rules(&obs);
+        assert!(
+            !rules.iter().any(|r| r.key.starts_with("correction.sub")),
+            "one-off correction must not become a rule: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn multi_token_changes_are_ignored_as_ambiguous() {
+        // Two tokens changed on the line — too ambiguous to attribute a single swap.
+        let obs = vec![
+            Observation::Correction {
+                path: "a.rs".into(),
+                koda_wrote: "let a = foo(bar)".into(),
+                user_has: "let b = baz(qux)".into(),
+            },
+            Observation::Correction {
+                path: "b.rs".into(),
+                koda_wrote: "let a = foo(bar)".into(),
+                user_has: "let b = baz(qux)".into(),
+            },
+        ];
+        let rules = induce_rules(&obs);
+        assert!(
+            !rules.iter().any(|r| r.key.starts_with("correction.sub")),
+            "ambiguous multi-token change must not induce a rule: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn single_token_swap_detects_one_changed_token() {
+        assert_eq!(
+            single_token_swap("return logging.info", "return log.audit"),
+            Some(("logging.info".into(), "log.audit".into()))
+        );
+        assert_eq!(single_token_swap("a = b", "a = b"), None);
+    }
+
+    #[test]
+    fn correction_round_trips_through_the_log() {
+        let d = tmp("corr-rt");
+        let l = Learning::load(&d);
+        l.observe(&Observation::Correction {
+            path: "a.py".into(),
+            koda_wrote: "import requests".into(),
+            user_has: "import httpx".into(),
+        });
+        let got = l.observations();
+        assert_eq!(got.len(), 1);
+        matches!(got[0], Observation::Correction { .. });
         std::fs::remove_dir_all(&d).ok();
     }
 }

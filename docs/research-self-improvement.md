@@ -153,18 +153,36 @@ Shipped in `src/learning.rs` (+ wiring in `agent.rs`, `prompt.rs`, `config.rs`,
   with correct before/after).
 - *Still open:* formatter/linter config inference.
 
-### Phase 2 — Project-idiom miner
+### Phase 2 — Correction learning (proposal-vs-edit)  ✅ IMPLEMENTED
+The highest-value "vibe" signal from the research (arXiv:2607.25130): learn from
+the edit the user makes *after* koda writes something. Shipped:
+- A persistent per-file record of what koda last wrote lives under
+  `.koda/learning/last_writes/` (keyed by a hash of the path), so a correction is
+  detected even across sessions — koda writes today, you edit in your editor, koda
+  notices tomorrow.
+- `agent.rs` calls `check_correction` when koda reads a file, and before it
+  overwrites one: if the on-disk content diverged from what koda last wrote, that
+  delta is logged as an `Observation::Correction`.
+- `learning.rs::correction_rules` diffs each correction line-by-line, finds lines
+  where the user changed exactly **one** token (ambiguous multi-token changes are
+  ignored), and mines recurring substitutions into rules like *"prefer `log.audit`
+  over `logging` — the user has changed that 2 times."* Requires `MIN_SUPPORT` so a
+  one-off isn't a rule.
+- 5 unit tests; verified end-to-end (koda wrote `logging`, the user swapped it for
+  `log.audit`, koda read it back twice, and induced the substitution rule).
+
+### Phase 3 — Project-idiom miner
 Use `graph.rs` to surface high-frequency internal symbols/decorators; combine with
 correction observations → `project-idioms.md`. The differentiated capability.
 
-### Phase 3 — Semantic example library
+### Phase 4 — Semantic example library
 `fastembed-rs` + `sqlite-vec` behind a Cargo feature; persist successful episodes;
 retrieve top-k by recency+importance+relevance; inject as few-shot; add decay.
 
-### Phase 4 — Preference re-ranking (opt-in)
+### Phase 5 — Preference re-ranking (opt-in)
 Local contrastive re-ranker over `(proposed, user-edited)` pairs.
 
-### Phase 5 — Local LoRA (deferred, research-gated)
+### Phase 6 — Local LoRA (deferred, research-gated)
 MLX-LM LoRA, opt-in, only with a large curated corpus and forgetting mitigation.
 
 ---

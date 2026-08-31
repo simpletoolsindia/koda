@@ -1346,6 +1346,20 @@ impl Agent {
                     });
                 }
             }
+            // Phase 2: reading a file koda previously wrote reveals whether the
+            // user changed it in the meantime — the on-disk content is theirs.
+            if name == "read_file" && outcome.ok {
+                if let Some(p) = args_for_memory.get("path").and_then(|c| c.as_str()) {
+                    let abs = if std::path::Path::new(p).is_absolute() {
+                        PathBuf::from(p)
+                    } else {
+                        self.ctx.root.join(p)
+                    };
+                    if let Ok(disk) = std::fs::read_to_string(&abs) {
+                        self.check_correction(&abs, &disk);
+                    }
+                }
+            }
         }
         // Which files the work happens in is also observed fact worth carrying
         // forward, so next session koda orients to the active areas first.
@@ -1385,9 +1399,13 @@ impl Agent {
                     self.learning.observe(&crate::learning::Observation::Edit {
                         path: p.to_string(),
                         before,
-                        after,
+                        after: after.clone(),
                     });
                 }
+                // Remember exactly what koda left on disk, so a later divergence
+                // is attributable to the user (Phase 2 correction signal).
+                // Persistent so it survives across sessions.
+                crate::learning::record_write(&self.ctx.root, p, &after);
             }
         }
         // Keep the code graph current without a full rescan: re-index just the
@@ -1431,6 +1449,29 @@ impl Agent {
         outcome
     }
 
+    /// If `disk_now` differs from what koda last wrote to `abs`, the user has
+    /// changed koda's output — record the correction (Phase 2 vibe signal).
+    /// Consumes the tracked write so one edit is counted once. Persistent, so
+    /// it works across sessions (koda writes today, you edit, koda notices later).
+    fn check_correction(&mut self, abs: &std::path::Path, disk_now: &str) {
+        if !self.cfg.learning || self.depth != 0 {
+            return;
+        }
+        let rel = crate::tools::rel(&self.ctx, abs);
+        if let Some(koda_wrote) = crate::learning::last_write(&self.ctx.root, &rel) {
+            if koda_wrote != disk_now && !disk_now.trim().is_empty() {
+                self.learning
+                    .observe(&crate::learning::Observation::Correction {
+                        path: rel.clone(),
+                        koda_wrote,
+                        user_has: disk_now.to_string(),
+                    });
+                // Don't re-report the same divergence repeatedly.
+                crate::learning::clear_write(&self.ctx.root, &rel);
+            }
+        }
+    }
+
     /// Remember a file's contents before we change it. Bounded, because the
     /// point is recovering from the last mistake, not full history.
     fn snapshot(&mut self, args: &Value, tool: &str) {
@@ -1444,6 +1485,12 @@ impl Agent {
             self.ctx.root.join(rel)
         };
         let before = std::fs::read_to_string(&full).ok();
+        // Before koda overwrites this file, its current on-disk content is the
+        // user's version. If it diverged from what koda last wrote, that is a
+        // correction worth learning from.
+        if let Some(b) = &before {
+            self.check_correction(&full, b);
+        }
         self.undo.push(UndoEntry {
             path: full,
             before,
@@ -1455,7 +1502,6 @@ impl Agent {
         }
     }
 
-    /// Put the most recent changed file back.
     /// Undo the most recent turn's file changes as a group.
     ///
     /// A single turn can touch several files (or the same file more than once);

@@ -88,6 +88,18 @@ def script(step, is_subagent=False):
             return tool_call_frames("l2", "remember",
                 {"note": "the build command here is echo built"})
         return text_frames("Noted the build command.")
+    if MODE == "correct_write":
+        # koda WRITES svc.py using `logging` (populates its last_writes record).
+        if step == 0:
+            return tool_call_frames("c1", "write_file",
+                {"path": "svc.py", "content": "import logging\nx = logging\n"})
+        return text_frames("Wrote svc.py.")
+    if MODE == "correct_read":
+        # koda READS svc.py — by now the user swapped logging->log.audit on
+        # disk, so koda detects the correction against what it last wrote.
+        if step == 0:
+            return tool_call_frames("c1", "read_file", {"path": "svc.py"})
+        return text_frames("Read svc.py.")
     if MODE == "websearch":
         if step == 0:
             return tool_call_frames("w1", "web_search", {"query": "ratatui docs"})
