@@ -45,6 +45,11 @@ ok "built ($(du -h "$BUILT" | cut -f1))"
 # 4. Install.
 mkdir -p "$BIN_DIR"
 install -m 0755 "$BUILT" "$BIN_DIR/$BIN_NAME"
+# macOS kills a copied binary whose ad-hoc signature no longer matches its path;
+# re-sign in place so it runs. No-op / harmless elsewhere.
+if [ "$(uname)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$BIN_DIR/$BIN_NAME" >/dev/null 2>&1 || true
+fi
 ok "installed to $BIN_DIR/$BIN_NAME"
 
 # 5. PATH check.
