@@ -1,0 +1,192 @@
+name: Release
+
+# Build binaries for macOS, Windows, and Linux.
+#
+#   * Push to main/master  -> build + smoke-test all targets, upload as
+#                             workflow artifacts (retained 14 days). Gives you
+#                             a downloadable build for every commit.
+#   * Push a tag "v*"       -> everything above, plus a published GitHub Release
+#                             with the packaged binaries and SHA256 checksums.
+#   * Manual dispatch       -> build on demand from the Actions tab.
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save build minutes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # needed by the release job to create/attach to a Release
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.82" # matches rust-version in Cargo.toml
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: formatting, lints and tests must pass before we build anything.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Advisory only: reports formatting diffs without failing the pipeline.
+      # Flip `continue-on-error` to false once the tree is fully rustfmt-clean.
+      - name: Check formatting
+        run: cargo fmt --all --check
+        continue-on-error: true
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all
+
+  # ---------------------------------------------------------------------------
+  # Build: one job per target triple. Depends on the test gate.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Linux ARM64 needs a cross linker. rustls-tls (no OpenSSL) keeps this simple.
+      - name: Install aarch64 cross linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ad-hoc sign macOS binaries so the copied binary runs (mirrors install.sh).
+      - name: Ad-hoc codesign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - target/${{ matrix.target }}/release/koda
+
+      # -- Package --------------------------------------------------------------
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          STAGING="koda-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${STAGING}"
+          cp "target/${{ matrix.target }}/release/koda" "dist/${STAGING}/"
+          cp README.md LICENSE "dist/${STAGING}/" 2>/dev/null || cp README.md "dist/${STAGING}/"
+          tar -C dist -czf "dist/${STAGING}.tar.gz" "${STAGING}"
+          ( cd dist && shasum -a 256 "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256" )
+          echo "ASSET=dist/${STAGING}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $staging = "koda-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$staging" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/koda.exe" "dist/$staging/"
+          Copy-Item "README.md" "dist/$staging/"
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "dist/$staging/" }
+          Compress-Archive -Path "dist/$staging/*" -DestinationPath "dist/$staging.zip"
+          $hash = (Get-FileHash "dist/$staging.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $staging.zip" | Out-File -Encoding ascii "dist/$staging.zip.sha256"
+          "ASSET=dist/$staging.zip" | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+
+      # -- Smoke test: the freshly built binary must at least run --------------
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows' && matrix.cross == false
+        run: ./target/${{ matrix.target }}/release/koda --help
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: ./target/${{ matrix.target }}/release/koda.exe --help
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: koda-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Release: only on version tags. Attaches every artifact to a GitHub Release.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
