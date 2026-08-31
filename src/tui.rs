@@ -2222,6 +2222,26 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
 
     let mut segs = vec![];
 
+    // While a turn is running, surface what the agent is doing right now (the
+    // running tool / command / subagent) in the persistent bottom bar, so the
+    // user can always see it even when the transcript has scrolled the tool
+    // block out of view. It leads the bar so it's the first thing read.
+    if app.busy {
+        if let Some(act) = &app.activity {
+            let glyph = if app.motion.animates() {
+                g.thinking[anim::sweep(app.turn_started.map(|s| s.elapsed()).unwrap_or_default())
+                    % g.thinking.len()]
+            } else {
+                g.thinking[0]
+            };
+            // Keep it short so the model/mode/tokens still fit on the right.
+            let cap = if m.tiny { 16 } else if m.compact { 24 } else { 40 };
+            let text: String = act.chars().take(cap).collect();
+            let text = if act.chars().count() > cap { format!("{text}…") } else { text };
+            segs.push(Segment::new(format!("{glyph} {text}"), t.accent).bold());
+        }
+    }
+
     let dir = app
         .root
         .file_name()
