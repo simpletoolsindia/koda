@@ -236,6 +236,11 @@ pub struct Config {
     /// Results per search.
     pub search_results: usize,
 
+    /// Allow the `web_fetch` tool: GET a URL and read it as text. Off by
+    /// default (a model-supplied URL becomes a request from your machine).
+    #[serde(default)]
+    pub web_fetch: bool,
+
     /// Attempts per request before giving up (1 = no retry).
     pub max_retries: u32,
     /// "debug" | "info" | "warn" | "error"
@@ -392,6 +397,7 @@ impl Default for Config {
             search_backend: default_backend(),
             searx_url: String::new(),
             search_results: 6,
+            web_fetch: false,
             max_retries: 3,
             log_level: "info".into(),
             log_to_file: true,
@@ -645,6 +651,11 @@ searx_url = ""          # optional, e.g. "http://localhost:8888"
 # then esc to confirm.
 search_backend = "duckduckgo"
 search_results = 6
+
+# Let the agent GET a URL and read it as text (the web_fetch tool). Off by
+# default — a model-supplied URL becomes a request from your machine. Toggle in
+# /settings.
+web_fetch = false
 
 # Transient failures (connection reset, 429, 5xx, empty stream) are retried
 # with backoff before the agent gives up.

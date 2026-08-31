@@ -272,7 +272,14 @@ impl App {
                 // written.
                 self.transcript.finish_reveal();
                 // Surface what the agent is doing right now in the status row.
-                self.activity = Some(activity_label(&name, &label));
+                // Inside a delegated subagent (depth>0) say so, so the user can
+                // see the child is working — e.g. "↳ subagent: reading cart.py".
+                let phrase = activity_label(&name, &label);
+                self.activity = Some(if depth > 0 {
+                    format!("↳ subagent: {phrase}")
+                } else {
+                    phrase
+                });
                 // `todo` has a dedicated plan card, so a tool row beside it
                 // would say the same thing twice.
                 if name != "todo" {
@@ -893,6 +900,7 @@ impl App {
         if cfg.web_search != self.cfg.web_search
             || cfg.search_backend != self.cfg.search_backend
             || cfg.searx_url != self.cfg.searx_url
+            || cfg.web_fetch != self.cfg.web_fetch
             || cfg.reasoning_effort != self.cfg.reasoning_effort
             || cfg.system_prompt != self.cfg.system_prompt
         {
@@ -1034,6 +1042,15 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
+        // `!cmd` runs a shell command directly — no agent, no tokens. So you can
+        // `!git status`, `!ls`, `!git commit -m ...` without leaving koda.
+        if let Some(cmd) = trimmed.strip_prefix('!') {
+            let cmd = cmd.trim().to_string();
+            if !cmd.is_empty() {
+                self.run_bang(&cmd);
+            }
+            return;
+        }
         // Expand any @pasteN placeholders back to the full pasted text before
         // this goes anywhere. Slash commands are expanded too (harmless — they
         // rarely contain one), then the buffer is cleared for the next turn.
@@ -1067,6 +1084,18 @@ impl App {
         } else {
             self.send(Command::User(trimmed));
         }
+    }
+
+    /// Run a `!cmd` shell command directly: echo it and hand it to the agent's
+    /// command channel, which runs it as a tool block without any model call.
+    fn run_bang(&mut self, cmd: &str) {
+        self.transcript.user(format!("!{cmd}"));
+        self.follow = true;
+        if self.busy {
+            self.note("busy — wait for the current turn, then try !cmd again");
+            return;
+        }
+        self.send(Command::Bang(cmd.to_string()));
     }
 
     fn slash(&mut self, rest: &str) {
@@ -1490,6 +1519,7 @@ impl App {
             ("/settings", "edit everything (system prompt, web UI, …)"),
             ("/theme tokyo-night", "switch palette by name"),
             ("@src/main.rs", "attach a file (or image) to your message"),
+            ("!git status", "run a shell command directly (no agent)"),
             ("/detailhelp", "open the full feature guide in your browser"),
         ];
         let mut ex = Panel::new("Examples", width).footer("type a command, or just talk");

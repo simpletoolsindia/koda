@@ -29,6 +29,7 @@ pub enum Row {
     WebSearch,
     SearchBackend,
     SearxUrl,
+    WebFetch,
     Codegraph,
     Debug,
     WebUi,
@@ -40,7 +41,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 19] = [
+    pub const ALL: [Row; 20] = [
         Row::Mode,
         Row::Autonomy,
         Row::Reasoning,
@@ -53,6 +54,7 @@ impl Row {
         Row::WebSearch,
         Row::SearchBackend,
         Row::SearxUrl,
+        Row::WebFetch,
         Row::Codegraph,
         Row::Debug,
         Row::WebUi,
@@ -76,6 +78,7 @@ impl Row {
             Row::WebSearch => "web search",
             Row::SearchBackend => "search backend",
             Row::SearxUrl => "searxng url",
+            Row::WebFetch => "web fetch",
             Row::Codegraph => "code graph",
             Row::Debug => "debug capture",
             Row::WebUi => "web ui",
@@ -100,6 +103,7 @@ impl Row {
             Row::WebSearch => "1) enable, then pick a backend below",
             Row::SearchBackend => "2) duckduckgo (no setup) or searxng",
             Row::SearxUrl => "3) enter to edit your SearXNG address",
+            Row::WebFetch => "let the agent GET a URL and read it as text",
             Row::Codegraph => "scan the project into a symbol graph on open",
             Row::Debug => "dump raw requests/responses to the debug dir",
             Row::WebUi => "serve the React log/debug UI on 127.0.0.1 (restart to apply)",
@@ -215,6 +219,7 @@ impl Settings {
                     };
             }
             Row::SearxUrl | Row::SystemPrompt => {} // handled above
+            Row::WebFetch => self.cfg.web_fetch = !self.cfg.web_fetch,
             Row::Codegraph => self.cfg.codegraph = !self.cfg.codegraph,
             Row::Debug => {
                 self.cfg.debug = !self.cfg.debug;
@@ -291,6 +296,7 @@ impl Settings {
                     self.cfg.searx_url.clone()
                 }
             }
+            Row::WebFetch => on(self.cfg.web_fetch),
             Row::Codegraph => on(self.cfg.codegraph),
             Row::Debug => on(self.cfg.debug),
             Row::WebUi => {

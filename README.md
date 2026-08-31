@@ -194,6 +194,7 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `delegate` | — | hand a read-only investigation to a subagent |
 | `manage_agent` | asks | create/update a specialised role agent on the fly |
 | `web_search` | — | SearXNG or DuckDuckGo, off by default |
+| `web_fetch` | — | GET a URL and read it as text, off by default |
 | `ask_user` | — | asks *you* a question mid-task; your reply is the answer |
 | `write_file` `edit_file` | asks | shows a diff first |
 | `run_command` | asks | builds, tests, git |
@@ -288,6 +289,38 @@ searx_url = "http://localhost:8888"   # optional; omit to use DuckDuckGo
 Toggle per session with `/websearch` — koda tells you which backend is active.
 Pick the backend explicitly in `/settings`: enable web search, choose DuckDuckGo
 or SearXNG (entering your instance's address inline), then close to confirm.
+
+## Fetching a web page
+
+With `web_fetch` on (off by default, toggle in `/settings`), the agent can GET a
+URL and read it as plain text — HTML stripped, output capped at
+`max_tool_output_bytes`. It is the companion to web search: search finds a page,
+`web_fetch` reads it. Only `http`/`https`; treat fetched content as untrusted.
+Because a model-supplied URL becomes a request from your machine, it is opt-in.
+
+## Running shell commands directly
+
+Prefix a line with `!` to run it as a shell command in the workspace, with no
+model call and no tokens spent — handy for the quick things you'd otherwise
+leave koda to do:
+
+```
+!git status
+!ls -la src
+!git commit -am "wip"
+```
+
+The command and its output appear in the transcript as a tool block, exactly
+like a command the agent runs, but the conversation context is untouched.
+
+## Reading files: text, CSV, and images
+
+`read_file` returns numbered lines for text. CSV/TSV files are rendered as an
+aligned table with a header rule, so the model reads columns reliably. Images
+(`@photo.png`) are attached to a vision model rather than read as text —
+`.png .jpg .jpeg .gif .webp .bmp .tiff .avif .svg` are recognized. Reading PDF,
+Word and Excel is designed in [docs/spec-doc-parsing.md](docs/spec-doc-parsing.md)
+and gated behind a Cargo feature so the default binary stays small.
 
 ## Reasoning effort
 

@@ -76,6 +76,8 @@ pub enum Event {
 #[derive(Debug)]
 pub enum Command {
     User(String),
+    /// Run a shell command directly (the `!cmd` prefix) — no LLM turn.
+    Bang(String),
     Clear,
     Compact,
     ListModels,
@@ -450,6 +452,27 @@ impl Agent {
                 }
                 let _ = tx.send(Event::Notice("context cleared".into()));
             }
+            Command::Bang(cmd) => {
+                // Run the shell command directly and render it as a tool block.
+                // No history entry, no model call — this is a convenience shell,
+                // so the conversation context is untouched.
+                let id = format!("bang-{}", self.turn_seq.wrapping_add(1));
+                let _ = tx.send(Event::ToolStart {
+                    id: id.clone(),
+                    name: "run_command".into(),
+                    label: cmd.clone(),
+                    depth: 0,
+                });
+                let args = serde_json::json!({ "command": cmd });
+                let outcome = tools::run("run_command", args, &self.ctx).await;
+                let _ = tx.send(Event::ToolEnd {
+                    id,
+                    ok: outcome.ok,
+                    summary: outcome.summary,
+                    detail: outcome.content,
+                    view: outcome.view,
+                });
+            }
             Command::Compact => self.compact(tx).await,
             Command::ProbeModels(url) => {
                 let probe = match Client::new(
@@ -785,6 +808,11 @@ impl Agent {
         if !self.cfg.web_search {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("web_search")
+            });
+        }
+        if !self.cfg.web_fetch {
+            list.retain(|t| {
+                t.pointer("/function/name").and_then(|n| n.as_str()) != Some("web_fetch")
             });
         }
         if !self.cfg.subagents {
@@ -1182,6 +1210,7 @@ impl Agent {
             "skill" => self.read_skill(&args),
             "manage_agent" => self.manage_agent(&args),
             "web_search" => self.web_search(&args).await,
+            "web_fetch" => self.web_fetch(&args).await,
             "todo" => {
                 let items = tools::parse_todos(&args);
                 if items.is_empty() {
@@ -1740,6 +1769,53 @@ impl Agent {
                         names.join(", ")
                     ),
                     summary: format!("skill {name}: not found"),
+                    view: tools::ToolView::Plain,
+                }
+            }
+        }
+    }
+
+    async fn web_fetch(&self, args: &Value) -> tools::Outcome {
+        if !self.cfg.web_fetch {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: web fetch is off. The user can enable it in /settings."
+                    .into(),
+                summary: "web_fetch: disabled".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
+        let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").trim();
+        if url.is_empty() {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: `url` is required.".into(),
+                summary: "web_fetch: no url".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
+        let cap = args
+            .get("max_bytes")
+            .and_then(|b| b.as_u64())
+            .map(|b| b as usize)
+            .unwrap_or(self.cfg.max_tool_output_bytes)
+            .min(self.cfg.max_tool_output_bytes);
+        match crate::web::fetch_url(url, 20).await {
+            Ok(text) => {
+                let bytes = text.len();
+                tools::Outcome {
+                    ok: true,
+                    content: tools::truncate(&text, cap),
+                    summary: format!("fetched {url} ({bytes} bytes)"),
+                    view: tools::ToolView::Plain,
+                }
+            }
+            Err(e) => {
+                crate::tel_warn!("web", "fetch failed", "detail" => format!("{e:#}"));
+                tools::Outcome {
+                    ok: false,
+                    content: format!("ERROR: web fetch failed: {e:#}"),
+                    summary: "web_fetch: failed".into(),
                     view: tools::ToolView::Plain,
                 }
             }

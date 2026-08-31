@@ -246,6 +246,11 @@ with open(os.path.join(ws, "demo.txt")) as f:
     content = f.read()
 check("file edited on disk", "goodbye world" in content, t)
 check("rest of the file preserved", "second line" in content, t)
+# `!cmd` runs a shell command directly, without an agent turn.
+t.send("!echo koda-bang-works\r")
+t.read(3.0, until="koda-bang-works")
+check("!cmd runs a shell command directly", t.saw("koda-bang-works"), t)
+check("!cmd shows the command echoed", t.saw("!echo koda-bang-works"), t)
 rc = t.close()
 check("exits cleanly on ctrl+d", rc == 0)
 
