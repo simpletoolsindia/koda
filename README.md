@@ -5,6 +5,7 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![Binary](https://img.shields.io/badge/binary-~6%20MB-green)
 ![Startup](https://img.shields.io/badge/startup-~3%20ms-green)
+[![Docs](https://img.shields.io/badge/docs-live-00E599)](https://simpletoolsindia.github.io/koda/)
 
 A terminal coding agent for **local** LLMs. It talks to anything speaking the
 OpenAI chat-completions API — Ollama, LM Studio, llama.cpp, MTPLX, vLLM — reads
@@ -13,6 +14,12 @@ anything.
 
 Built for macOS on Apple Silicon. One binary, ~6 MB, 3 ms startup, no runtime
 dependencies.
+
+📖 **[Read the docs → simpletoolsindia.github.io/koda](https://simpletoolsindia.github.io/koda/)** —
+a full guide for beginners and developers: quickstart, every LLM provider
+(Ollama, LM Studio, llama.cpp, vLLM, MLX, OpenAI, OpenRouter, Groq and any
+OpenAI-compatible API), architecture and data-flow internals with diagrams, and
+detailed pages for every feature.
 
 ```
 ▌ the discount test fails — fix it                      ← warm tint, your message
