@@ -186,6 +186,12 @@ pub struct Config {
     pub command_timeout_ms: u64,
     pub max_file_bytes: usize,
     pub max_tool_output_bytes: usize,
+    /// Cap on the raw byte size of a document (CSV/XLSX/DOCX/PDF) read through
+    /// `read_file` before it is parsed. Guards against a huge binary being
+    /// decompressed in memory. Extracted text is still capped by
+    /// `max_file_bytes` on output.
+    #[serde(default = "default_max_document_bytes")]
+    pub max_document_bytes: usize,
     /// Appended verbatim to the system prompt.
     pub instructions: String,
 
@@ -354,6 +360,11 @@ fn default_backend() -> String {
     "duckduckgo".into()
 }
 
+/// ~8 MiB: room for a real spreadsheet or a text PDF, but not a scanned tome.
+fn default_max_document_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
 /// A user-defined tool: a named, described shell command the agent may call.
 /// `{arg}` placeholders in `command` are filled from the call's arguments (and
 /// shell-quoted), so a user can teach koda a project-specific action without
@@ -397,6 +408,7 @@ impl Default for Config {
             command_timeout_ms: 120_000,
             max_file_bytes: 256 * 1024,
             max_tool_output_bytes: 24 * 1024,
+            max_document_bytes: default_max_document_bytes(),
             instructions: String::new(),
             sync_output: true,
             motion: true,
@@ -622,6 +634,10 @@ shell = "/bin/sh"
 command_timeout_ms = 120000
 max_file_bytes = 262144
 max_tool_output_bytes = 24576
+
+# Max raw size of a CSV/XLSX/DOCX/PDF read through read_file, before parsing.
+# XLSX/DOCX/PDF need `koda` built with --features docs (or pdf) to be parsed.
+max_document_bytes = 8388608
 
 # Extra project rules appended to the system prompt.
 instructions = ""

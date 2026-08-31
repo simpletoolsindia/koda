@@ -158,6 +158,17 @@ def script(step, is_subagent=False):
                 {"path": os.environ.get("DOC_PATH", "tiny.csv")})
         return text_frames("Read the document.")
 
+    if MODE == "cut":
+        # Stream a few content frames, then drop the connection mid-stream
+        # WITHOUT sending [DONE] or the terminating chunk — reproduces the
+        # "unexpected EOF during chunk" failure. koda should keep the partial
+        # reply rather than failing the whole turn.
+        return [
+            delta({"content": "Here is the first part of the answer"}),
+            delta({"content": " that streamed fine before the drop."}),
+            "__CUT__",  # sentinel: the send loop closes the socket here
+        ]
+
     if MODE == "empty":
         return []
     if MODE == "thinky":
@@ -223,6 +234,29 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         messages = req.get("messages", [])
+        # A compaction request (no tools, "Summarize the conversation" system
+        # prompt) gets a canned summary so /compact completes deterministically
+        # in tests, regardless of MODE.
+        is_compaction = any(
+            m.get("role") == "system"
+            and "Summarize the conversation" in str(m.get("content", ""))
+            for m in messages
+        )
+        if is_compaction:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                for frame in text_frames("SUMMARY: earlier work condensed for the record."):
+                    self.write_chunk(frame)
+                self.write_chunk(b"data: [DONE]\n\n")
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except BrokenPipeError:
+                pass
+            return
         # Count tool results, in either protocol.
         step = sum(
             1
@@ -256,6 +290,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             for frame in script(step, is_sub):
+                if frame == "__CUT__":
+                    # Abruptly drop the connection mid-stream: no [DONE], no
+                    # terminating 0-length chunk. The client sees EOF while it
+                    # still expects more chunked data.
+                    try:
+                        self.wfile.flush()
+                        self.connection.close()
+                    except Exception:
+                        pass
+                    return
                 self.write_chunk(frame)
                 if DELAY:
                     time.sleep(DELAY)

@@ -216,6 +216,11 @@ pub struct App {
     /// so the status row can say "cancelling…" instead of pretending the work
     /// stopped instantly (a tool call in flight still has to unwind).
     cancelling: bool,
+    /// Set while a compaction (`/compact` or auto-compact) is running. The
+    /// prompt shows an animated "compacting…" status and holds input until the
+    /// matching Compacted event arrives, so a slow summary call never looks like
+    /// a frozen prompt. Carries the moment it started, for the elapsed clock.
+    compacting: Option<Instant>,
     /// What the agent is doing right now (e.g. "reading cart.py", "running the
     /// tests"), from the latest tool start — shown in the working status so the
     /// user sees live activity, not a generic spinner.
@@ -425,6 +430,25 @@ impl App {
                 self.activity = Some(format!("↳ subagent: {what}"));
                 self.follow = true;
             }
+            Event::Compacting => {
+                self.compacting = Some(Instant::now());
+                self.cancelling = false;
+                self.note("compacting context…");
+                self.follow = true;
+            }
+            Event::Compacted { after, .. } => {
+                self.compacting = None;
+                self.cancelling = false;
+                self.tokens = after;
+                // Anything the user typed while compaction ran was queued rather
+                // than lost or dropped into a frozen prompt. Send the first now
+                // that history is ready; the rest flush on the next TurnEnd.
+                if !self.busy {
+                    if let Some(next) = self.queued.pop_front() {
+                        self.send(Command::User(next));
+                    }
+                }
+            }
             Event::Error(msg) => {
                 self.transcript.error(msg);
                 self.follow = true;
@@ -522,6 +546,7 @@ impl App {
     /// log view tailing new entries, and a file index still scanning.
     fn wants_frames(&self) -> bool {
         self.busy
+            || self.compacting.is_some()
             || self.logs.is_some()
             || self.files.scanning()
             // Text may still be catching up after the turn itself finished.
@@ -787,12 +812,16 @@ impl App {
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.start(),
             KeyCode::End => self.editor.finish(),
+            // Ctrl+Up / Ctrl+Down scroll the agent response window (transcript).
+            KeyCode::Up if ctrl => self.scroll_by(-1),
+            KeyCode::Down if ctrl => self.scroll_by(1),
+            // Plain Up / Down walk the user's typed-message history.
             KeyCode::Up => self.key_up(),
             KeyCode::Down => self.key_down(),
             KeyCode::PageUp => self.scroll_by(-(self.body_h as isize / 2).max(1)),
             KeyCode::PageDown => self.scroll_by((self.body_h as isize / 2).max(1)),
             KeyCode::Esc => {
-                if self.busy {
+                if self.busy || self.compacting.is_some() {
                     self.interrupt();
                 } else {
                     self.editor.clear();
@@ -1172,23 +1201,15 @@ impl App {
     }
 
     fn key_up(&mut self) {
-        // Multi-line composing: move the caret up within the input first.
+        // Multi-line composing: move the caret up within the input first, so
+        // editing a pasted block still works naturally.
         if !self.editor.on_first_line() {
             self.editor.up();
             return;
         }
-        // Empty input is the common case when the user wants to read back through
-        // the agent's responses — scroll the transcript, don't hijack it for
-        // input history. History recall stays available while composing (below).
-        if self.editor.is_empty() {
-            self.scroll_by(-1);
-            return;
-        }
-        // There is text and the caret is on the first line: recall older history,
-        // falling back to a scroll once history is exhausted.
-        if !self.editor.history_prev() {
-            self.scroll_by(-1);
-        }
+        // Otherwise, plain Up recalls the previous message the user typed.
+        // (Transcript scrolling is Ctrl+Up / PageUp / the mouse wheel.)
+        self.editor.history_prev();
     }
 
     fn key_down(&mut self) {
@@ -1196,13 +1217,8 @@ impl App {
             self.editor.down();
             return;
         }
-        if self.editor.is_empty() {
-            self.scroll_by(1);
-            return;
-        }
-        if !self.editor.history_next() {
-            self.scroll_by(1);
-        }
+        // Plain Down walks forward through typed-message history.
+        self.editor.history_next();
     }
 
     fn interrupt(&mut self) {
@@ -1211,6 +1227,13 @@ impl App {
             self.notify.notify_waiters();
             self.cancelling = true;
             self.note("interrupting…");
+            return;
+        }
+        if self.compacting.is_some() {
+            self.cancel.store(true, Ordering::Relaxed);
+            self.notify.notify_waiters();
+            self.cancelling = true;
+            self.note("cancelling compaction…");
             return;
         }
         if !self.editor.is_empty() {
@@ -1293,7 +1316,7 @@ impl App {
         self.transcript.user(trimmed.clone());
         self.follow = true;
         self.plan_blocked = false;
-        if self.busy {
+        if self.busy || self.compacting.is_some() {
             self.queued.push_back(trimmed);
             self.note(format!("queued ({})", self.queued.len()));
         } else {
@@ -1776,7 +1799,8 @@ impl App {
             ("ctrl+r", "expand last tool output"),
             ("ctrl+t", "expand last reasoning"),
             ("pgup/pgdn", "scroll · wheel works"),
-            ("up/down", "input history"),
+            ("ctrl+↑/↓", "scroll the reply, line by line"),
+            ("up/down", "previous / next message you typed"),
             ("tab", "complete · pick a file"),
             ("@", "mention a file"),
             ("ctrl+a/e", "start / end of line"),
@@ -2230,7 +2254,31 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     let g = &app.glyphs;
     let mut left: Vec<Span<'static>> = Vec::new();
 
-    match (app.busy, app.turn_started) {
+    // Compaction runs outside the normal turn (no `busy`), so give it its own
+    // animated status ahead of the ready/working match — otherwise the prompt
+    // would read "ready" while the summary call is still in flight.
+    if let Some(started) = app.compacting {
+        let glyph = if app.motion.animates() {
+            g.thinking[anim::sweep(started.elapsed()) % g.thinking.len()]
+        } else {
+            g.thinking[0]
+        };
+        let tint = if app.cancelling { t.warning } else { t.accent };
+        left.push(Span::styled(format!(" {glyph} "), t.fg(tint)));
+        let verb = if app.cancelling { "cancelling compaction" } else { "compacting context" };
+        let label = format!("{verb}…  {}", anim::short_elapsed(started.elapsed()));
+        if app.motion.animates() && !app.cancelling {
+            let bright = anim::shimmer(label.chars().count(), started.elapsed(), Duration::from_millis(1600));
+            let base = t.muted;
+            for (ch, b) in label.chars().zip(bright) {
+                let colour = if b <= 0.0 { base } else { theme::mix(base, t.accent, b) };
+                left.push(Span::styled(ch.to_string(), t.fg(colour)));
+            }
+        } else {
+            left.push(Span::styled(label, if app.cancelling { t.emphasis(t.warning) } else { t.dim() }));
+        }
+    } else {
+        match (app.busy, app.turn_started) {
         (true, _) if app.cancelling => {
             // The interrupt landed but the turn is still unwinding (a tool call
             // in flight, a stream draining). Say so, in the warning tint, rather
@@ -2290,6 +2338,7 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
             left.push(Span::styled("ready".to_string(), t.dim()));
         }
     }
+    }
 
     if let Some((done, total)) = app.transcript.todo_progress() {
         left.push(Span::styled(format!("  {} ", g.sep), t.dim()));
@@ -2320,6 +2369,8 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     } else if app.plan_blocked {
         &[("ctrl+p", "switch to execute")]
     } else if app.busy {
+        &[("esc", "interrupt")]
+    } else if app.compacting.is_some() {
         &[("esc", "interrupt")]
     } else if !app.follow {
         &[("pgdn", "latest")]
@@ -3116,6 +3167,7 @@ pub async fn run(
         follow: true,
         busy: false,
         cancelling: false,
+        compacting: None,
         activity: None,
         motion: anim::Motion::Full,
         reveal_pref: cfg.reveal,

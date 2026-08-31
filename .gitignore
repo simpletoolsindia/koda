@@ -1,1 +1,19 @@
 /target
+
+# Node / tooling deps (web visual tests, docs-site)
+node_modules/
+**/node_modules/
+
+# Playwright visual-test output
+tests/visual/shots/
+tests/visual/test-results/
+tests/visual/playwright-report/
+
+# Local session data (per-project, not source)
+.koda/sessions/
+
+# Built docs-site output
+docs-site/dist/
+
+# OS / editor cruft
+.DS_Store

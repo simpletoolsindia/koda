@@ -1,4 +1,16 @@
 // App.jsx — Root component: nav, data polling, toasts, section routing
+// Fetch JSON from a koda API endpoint. A 404 almost always means the running
+// koda binary is older than this UI and lacks the endpoint — so say exactly
+// that, since "failed to load" alone sends people hunting in the wrong place.
+async function fetchJson(path) {
+  const res = await fetch(path);
+  if (res.status === 404) {
+    throw new Error(`${path} is missing — your running koda is older than this UI. Rebuild and restart koda (cargo build --release) to enable this tab.`);
+  }
+  if (!res.ok) throw new Error(`${path} returned ${res.status}`);
+  return res.json();
+}
+
 function App() {
   const [tab, setTab] = React.useState('logs');
   const [logs, setLogs] = React.useState([]);
@@ -17,6 +29,10 @@ function App() {
   const [skills, setSkills] = React.useState(null);
   const [skillsLoading, setSkillsLoading] = React.useState(false);
   const [skillsError, setSkillsError] = React.useState(null);
+
+  const [settings, setSettings] = React.useState(null);
+  const [settingsLoading, setSettingsLoading] = React.useState(false);
+  const [settingsError, setSettingsError] = React.useState(null);
 
   const seenSeqRef = React.useRef(-1);
   const logsRef = React.useRef([]);
@@ -85,41 +101,60 @@ function App() {
   const loadDebug = React.useCallback(async () => {
     setDebugLoading(true); setDebugError(null);
     try {
-      const res = await fetch('/api/debug');
-      if (!res.ok) throw new Error('bad status');
-      setDebug(await res.json());
+      setDebug(await fetchJson('/api/debug'));
     } catch (e) { setDebugError(e.message); } finally { setDebugLoading(false); }
   }, []);
 
   const loadGraph = React.useCallback(async () => {
     setGraphLoading(true); setGraphError(null);
     try {
-      const res = await fetch('/api/codegraph');
-      if (!res.ok) throw new Error('bad status');
-      setGraph(await res.json());
+      setGraph(await fetchJson('/api/codegraph'));
     } catch (e) { setGraphError(e.message); } finally { setGraphLoading(false); }
   }, []);
 
   const loadSkills = React.useCallback(async () => {
     setSkillsLoading(true); setSkillsError(null);
     try {
-      const res = await fetch('/api/skills');
-      if (!res.ok) throw new Error('bad status');
-      setSkills(await res.json());
+      setSkills(await fetchJson('/api/skills'));
     } catch (e) { setSkillsError(e.message); } finally { setSkillsLoading(false); }
+  }, []);
+
+  const loadSettings = React.useCallback(async () => {
+    setSettingsLoading(true); setSettingsError(null);
+    try {
+      setSettings(await fetchJson('/api/settings'));
+    } catch (e) { setSettingsError(e.message); } finally { setSettingsLoading(false); }
   }, []);
 
   React.useEffect(() => {
     if (tab === 'debug' && !debug) loadDebug();
     if (tab === 'graph' && !graph) loadGraph();
     if (tab === 'skills' && !skills) loadSkills();
+    if (tab === 'system' && !settings) loadSettings();
   }, [tab]);
+
+  // While the LLM Debug tab is open, poll so the prompt currently being
+  // processed and the response streaming back appear live (no manual refresh).
+  // Silent refresh: never flips the tab into a loading spinner.
+  const refreshDebugQuiet = React.useCallback(async () => {
+    try {
+      const res = await fetch('/api/debug');
+      if (!res.ok) return;
+      setDebug(await res.json());
+    } catch (_) { /* keep last snapshot on a blip */ }
+  }, []);
+
+  React.useEffect(() => {
+    if (tab !== 'debug') return;
+    const iv = setInterval(refreshDebugQuiet, 1000);
+    return () => clearInterval(iv);
+  }, [tab, refreshDebugQuiet]);
 
   // Keyboard shortcuts 1-4
   React.useEffect(() => {
     const handler = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      const map = { '1': 'logs', '2': 'debug', '3': 'graph', '4': 'skills' };
+      const map = { '1': 'logs', '2': 'debug', '3': 'graph', '4': 'skills', '5': 'system' };
       if (map[e.key]) setTab(map[e.key]);
     };
     window.addEventListener('keydown', handler);
@@ -131,6 +166,7 @@ function App() {
     { id: 'debug', label: 'LLM Debug', icon: 'M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' },
     { id: 'graph', label: 'Code Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
     { id: 'skills', label: 'Agents & Skills', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
+    { id: 'system', label: 'System Prompt', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
   ];
 
   return (
@@ -190,11 +226,12 @@ function App() {
         {tab === 'debug' && <LlmDebug debug={debug} loading={debugLoading} error={debugError} />}
         {tab === 'graph' && <CodeGraph graph={graph} loading={graphLoading} error={graphError} />}
         {tab === 'skills' && <AgentsSkills skills={skills} loading={skillsLoading} error={skillsError} onRefresh={loadSkills} pushToast={pushToast} />}
+        {tab === 'system' && <SystemPrompt data={settings} loading={settingsLoading} error={settingsError} onRefresh={loadSettings} pushToast={pushToast} />}
       </main>
 
       {/* Refresh button for section data */}
       {tab !== 'logs' && (
-        <button onClick={() => { if (tab==='debug') loadDebug(); if (tab==='graph') loadGraph(); if (tab==='skills') loadSkills(); }}
+        <button onClick={() => { if (tab==='debug') loadDebug(); if (tab==='graph') loadGraph(); if (tab==='skills') loadSkills(); if (tab==='system') loadSettings(); }}
           className="fixed bottom-4 right-4 z-20 w-10 h-10 rounded-full bg-white/10 backdrop-blur border border-white/10 flex items-center justify-center text-gray-300 hover:bg-white/20 hover:rotate-180 transition-all duration-500"
           aria-label="Refresh data" title="Refresh">
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>

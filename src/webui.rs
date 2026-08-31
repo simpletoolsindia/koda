@@ -183,6 +183,19 @@ async fn route(
             let json = save_skill(&ctx.root, body);
             ("200 OK", "application/json", json.into_bytes())
         }
+        ("DELETE", p) if p.starts_with("/api/skills/") => {
+            let name = url_decode(p.trim_start_matches("/api/skills/"));
+            let json = delete_skill(&ctx.root, &name);
+            ("200 OK", "application/json", json.into_bytes())
+        }
+        ("GET", "/api/settings") => {
+            let json = settings_json(&ctx.root);
+            ("200 OK", "application/json", json.into_bytes())
+        }
+        ("POST", "/api/settings") => {
+            let json = save_settings(&ctx.root, body);
+            ("200 OK", "application/json", json.into_bytes())
+        }
         _ => (
             "404 Not Found",
             "application/json",
@@ -334,6 +347,135 @@ fn save_skill(root: &Path, body: &str) -> String {
     }
 }
 
+/// Minimal percent-decoder for a single URL path segment (handles `%XX` and
+/// `+`). Enough for skill names in a `DELETE /api/skills/<name>` path.
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Delete a skill or role agent by name. The file removed is the `source` of the
+/// loaded skill, which is guaranteed to live under one of the known skills dirs
+/// (user config or `<root>/.koda/skills`) — so a crafted name cannot escape to
+/// delete an arbitrary file. Returns `{ok, path}` or `{ok:false, error}`.
+fn delete_skill(root: &Path, name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return serde_json::json!({ "ok": false, "error": "name is required" }).to_string();
+    }
+    let allowed = crate::skills::dirs(root);
+    let skills = crate::skills::load(root);
+    let Some(skill) = skills.into_iter().find(|s| s.name == name) else {
+        return serde_json::json!({ "ok": false, "error": format!("no skill named {name:?}") })
+            .to_string();
+    };
+    // Defence in depth: the file we delete must sit inside an allowed dir.
+    let target = skill.source;
+    let inside = allowed.iter().any(|d| {
+        match (std::fs::canonicalize(d), std::fs::canonicalize(&target)) {
+            (Ok(dd), Ok(tt)) => tt.starts_with(&dd),
+            // Fall back to a lexical check if canonicalize fails (e.g. dir gone).
+            _ => target.starts_with(d),
+        }
+    });
+    if !inside {
+        return serde_json::json!({
+            "ok": false,
+            "error": "refusing to delete a file outside the skills directories"
+        })
+        .to_string();
+    }
+    match std::fs::remove_file(&target) {
+        Ok(()) => serde_json::json!({ "ok": true, "path": target.display().to_string() })
+            .to_string(),
+        Err(e) => {
+            serde_json::json!({ "ok": false, "error": format!("delete: {e}") }).to_string()
+        }
+    }
+}
+
+/// Settings surfaced to the web UI. Currently the system prompt: the effective
+/// custom prompt (empty means "use the built-in"), plus the built-in default so
+/// the UI can show and let the user start from it.
+fn settings_json(root: &Path) -> String {
+    let cfg = crate::config::Config::load(root).unwrap_or_default();
+    serde_json::json!({
+        "system_prompt": cfg.system_prompt,
+        "builtin_prompt": crate::prompt::base_prompt(),
+        "using_builtin": cfg.system_prompt.trim().is_empty(),
+        "config_path": crate::config::config_path().display().to_string(),
+    })
+    .to_string()
+}
+
+/// Update the system prompt from `{ "system_prompt": "..." }`. Saving the
+/// built-in text verbatim (or empty) resets to the built-in. Persisted to the
+/// user config; a running koda picks it up on next start (the UI notes this).
+fn save_settings(root: &Path, body: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
+        }
+    };
+    let prompt = v
+        .get("system_prompt")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut cfg = match crate::config::Config::load(root) {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("load config: {e}") })
+                .to_string()
+        }
+    };
+    // Storing the unchanged built-in (or empty) means "use the built-in".
+    cfg.system_prompt = if prompt.trim().is_empty()
+        || prompt.trim() == crate::prompt::base_prompt().trim()
+    {
+        String::new()
+    } else {
+        prompt
+    };
+    match crate::config::save(&cfg) {
+        Ok(path) => serde_json::json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "using_builtin": cfg.system_prompt.trim().is_empty(),
+            "note": "saved — a running koda applies it on next start"
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("save: {e}") }).to_string(),
+    }
+}
+
 /// Load the built React app if present, else a helpful placeholder page.
 fn load_index(root: &Path) -> String {
     for candidate in [
@@ -425,6 +567,43 @@ mod tests {
     }
 
     #[test]
+    fn url_decode_handles_percent_and_plus() {
+        assert_eq!(url_decode("plain"), "plain");
+        assert_eq!(url_decode("a%2Db"), "a-b");
+        assert_eq!(url_decode("hello+world"), "hello world");
+        assert_eq!(url_decode("rust%2Derror"), "rust-error");
+    }
+
+    #[test]
+    fn delete_skill_round_trips_and_is_sandboxed() {
+        let root = std::env::temp_dir().join(format!("koda-del-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        // Create a project skill via the same path save_skill uses.
+        let created = save_skill(
+            &root,
+            r#"{"name":"temp-skill","when":"testing","body":"just a test"}"#,
+        );
+        assert!(created.contains("\"ok\":true"), "{created}");
+
+        // Deleting an unknown name is a clean, safe error.
+        let missing = delete_skill(&root, "does-not-exist");
+        assert!(missing.contains("\"ok\":false"), "{missing}");
+
+        // Deleting the real one succeeds and removes the file.
+        let removed = delete_skill(&root, "temp-skill");
+        assert!(removed.contains("\"ok\":true"), "{removed}");
+        assert!(
+            crate::skills::load(&root).iter().all(|s| s.name != "temp-skill"),
+            "skill should be gone after delete"
+        );
+
+        // A second delete now reports it's gone (not a panic, not a stray write).
+        let again = delete_skill(&root, "temp-skill");
+        assert!(again.contains("\"ok\":false"), "{again}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn fallback_index_is_html() {
         assert!(FALLBACK_INDEX.contains("<html"));
         assert!(FALLBACK_INDEX.contains("/api/logs"));
@@ -457,5 +636,112 @@ mod tests {
 
         let missing = get(addr, "/nope").await;
         assert!(missing.contains("404 Not Found"));
+    }
+
+    #[test]
+    fn settings_json_reports_builtin_by_default() {
+        let root = std::env::temp_dir().join(format!("koda-settings-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let json = settings_json(&root);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // A fresh project uses the built-in prompt and exposes it to the UI.
+        assert_eq!(v["using_builtin"], serde_json::Value::Bool(true));
+        assert!(v["builtin_prompt"].as_str().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn save_settings_rejects_bad_json() {
+        let root = std::env::temp_dir().join("koda-settings-badjson");
+        let out = save_settings(&root, "not json");
+        assert!(out.contains("\"ok\":false"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn server_gets_and_posts_system_prompt() {
+        // Isolate the global config dir so the POST never touches the real user
+        // config. (config::save writes to XDG_CONFIG_HOME/koda/config.toml.)
+        let cfg_home = std::env::temp_dir().join(format!("koda-xdg-{}", std::process::id()));
+        std::fs::remove_dir_all(&cfg_home).ok();
+        std::fs::create_dir_all(&cfg_home).ok();
+        std::env::set_var("XDG_CONFIG_HOME", &cfg_home);
+
+        let root = std::env::temp_dir().join(format!("koda-settings-http-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).ok();
+        let addr = start(root.clone(), 0, "medium".into()).await.expect("bind");
+
+        async fn req(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> String {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let r = format!(
+                "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            s.write_all(r.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        }
+
+        // GET exposes the built-in prompt.
+        let got = req(addr, "GET", "/api/settings", "").await;
+        assert!(got.contains("200 OK"), "{got}");
+        assert!(got.contains("\"using_builtin\":true"), "{got}");
+
+        // POST a custom prompt, then GET reflects it as custom.
+        let posted = req(
+            addr,
+            "POST",
+            "/api/settings",
+            r#"{"system_prompt":"You are a terse code reviewer."}"#,
+        )
+        .await;
+        assert!(posted.contains("\"ok\":true"), "{posted}");
+        let got2 = req(addr, "GET", "/api/settings", "").await;
+        assert!(got2.contains("terse code reviewer"), "{got2}");
+        assert!(got2.contains("\"using_builtin\":false"), "{got2}");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&cfg_home).ok();
+    }
+
+    #[tokio::test]
+    async fn server_deletes_a_skill_over_http() {
+        // Seed a project skill, then delete it through the live DELETE route.
+        let root = std::env::temp_dir().join(format!("koda-webui-del-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let created = save_skill(&root, r#"{"name":"web-temp","when":"t","body":"b"}"#);
+        assert!(created.contains("\"ok\":true"), "{created}");
+
+        let addr = start(root.clone(), 0, "medium".into()).await.expect("bind");
+
+        async fn req(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let r = format!("{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            s.write_all(r.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        }
+
+        // The skill is listed…
+        let before = req(addr, "GET", "/api/skills").await;
+        assert!(before.contains("web-temp"), "skill should be listed: {before}");
+
+        // …DELETE removes it (200 + ok:true)…
+        let del = req(addr, "DELETE", "/api/skills/web-temp").await;
+        assert!(del.contains("200 OK"), "{del}");
+        assert!(del.contains("\"ok\":true"), "{del}");
+
+        // …and it's gone from the listing and disk.
+        let after = req(addr, "GET", "/api/skills").await;
+        assert!(!after.contains("web-temp"), "skill should be gone: {after}");
+        assert!(
+            crate::skills::load(&root).iter().all(|s| s.name != "web-temp"),
+            "skill file should be removed"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

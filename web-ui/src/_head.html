@@ -89,5 +89,22 @@
     </div>
   </div>
 
-  <!-- Application source (JSX, transformed in-browser by Babel Standalone) -->
-  <script type="text/babel" data-presets="react" data-type="module">
+  <!-- Application source (JSX, transformed in-browser by Babel Standalone).
+       A plain (non-module) babel script uses the classic JSX runtime
+       (React.createElement against the global React). We must NOT use
+       data-type="module": that switches Babel to the automatic runtime, which
+       emits `import ... from "react/jsx-runtime"` — a bare module specifier the
+       browser can't resolve, leaving the app stuck on the loading screen. -->
+  <!-- Babel Standalone defaults its "react" preset to the *automatic* JSX
+       runtime, which emits `import ... from "react/jsx-runtime"` — a bare module
+       specifier the browser can't resolve, so the app never mounts. Register a
+       classic-runtime preset (React.createElement against the global React) and
+       use it by name below. -->
+  <script>
+    Babel.registerPreset('react-classic', {
+      presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]],
+    });
+  </script>
+
+  <!-- Application source (JSX, transformed in-browser by Babel Standalone). -->
+  <script type="text/babel" data-presets="react-classic">

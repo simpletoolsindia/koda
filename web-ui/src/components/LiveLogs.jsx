@@ -116,6 +116,23 @@ function LiveLogs({ logs, version, connected }) {
           {autoScroll ? 'Tailing' : 'Paused'}
         </button>
         <span className="text-[10px] text-gray-600 tabular-nums">{filtered.length} entries</span>
+        {/* Export filtered logs as JSON */}
+        <button onClick={() => {
+            const data = filtered.map(e => ({ seq: e.seq, at: e.at, level: e.level, area: e.area, message: e.message, fields: e.fields || [] }));
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            a.href = url; a.download = `koda-logs-${stamp}.json`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }}
+          disabled={filtered.length === 0}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all border bg-white/5 border-white/10 text-gray-400 hover:text-gray-200 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed hover:scale-105 active:scale-95"
+          aria-label="Export filtered logs as JSON" title="Download the filtered logs as JSON">
+          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+          Export
+        </button>
       </div>
 
       {/* Log entries */}

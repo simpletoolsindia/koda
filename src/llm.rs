@@ -553,9 +553,24 @@ impl Client {
                     } else {
                         tel_warn!("http", format!("request failed: {e:#}"));
                     }
-                    // Partial output already reached the screen; a retry would
-                    // duplicate it, so stop here.
-                    if emitted > 0 || !retryable {
+                    // A transient drop *after* some output already streamed (e.g.
+                    // an unexpected mid-stream EOF) is salvageable: the partial
+                    // reply and any completed tool calls are already on screen and
+                    // usable. Retrying would duplicate that output, so instead we
+                    // end the turn gracefully with a note rather than failing it.
+                    if emitted > 0 {
+                        if retryable {
+                            tel_warn!(
+                                "http",
+                                "stream cut short; keeping the partial reply",
+                                "events" => emitted,
+                            );
+                            return Ok(());
+                        }
+                        return Err(e);
+                    }
+                    // Nothing produced yet: retry transient errors, fail permanent.
+                    if !retryable {
                         return Err(e);
                     }
                     last = Some(e);
@@ -593,7 +608,20 @@ impl Client {
         let mut finished = false;
 
         while let Some(chunk) = stream.next().await {
-            let bytes = chunk.context("reading stream chunk")?;
+            let bytes = match chunk {
+                Ok(b) => b,
+                // The connection dropped mid-stream (a common failure with local
+                // servers under load: "unexpected EOF during chunk"). Classify it
+                // as transient so the caller can retry when nothing was produced,
+                // or salvage the partial turn when some output already arrived.
+                Err(e) => {
+                    return Err(ApiError::transient(
+                        "the reply from the server was cut short",
+                        format!("reading stream chunk: {e}"),
+                    )
+                    .into());
+                }
+            };
             if let Some(cap) = &capture {
                 cap.write_chunk(&bytes);
             }

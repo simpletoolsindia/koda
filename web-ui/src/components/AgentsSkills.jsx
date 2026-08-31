@@ -11,6 +11,24 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
 
   const resetForm = () => setForm({ name: '', when: '', role: '', body: '' });
 
+  const remove = async (s, e) => {
+    if (e) e.stopPropagation();
+    if (!window.confirm(`Delete ${s.role ? 'agent' : 'skill'} "${s.name}"? This removes ${s.source || 'its file'}.`)) return;
+    try {
+      const res = await fetch('/api/skills/' + encodeURIComponent(s.name), { method: 'DELETE' });
+      const data = await res.json();
+      if (data.ok) {
+        pushToast(`Deleted "${s.name}"`, 'success');
+        if (form.name === s.name) resetForm();
+        onRefresh();
+      } else {
+        pushToast(data.error || 'Delete failed', 'error');
+      }
+    } catch (err) {
+      pushToast('Request failed: ' + err.message, 'error');
+    }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (!form.name.trim()) { pushToast('Name is required', 'error'); return; }
@@ -58,25 +76,41 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
         </div>
 
         {loading && list.length === 0 && <div className="text-gray-500 text-sm">Loading…</div>}
-        {!loading && filtered.length === 0 && <div className="text-gray-500 text-sm p-4 rounded-lg bg-white/[0.02] border border-white/5">No entries. Create one on the right →</div>}
+        {error && list.length === 0 && (
+          <div className="text-sm text-amber-200 bg-amber-500/10 border border-amber-500/20 rounded-lg p-4">{error}</div>
+        )}
+        {!loading && !error && filtered.length === 0 && <div className="text-gray-500 text-sm p-4 rounded-lg bg-white/[0.02] border border-white/5">No entries. Create one on the right →</div>}
 
         <div className="grid gap-2 sm:grid-cols-2">
           {filtered.map((s, i) => (
-            <button key={i} onClick={() => loadIntoForm(s)}
-              className="text-left p-3 rounded-xl bg-white/[0.03] border border-white/5 hover:border-cyan-500/30 hover:bg-white/[0.05] transition-all group animate-fade-in">
+            <div key={i}
+              className="relative text-left p-3 rounded-xl bg-white/[0.03] border border-white/5 hover:border-cyan-500/30 hover:bg-white/[0.05] transition-all group animate-fade-in">
               <div className="flex items-center gap-2 mb-1">
-                <span className="font-mono text-sm text-gray-100 font-semibold truncate">{s.name}</span>
-                {s.role ? (
-                  <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] font-medium border border-purple-500/30">agent · {s.role}</span>
-                ) : (
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-medium border border-emerald-500/30">skill</span>
-                )}
-                <svg className="w-3.5 h-3.5 text-gray-600 ml-auto opacity-0 group-hover:opacity-100 transition-opacity" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                <button type="button" onClick={() => loadIntoForm(s)} className="flex items-center gap-2 min-w-0 flex-1 text-left" aria-label={`Edit ${s.name}`}>
+                  <span className="font-mono text-sm text-gray-100 font-semibold truncate">{s.name}</span>
+                  {s.role ? (
+                    <span className="px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 text-[10px] font-medium border border-purple-500/30 shrink-0">agent · {s.role}</span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-medium border border-emerald-500/30 shrink-0">skill</span>
+                  )}
+                </button>
+                <div className="flex items-center gap-1 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button type="button" onClick={() => loadIntoForm(s)} title="Edit" aria-label={`Edit ${s.name}`}
+                    className="p-1 rounded text-gray-500 hover:text-cyan-300 hover:bg-white/10">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                  </button>
+                  <button type="button" onClick={(e) => remove(s, e)} title="Delete" aria-label={`Delete ${s.name}`}
+                    className="p-1 rounded text-gray-500 hover:text-red-400 hover:bg-red-500/10">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  </button>
+                </div>
               </div>
-              {s.when && <div className="text-[11px] text-gray-500 mb-1"><span className="text-gray-600">when:</span> {s.when}</div>}
-              {s.body && <div className="text-[11px] text-gray-400 line-clamp-2 leading-relaxed">{s.body.slice(0, 140)}{s.body.length > 140 ? '…' : ''}</div>}
-              {s.source && <div className="text-[10px] text-gray-600 mt-1.5 truncate">📄 {s.source}</div>}
-            </button>
+              <button type="button" onClick={() => loadIntoForm(s)} className="block w-full text-left" aria-label={`Edit ${s.name} details`}>
+                {s.when && <div className="text-[11px] text-gray-500 mb-1"><span className="text-gray-600">when:</span> {s.when}</div>}
+                {s.body && <div className="text-[11px] text-gray-400 line-clamp-2 leading-relaxed">{s.body.slice(0, 140)}{s.body.length > 140 ? '…' : ''}</div>}
+                {s.source && <div className="text-[10px] text-gray-600 mt-1.5 truncate">📄 {s.source}</div>}
+              </button>
+            </div>
           ))}
         </div>
       </div>

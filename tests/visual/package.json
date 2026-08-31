@@ -1,0 +1,1 @@
+{"name":"koda-webui-visual","private":true,"type":"module","dependencies":{"@playwright/test":"^1.62.1"}}

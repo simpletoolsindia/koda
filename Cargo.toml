@@ -36,6 +36,18 @@ tokio = { version = "1", features = [
 toml = "0.8"
 unicode-width = "0.2"
 
+# Optional heavy formats. Off by default so the ~6 MB binary is unchanged;
+# a packager opts in with `--features docs` and/or `--features pdf`.
+calamine = { version = "0.26", optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+quick-xml = { version = "0.36", optional = true }
+pdf-extract = { version = "0.7", optional = true }
+
+[features]
+default = []
+docs = ["dep:calamine", "dep:zip", "dep:quick-xml"]
+pdf = ["dep:pdf-extract"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
 

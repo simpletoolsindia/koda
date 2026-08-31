@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Verify bug 1/2: with an EMPTY input, up/down scroll the transcript so the user
-# can read back agent responses (previously the up key was hijacked by input
-# history and never scrolled). Uses a tiny terminal so content overflows and
-# scrolling is observable.
+# Verify transcript scrolling: Ctrl+Up scrolls the agent response window so the
+# user can read back agent responses. (Plain Up/Down recall input history;
+# Ctrl+Up/Down and PageUp/PageDown scroll.) Uses a tiny terminal so content
+# overflows and scrolling is observable.
 import os, pty, subprocess, time, fcntl, termios, struct, tempfile
 
 ROWS, COLS = 14, 80   # small height so the transcript overflows
@@ -58,18 +58,19 @@ def run():
     read(3.0)                      # let the turn complete (multiple tool blocks + reply)
     top_before = grid[0][:]        # first visible row while following the tail
     before = snap()
-    # Empty input now — press Up several times; the transcript should scroll up.
+    # Empty input — press Ctrl+Up several times; the transcript should scroll up.
+    # (Plain Up now recalls input history; Ctrl+Up is the scroll key.)
     for _ in range(6):
-        os.write(master, b"\x1b[A")  # Up arrow
+        os.write(master, b"\x1b[1;5A")  # Ctrl+Up
         read(0.3)
     after = snap()
     top_after = "".join(grid[0])
     changed = before != after
     print("=== BEFORE (tail) top row ===")
     print("|" + "".join(top_before).rstrip())
-    print("=== AFTER 6x Up, top row ===")
+    print("=== AFTER 6x Ctrl+Up, top row ===")
     print("|" + top_after.rstrip())
-    print("VERDICT:", "SCROLLS (up-arrow moved the transcript)" if changed else "BROKEN (no scroll)")
+    print("VERDICT:", "SCROLLS (ctrl+up moved the transcript)" if changed else "BROKEN (no scroll)")
     os.write(master, b"\x03\x03")  # ctrl+c twice to quit
     read(0.5)
     proc.terminate()

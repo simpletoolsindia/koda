@@ -734,6 +734,248 @@ fn format_delimited(text: &str, delim: char) -> String {
     out
 }
 
+// ---------------------------------------------------------------- documents
+
+/// A rich document format that `read_file` extracts text from, rather than
+/// reading raw bytes. Images are deliberately excluded (they go to the vision
+/// path, see spec-image-input.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocKind {
+    Csv,
+    Tsv,
+    Xlsx,
+    Docx,
+    Pdf,
+}
+
+impl DocKind {
+    /// Map a lower-cased file extension to a document kind, or `None` for the
+    /// ordinary text/binary path.
+    pub(crate) fn from_ext(ext: &str) -> Option<DocKind> {
+        match ext {
+            "csv" => Some(DocKind::Csv),
+            "tsv" | "tab" => Some(DocKind::Tsv),
+            "xlsx" | "xlsm" | "xls" | "ods" => Some(DocKind::Xlsx),
+            "docx" => Some(DocKind::Docx),
+            "pdf" => Some(DocKind::Pdf),
+            _ => None,
+        }
+    }
+
+    /// Synthetic language tag for `ToolView::Read` syntax hinting.
+    pub(crate) fn tag(&self) -> &'static str {
+        match self {
+            DocKind::Csv => "csv",
+            DocKind::Tsv => "tsv",
+            DocKind::Xlsx => "sheet",
+            DocKind::Docx => "text",
+            DocKind::Pdf => "text",
+        }
+    }
+}
+
+/// Strip bytes that could smuggle terminal-escape sequences or corrupt the
+/// transcript out of extracted document text. Keeps `\n` and `\t`; drops NUL,
+/// other C0 controls, and the DEL char. Extracted document text is *data*, never
+/// instructions — this is a defence against a malicious PDF/XLSX.
+pub(crate) fn sanitize_text(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c == '\n' || c == '\t' || (c >= ' ' && c != '\u{7f}'))
+        .collect()
+}
+
+/// Parse a CSV/TSV byte slice into an aligned table (reuses `format_delimited`).
+fn extract_csv(bytes: &[u8], delim: char) -> Result<String> {
+    let text = String::from_utf8_lossy(bytes);
+    Ok(format_delimited(&text, delim))
+}
+
+/// Extract readable text from a document given its raw bytes. Feature-gated
+/// formats return a clear "rebuild with --features" message when the feature is
+/// off. Output is sanitized here so every path is covered.
+pub(crate) fn read_document(kind: DocKind, bytes: &[u8]) -> Result<String> {
+    let raw = match kind {
+        DocKind::Csv => extract_csv(bytes, ',')?,
+        DocKind::Tsv => extract_csv(bytes, '\t')?,
+        DocKind::Xlsx => extract_xlsx(bytes)?,
+        DocKind::Docx => extract_docx(bytes)?,
+        DocKind::Pdf => extract_pdf(bytes)?,
+    };
+    Ok(sanitize_text(&raw))
+}
+
+// --- XLSX / DOCX: the `docs` feature -------------------------------------
+
+#[cfg(not(feature = "docs"))]
+fn extract_xlsx(_bytes: &[u8]) -> Result<String> {
+    bail!(
+        "reading spreadsheets (XLSX/XLS/ODS) needs koda built with the `docs` \
+         feature: `cargo install koda --features docs` (or `cargo build \
+         --features docs`)."
+    )
+}
+
+#[cfg(not(feature = "docs"))]
+fn extract_docx(_bytes: &[u8]) -> Result<String> {
+    bail!(
+        "reading Word documents (DOCX) needs koda built with the `docs` \
+         feature: `cargo install koda --features docs` (or `cargo build \
+         --features docs`)."
+    )
+}
+
+#[cfg(feature = "docs")]
+fn extract_xlsx(bytes: &[u8]) -> Result<String> {
+    use calamine::{Data, Reader};
+    use std::io::Cursor;
+    let mut wb = calamine::open_workbook_auto_from_rs(Cursor::new(bytes.to_vec()))
+        .context("opening spreadsheet")?;
+    let mut out = String::new();
+    let names = wb.sheet_names().to_vec();
+    for name in names {
+        let range = match wb.worksheet_range(&name) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = writeln!(out, "=== Sheet: \"{name}\" (unreadable: {e}) ===\n");
+                continue;
+            }
+        };
+        let (rows, cols) = range.get_size();
+        let _ = writeln!(out, "=== Sheet: \"{name}\" ({cols}×{rows}) ===");
+        for row in range.rows() {
+            let cells: Vec<String> = row
+                .iter()
+                .map(|c| match c {
+                    Data::Empty => String::new(),
+                    Data::String(s) => s.clone(),
+                    Data::Float(f) => {
+                        // Render integer-valued floats without a trailing .0.
+                        if f.fract() == 0.0 {
+                            format!("{}", *f as i64)
+                        } else {
+                            f.to_string()
+                        }
+                    }
+                    Data::Int(i) => i.to_string(),
+                    Data::Bool(b) => b.to_string(),
+                    Data::DateTime(d) => d.to_string(),
+                    Data::DateTimeIso(s) => s.clone(),
+                    Data::DurationIso(s) => s.clone(),
+                    Data::Error(e) => format!("#ERR:{e:?}"),
+                })
+                .collect();
+            let _ = writeln!(out, "{}", cells.join("\t"));
+        }
+        out.push('\n');
+    }
+    if out.is_empty() {
+        out.push_str("(empty workbook)\n");
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "docs")]
+fn extract_docx(bytes: &[u8]) -> Result<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader as XmlReader;
+    use std::io::{Cursor, Read};
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))
+        .context("opening DOCX (zip)")?;
+    let mut xml = String::new();
+    zip.by_name("word/document.xml")
+        .context("DOCX missing word/document.xml")?
+        .read_to_string(&mut xml)
+        .context("reading word/document.xml")?;
+
+    let mut reader = XmlReader::from_str(&xml);
+    reader.config_mut().trim_text(false);
+    let mut out = String::new();
+    let mut in_text = false;
+    let mut para = String::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.local_name();
+                match name.as_ref() {
+                    b"t" => in_text = true,
+                    b"tab" => para.push('\t'),
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if in_text {
+                    para.push_str(&t.unescape().unwrap_or_default());
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.local_name();
+                match name.as_ref() {
+                    b"t" => in_text = false,
+                    // Paragraph or table-cell boundary → flush a line.
+                    b"p" => {
+                        out.push_str(para.trim_end());
+                        out.push('\n');
+                        para.clear();
+                    }
+                    b"tc" => {
+                        if !para.is_empty() {
+                            para.push('\t');
+                        }
+                    }
+                    b"br" => para.push('\n'),
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = e.local_name();
+                if name.as_ref() == b"br" {
+                    para.push('\n');
+                } else if name.as_ref() == b"tab" {
+                    para.push('\t');
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => bail!("parsing DOCX xml: {e}"),
+            _ => {}
+        }
+    }
+    if !para.trim().is_empty() {
+        out.push_str(para.trim_end());
+        out.push('\n');
+    }
+    if out.trim().is_empty() {
+        out.push_str("(no extractable text)\n");
+    }
+    Ok(out)
+}
+
+// --- PDF: the `pdf` feature ----------------------------------------------
+
+#[cfg(not(feature = "pdf"))]
+fn extract_pdf(_bytes: &[u8]) -> Result<String> {
+    bail!(
+        "reading PDFs needs koda built with the `pdf` feature: \
+         `cargo install koda --features pdf` (or `cargo build --features pdf`)."
+    )
+}
+
+#[cfg(feature = "pdf")]
+fn extract_pdf(bytes: &[u8]) -> Result<String> {
+    let text = pdf_extract::extract_text_from_mem(bytes)
+        .context("extracting text from PDF")?;
+    // A scanned / image-only PDF yields (almost) no text. Point at the vision
+    // path rather than pretending the document is empty, and never OCR here.
+    if text.trim().chars().filter(|c| !c.is_whitespace()).count() < 8 {
+        bail!(
+            "this PDF has no extractable text — it is likely scanned or \
+             image-only. Attach its pages as images so a vision-capable model \
+             can read them (see @image support)."
+        );
+    }
+    Ok(text)
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -881,26 +1123,37 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         return Ok(Outcome::err(format!("{path} is a directory; use list_dir")));
     }
     let bytes = std::fs::read(&full).with_context(|| format!("reading {path}"))?;
-    if looks_binary(&bytes) {
-        return Ok(Outcome::err(format!(
-            "{path} looks like a binary file ({} bytes)",
-            bytes.len()
-        )));
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let text = truncate(&text, ctx.cfg.max_file_bytes);
 
-    // CSV/TSV get rendered as an aligned table with a header rule, which the
-    // model reads far more reliably than raw comma-separated lines.
+    // Rich document formats (CSV/XLSX/DOCX/PDF) are extracted to text *before*
+    // the binary guard, since XLSX/DOCX/PDF are binary containers. Images are
+    // not DocKinds — they go to the vision path.
     let ext = full
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let text = if matches!(ext.as_str(), "csv" | "tsv") {
-        format_delimited(&text, if ext == "tsv" { '\t' } else { ',' })
+    let doc_kind = DocKind::from_ext(&ext);
+
+    let text = if let Some(kind) = doc_kind {
+        if bytes.len() > ctx.cfg.max_document_bytes {
+            return Ok(Outcome::err(format!(
+                "{path} is {} bytes, over max_document_bytes ({}); refusing to parse it",
+                bytes.len(),
+                ctx.cfg.max_document_bytes
+            )));
+        }
+        match read_document(kind, &bytes) {
+            Ok(t) => truncate(&t, ctx.cfg.max_file_bytes),
+            Err(e) => return Ok(Outcome::err(format!("{path}: {e}"))),
+        }
     } else {
-        text
+        if looks_binary(&bytes) {
+            return Ok(Outcome::err(format!(
+                "{path} looks like a binary file ({} bytes)",
+                bytes.len()
+            )));
+        }
+        truncate(&String::from_utf8_lossy(&bytes), ctx.cfg.max_file_bytes)
     };
 
     let offset = arg_usize(args, "offset").unwrap_or(1).max(1);
@@ -931,7 +1184,7 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     )
     .with(ToolView::Read {
         path: rel(ctx, &full),
-        lang: lang_of(&full),
+        lang: doc_kind.map(|k| k.tag().to_string()).unwrap_or_else(|| lang_of(&full)),
         lines: all[start..end].iter().map(|l| l.to_string()).collect(),
         start: start + 1,
         total,
@@ -1909,5 +2162,147 @@ mod tests {
         let t = truncate(&s, 51);
         assert!(t.contains("truncated"));
         assert!(t.starts_with("é"));
+    }
+
+    // ---- document parsing --------------------------------------------------
+
+    #[test]
+    fn dockind_maps_known_extensions_only() {
+        assert_eq!(DocKind::from_ext("csv"), Some(DocKind::Csv));
+        assert_eq!(DocKind::from_ext("tsv"), Some(DocKind::Tsv));
+        assert_eq!(DocKind::from_ext("xlsx"), Some(DocKind::Xlsx));
+        assert_eq!(DocKind::from_ext("ods"), Some(DocKind::Xlsx));
+        assert_eq!(DocKind::from_ext("docx"), Some(DocKind::Docx));
+        assert_eq!(DocKind::from_ext("pdf"), Some(DocKind::Pdf));
+        // Images and plain text are NOT documents (images go to the vision path).
+        assert_eq!(DocKind::from_ext("png"), None);
+        assert_eq!(DocKind::from_ext("rs"), None);
+        assert_eq!(DocKind::from_ext("txt"), None);
+    }
+
+    #[test]
+    fn sanitize_text_drops_control_bytes_but_keeps_layout() {
+        // NUL, a C0 control (0x01), an ANSI escape, and DEL are stripped; the
+        // newline and tab that structure the text survive.
+        let dirty = "a\u{0}b\u{1}c\x1b[31md\u{7f}e\nnext\tcol";
+        let clean = sanitize_text(dirty);
+        assert_eq!(clean, "abc[31mde\nnext\tcol");
+        assert!(!clean.contains('\u{0}'));
+        assert!(!clean.contains('\u{1b}'));
+        assert!(clean.contains('\n') && clean.contains('\t'));
+    }
+
+    #[test]
+    fn read_document_renders_csv_as_a_table() {
+        let csv = b"name,role\n\"Lovelace, Ada\",pioneer\n";
+        let out = read_document(DocKind::Csv, csv).unwrap();
+        assert!(out.contains("cols × 2 rows"), "{out}");
+        assert!(out.contains("Lovelace, Ada"), "{out}");
+    }
+
+    #[test]
+    fn read_document_handles_tsv_delimiter() {
+        let tsv = b"a\tb\tc\n1\t2\t3\n";
+        let out = read_document(DocKind::Tsv, tsv).unwrap();
+        assert!(out.contains("3 cols × 2 rows"), "{out}");
+    }
+
+    #[test]
+    fn read_file_dispatches_csv_and_numbers_lines() {
+        let dir = std::env::temp_dir().join("koda-doc-csv");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data.csv"), "name,role\nAda,pioneer\n").unwrap();
+        let c = ctx(&dir);
+        let out = read_file(&json!({"path": "data.csv"}), &c).unwrap();
+        assert!(out.ok, "{}", out.content);
+        assert!(out.content.contains("delimited table"), "{}", out.content);
+        // Still passes through the shared line-numbering slicer.
+        assert!(out.content.contains("1| # delimited table"), "{}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_rejects_documents_over_max_document_bytes() {
+        let dir = std::env::temp_dir().join("koda-doc-toobig");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("big.csv"), "a,b\n1,2\n").unwrap();
+        let mut cfg = Config::default();
+        cfg.max_document_bytes = 4; // absurdly small so the tiny file trips it
+        let c = ToolCtx { root: dir.clone(), cfg: Arc::new(cfg) };
+        let out = read_file(&json!({"path": "big.csv"}), &c).unwrap();
+        assert!(!out.ok);
+        assert!(out.content.contains("max_document_bytes"), "{}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(not(feature = "docs"))]
+    #[test]
+    fn xlsx_and_docx_report_missing_docs_feature() {
+        let e = extract_xlsx(b"PK\x03\x04").unwrap_err();
+        assert!(format!("{e:#}").contains("docs"), "{e:#}");
+        let e = extract_docx(b"PK\x03\x04").unwrap_err();
+        assert!(format!("{e:#}").contains("docs"), "{e:#}");
+    }
+
+    #[cfg(not(feature = "pdf"))]
+    #[test]
+    fn pdf_reports_missing_pdf_feature() {
+        let e = extract_pdf(b"%PDF-1.4").unwrap_err();
+        assert!(format!("{e:#}").contains("pdf"), "{e:#}");
+    }
+
+    #[cfg(feature = "docs")]
+    #[test]
+    fn xlsx_extracts_sheet_markers_and_cells() {
+        // Build a minimal one-sheet workbook in memory so the test needs no
+        // binary fixture on disk.
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let w = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(w);
+            let opts: zip::write::FileOptions<'_, ()> =
+                zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("[Content_Types].xml", opts).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#).unwrap();
+            zip.start_file("_rels/.rels", opts).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#).unwrap();
+            zip.start_file("xl/workbook.xml", opts).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Budget" sheetId="1" r:id="rId1"/></sheets></workbook>"#).unwrap();
+            zip.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#).unwrap();
+            zip.start_file("xl/worksheets/sheet1.xml", opts).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>item</t></is></c><c r="B1"><v>42</v></c></row></sheetData></worksheet>"#).unwrap();
+            zip.finish().unwrap();
+        }
+        let out = read_document(DocKind::Xlsx, &buf).unwrap();
+        assert!(out.contains("=== Sheet: \"Budget\""), "{out}");
+        assert!(out.contains("item"), "{out}");
+        assert!(out.contains("42"), "{out}");
+    }
+
+    #[cfg(feature = "docs")]
+    #[test]
+    fn docx_extracts_paragraph_text() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let w = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(w);
+            let opts: zip::write::FileOptions<'_, ()> =
+                zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("word/document.xml", opts).unwrap();
+            zip.write_all(br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p><w:p><w:r><w:t>World</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
+            zip.finish().unwrap();
+        }
+        let out = read_document(DocKind::Docx, &buf).unwrap();
+        assert!(out.contains("Hello"), "{out}");
+        assert!(out.contains("World"), "{out}");
+        // Two paragraphs → two lines.
+        assert_eq!(out.lines().filter(|l| !l.is_empty()).count(), 2, "{out}");
     }
 }

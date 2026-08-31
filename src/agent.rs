@@ -61,6 +61,17 @@ pub enum Event {
         view: tools::ToolView,
     },
     Notice(String),
+    /// Compaction has started (either `/compact` or auto-compact). The TUI shows
+    /// an animated "compacting…" status and holds/queues user input until it is
+    /// done, so a slow summary call can't look like a frozen prompt.
+    Compacting,
+    /// Compaction finished: token counts before/after (after == before on a
+    /// no-op or failure). The TUI clears the compacting status and flushes any
+    /// input the user queued meanwhile.
+    Compacted {
+        before: usize,
+        after: usize,
+    },
     /// A lightweight, status-only note that a running subagent is doing
     /// something (thinking, or a short prose beat). The transcript is left
     /// clean — this only updates the working-status row so the user can see the
@@ -2503,6 +2514,14 @@ impl Agent {
             return;
         }
         let before = self.history_tokens();
+        // Tell the UI we've started so it can animate and hold input; the
+        // matching Compacted event below is emitted on *every* exit path so the
+        // prompt can never get stuck "compacting".
+        let _ = tx.send(Event::Compacting);
+        // A manual /compact should start from a clean cancel slate, and be
+        // interruptible with esc like any other long call.
+        self.cancel.store(false, Ordering::Relaxed);
+
         let mut messages = vec![Message::system(
             "Summarize the conversation so far for your own future reference. Keep file paths, \
              decisions, code changes made, and open problems. Be dense and factual. \
@@ -2532,6 +2551,12 @@ impl Agent {
                 summary.push_str(&t);
             }
         }
+        if self.cancelled() {
+            self.cancel.store(false, Ordering::Relaxed);
+            let _ = tx.send(Event::Notice("compaction cancelled".into()));
+            let _ = tx.send(Event::Compacted { before, after: before });
+            return;
+        }
         match res {
             Ok(_) if !summary.trim().is_empty() => {
                 self.history = vec![
@@ -2542,17 +2567,17 @@ impl Agent {
                 if let Some(s) = self.session.as_mut() {
                     s.rewrite(&self.history);
                 }
-                let _ = tx.send(Event::Notice(format!(
-                    "compacted {} → {} tokens",
-                    before,
-                    self.history_tokens()
-                )));
+                let after = self.history_tokens();
+                let _ = tx.send(Event::Notice(format!("compacted {before} → {after} tokens")));
+                let _ = tx.send(Event::Compacted { before, after });
             }
             Ok(_) => {
                 let _ = tx.send(Event::Error("compaction produced no summary".into()));
+                let _ = tx.send(Event::Compacted { before, after: before });
             }
             Err(e) => {
                 let _ = tx.send(Event::Error(format!("compaction failed: {e:#}")));
+                let _ = tx.send(Event::Compacted { before, after: before });
             }
         }
     }

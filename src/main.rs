@@ -368,6 +368,8 @@ async fn headless(
                 drop(reply);
             }
             Event::Notice(msg) => eprintln!("· {msg}"),
+            Event::Compacting => eprintln!("· compacting context…"),
+            Event::Compacted { before, after } => eprintln!("· compacted {before} → {after} tokens"),
             Event::SubActivity(_) => {}
             Event::Error(msg) => {
                 eprintln!("✗ {msg}");

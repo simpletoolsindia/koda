@@ -10,6 +10,7 @@ cat \
   src/components/LlmDebug.jsx \
   src/components/CodeGraph.jsx \
   src/components/AgentsSkills.jsx \
+  src/components/SystemPrompt.jsx \
   src/App.jsx \
   src/_tail.html \
   > dist/index.html

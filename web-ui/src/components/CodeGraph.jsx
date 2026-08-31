@@ -240,7 +240,11 @@ function CodeGraph({ graph, loading, error }) {
   };
 
   if (loading && !graph) return <div className="flex items-center justify-center h-full text-gray-500">Building code graph…</div>;
-  if (error && !graph) return <div className="flex items-center justify-center h-full text-red-400">Failed to load code graph.</div>;
+  if (error && !graph) return (
+    <div className="flex items-center justify-center h-full p-8">
+      <div className="max-w-lg text-center text-sm text-amber-200 bg-amber-500/10 border border-amber-500/20 rounded-2xl p-6">{error}</div>
+    </div>
+  );
 
   const languages = (graph && graph.languages) || [];
   const usedKinds = graph ? Array.from(new Set(graph.nodes.map(n => n.kind))) : [];

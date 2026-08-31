@@ -5,13 +5,15 @@ function parseSseResponse(raw) {
   let reasoning = '';
   const toolCalls = {}; // index -> {id, name, args}
   let finishReason = null;
+  let done = false; // saw the [DONE] sentinel → the turn is complete
 
   const lines = (raw || '').split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) continue;
     const payload = trimmed.slice(5).trim();
-    if (!payload || payload === '[DONE]') continue;
+    if (!payload) continue;
+    if (payload === '[DONE]') { done = true; continue; }
     let obj;
     try { obj = JSON.parse(payload); } catch { continue; }
     const choices = obj.choices || [];
@@ -33,7 +35,43 @@ function parseSseResponse(raw) {
       }
     }
   }
-  return { text, reasoning, toolCalls: Object.values(toolCalls), finishReason };
+  // "Processing" = we have a response log but it hasn't hit [DONE]/finish yet.
+  const processing = (raw && raw.length > 0) ? !(done || finishReason) : false;
+  return { text, reasoning, toolCalls: Object.values(toolCalls), finishReason, done, processing };
+}
+
+// Copy text to the clipboard, tolerating older browsers / http origins.
+function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+  } catch (_) { /* fall through */ }
+  return new Promise((resolve) => {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta); resolve();
+  });
+}
+
+// A small copy button; shows a transient ✓ after a successful copy.
+function CopyButton({ text, label = 'Copy', className = '' }) {
+  const [copied, setCopied] = React.useState(false);
+  if (text == null || text === '') return null;
+  return (
+    <button type="button"
+      onClick={(e) => { e.stopPropagation(); copyToClipboard(String(text)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); }); }}
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border transition-all ${copied ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' : 'bg-white/5 border-white/10 text-gray-400 hover:text-gray-200 hover:bg-white/10'} ${className}`}
+      title="Copy to clipboard" aria-label={copied ? 'Copied' : label}>
+      {copied ? (
+        <><svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>Copied</>
+      ) : (
+        <><svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2v-2m-6-12h6a2 2 0 012 2v6m-8-8V3m0 2h.01" /></svg>{label}</>
+      )}
+    </button>
+  );
 }
 
 function parseRequest(raw) {
@@ -43,12 +81,24 @@ function parseRequest(raw) {
 
 function LlmDebug({ debug, loading, error }) {
   const [selectedId, setSelectedId] = React.useState(null);
+  const [followLatest, setFollowLatest] = React.useState(true);
 
+  const sessions = (debug && debug.sessions) || [];
+
+  // Which sessions are still streaming (prompt sent, response not yet [DONE]).
+  const statusById = React.useMemo(() => {
+    const m = {};
+    for (const s of sessions) m[s.id] = parseSseResponse(s.response);
+    return m;
+  }, [sessions]);
+
+  // Follow the newest session so the prompt "currently being processed" is what
+  // you see by default; stop following once the user picks a session manually.
   React.useEffect(() => {
-    if (debug && debug.sessions && debug.sessions.length > 0 && !selectedId) {
-      setSelectedId(debug.sessions[debug.sessions.length - 1].id);
-    }
-  }, [debug]);
+    if (sessions.length === 0) return;
+    const newest = sessions[sessions.length - 1].id;
+    if (followLatest || !selectedId) setSelectedId(newest);
+  }, [sessions.map(s => s.id).join(','), followLatest]);
 
   if (loading && !debug) {
     return <div className="flex items-center justify-center h-full text-gray-500">Loading debug sessions…</div>;
@@ -63,62 +113,118 @@ function LlmDebug({ debug, loading, error }) {
           </div>
           <h3 className="text-lg font-semibold text-amber-200 mb-2">Debug capture is disabled</h3>
           <p className="text-sm text-gray-400 leading-relaxed">
-            Enable LLM request/response recording in koda via the <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">/settings</code> command to inspect the exact payloads exchanged with the model.
+            Turn on <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">debug</code> capture in koda — the <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">/debug</code> command, the <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">/settings</code> page, or <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">KODA_DEBUG=1</code> — to watch the exact prompt koda is processing and the model's response as it streams back.
           </p>
         </div>
       </div>
     );
   }
 
-  const sessions = (debug && debug.sessions) || [];
   const selected = sessions.find(s => s.id === selectedId);
+  const anyProcessing = sessions.some(s => statusById[s.id] && statusById[s.id].processing);
 
   return (
     <div className="flex h-full">
       {/* Session list */}
       <aside className="w-56 shrink-0 border-r border-white/5 overflow-y-auto bg-white/[0.02]">
-        <div className="p-3 text-[10px] uppercase tracking-wider text-gray-500 font-semibold sticky top-0 bg-[#0a0b12]/80 backdrop-blur-sm">
-          Sessions · {sessions.length}
+        <div className="p-3 sticky top-0 bg-[#0a0b12]/80 backdrop-blur-sm z-10">
+          <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+            <span>Sessions · {sessions.length}</span>
+            {anyProcessing && (
+              <span className="ml-auto inline-flex items-center gap-1 text-emerald-400 normal-case tracking-normal">
+                <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-70" /><span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" /></span>
+                live
+              </span>
+            )}
+          </div>
+          <label className="mt-2 flex items-center gap-1.5 text-[10px] text-gray-500 normal-case tracking-normal cursor-pointer select-none">
+            <input type="checkbox" checked={followLatest} onChange={e => setFollowLatest(e.target.checked)} className="accent-cyan-500" />
+            Follow latest (currently processing)
+          </label>
         </div>
         {debug && debug.dir && (
           <div className="px-3 pb-2 text-[10px] text-gray-600 truncate" title={debug.dir}>📁 {debug.dir}</div>
         )}
-        {sessions.length === 0 && <div className="p-3 text-xs text-gray-600">No sessions recorded yet.</div>}
-        {sessions.map(s => (
-          <button key={s.id} onClick={() => setSelectedId(s.id)}
-            className={`w-full text-left px-3 py-2.5 text-xs border-l-2 transition-all ${
-              selectedId === s.id ? 'border-cyan-400 bg-cyan-500/10 text-cyan-200' : 'border-transparent text-gray-400 hover:bg-white/5'
-            }`} aria-current={selectedId === s.id}>
-            <div className="font-mono font-medium truncate">{s.id}</div>
-          </button>
-        ))}
+        {sessions.length === 0 && <div className="p-3 text-xs text-gray-600">No prompts captured yet. Send a message in koda and it will appear here live.</div>}
+        {sessions.map(s => {
+          const st = statusById[s.id] || {};
+          return (
+            <button key={s.id} onClick={() => { setSelectedId(s.id); setFollowLatest(false); }}
+              className={`w-full text-left px-3 py-2.5 text-xs border-l-2 transition-all ${
+                selectedId === s.id ? 'border-cyan-400 bg-cyan-500/10 text-cyan-200' : 'border-transparent text-gray-400 hover:bg-white/5'
+              }`} aria-current={selectedId === s.id}>
+              <div className="flex items-center gap-1.5">
+                <span className="font-mono font-medium truncate">{s.id}</span>
+                {st.processing ? (
+                  <span className="ml-auto inline-flex items-center gap-1 text-[9px] text-emerald-400 shrink-0">
+                    <span className="relative flex h-1.5 w-1.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-70" /><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400" /></span>
+                    processing
+                  </span>
+                ) : st.finishReason ? (
+                  <span className="ml-auto text-[9px] text-gray-600 shrink-0">{st.finishReason}</span>
+                ) : null}
+              </div>
+            </button>
+          );
+        })}
       </aside>
 
       {/* Detail */}
       <div className="flex-1 overflow-y-auto p-4">
         {!selected && <div className="text-gray-500 text-sm">Select a session to inspect.</div>}
-        {selected && <SessionDetail session={selected} />}
+        {selected && <SessionDetail session={selected} status={statusById[selected.id]} />}
       </div>
     </div>
   );
 }
 
-function SessionDetail({ session }) {
+function SessionDetail({ session, status }) {
   const req = parseRequest(session.request);
-  const resp = parseSseResponse(session.response);
-  const [tab, setTab] = React.useState('request');
+  const resp = status || parseSseResponse(session.response);
+  const processing = resp.processing;
+  const [tab, setTab] = React.useState(processing ? 'response' : 'request');
+  // When a session flips to processing, jump to the response so the stream is
+  // visible; the user can still switch back to the request freely.
+  const wasProcessing = React.useRef(processing);
+  React.useEffect(() => {
+    if (processing && !wasProcessing.current) setTab('response');
+    wasProcessing.current = processing;
+  }, [processing]);
 
   return (
     <div className="animate-fade-in space-y-4">
-      <div className="flex gap-2">
+      {/* Live status banner */}
+      <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs ${
+        processing ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-white/[0.03] border-white/10 text-gray-400'
+      }`}>
+        {processing ? (
+          <>
+            <span className="relative flex h-2.5 w-2.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-70" /><span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-400" /></span>
+            <span className="font-medium">Processing — koda is streaming this turn from the model…</span>
+          </>
+        ) : (
+          <>
+            <svg className="w-3.5 h-3.5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+            <span>Completed{resp.finishReason ? ` · finish_reason: ${resp.finishReason}` : ''}</span>
+          </>
+        )}
+        <span className="ml-auto font-mono text-gray-600">{session.id}</span>
+      </div>
+
+      <div className="flex gap-2 items-center">
         {['request','response'].map(t => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
               tab === t ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
             }`}>
-            {t === 'request' ? '→ Our Request' : '← LLM Response'}
+            {t === 'request' ? '→ Prompt (our request)' : '← Response (LLM)'}
+            {t === 'response' && processing && <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse align-middle" />}
           </button>
         ))}
+        <div className="ml-auto">
+          <CopyButton text={tab === 'request' ? session.request : session.response}
+            label={tab === 'request' ? 'Copy prompt' : 'Copy raw response'} />
+        </div>
       </div>
 
       {tab === 'request' && (
@@ -139,8 +245,9 @@ function SessionDetail({ session }) {
                           style={{ color: roleColor(m.role) }}>
                           <span className="w-1.5 h-1.5 rounded-full" style={{ background: roleColor(m.role) }} />
                           {m.role}
+                          <span className="ml-auto"><CopyButton text={msgPlainText(m)} label="" /></span>
                         </div>
-                        <pre className="p-2.5 text-[11px] text-gray-300 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono">{msgContent(m)}</pre>
+                        <MessageContent m={m} />
                       </div>
                     ))}
                   </div>
@@ -160,7 +267,10 @@ function SessionDetail({ session }) {
                 </Panel>
               )}
               <details className="rounded-xl bg-white/[0.02] border border-white/5">
-                <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-300">Raw request JSON</summary>
+                <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-300 flex items-center gap-2">
+                  <span>Raw request JSON</span>
+                  <span className="ml-auto"><CopyButton text={JSON.stringify(req, null, 2)} /></span>
+                </summary>
                 <pre className="p-3 text-[10px] text-gray-500 overflow-x-auto font-mono max-h-96 overflow-y-auto">{JSON.stringify(req, null, 2)}</pre>
               </details>
             </>
@@ -173,12 +283,15 @@ function SessionDetail({ session }) {
       {tab === 'response' && (
         <div className="space-y-3">
           {resp.text && (
-            <Panel title="Assistant Text" accent="cyan">
-              <div className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{resp.text}</div>
+            <Panel title="Assistant Text" accent="cyan" copy={resp.text}>
+              <div className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">
+                {resp.text}
+                {processing && <span className="inline-block w-2 h-4 ml-0.5 bg-emerald-400/80 align-text-bottom animate-pulse" />}
+              </div>
             </Panel>
           )}
           {resp.reasoning && (
-            <Panel title="Reasoning" accent="purple">
+            <Panel title="Reasoning" accent="purple" copy={resp.reasoning}>
               <div className="text-[13px] text-purple-200/80 whitespace-pre-wrap leading-relaxed italic font-light">{resp.reasoning}</div>
             </Panel>
           )}
@@ -190,6 +303,7 @@ function SessionDetail({ session }) {
                     <div className="px-2.5 py-1.5 flex items-center gap-2 border-b border-white/5 bg-emerald-500/5">
                       <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" /></svg>
                       <span className="text-emerald-300 font-mono text-xs font-semibold">{tc.name || '(pending)'}</span>
+                      <span className="ml-auto"><CopyButton text={prettyArgs(tc.args)} label="" /></span>
                     </div>
                     <pre className="p-2.5 text-[11px] text-gray-300 whitespace-pre-wrap break-words font-mono max-h-48 overflow-y-auto">{prettyArgs(tc.args)}</pre>
                   </div>
@@ -198,13 +312,17 @@ function SessionDetail({ session }) {
             </Panel>
           )}
           {!resp.text && !resp.reasoning && resp.toolCalls.length === 0 && (
-            <Panel title="Raw response">
-              <pre className="text-[10px] text-gray-500 whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">{session.response}</pre>
+            <Panel title={processing ? 'Waiting for the first tokens…' : 'Raw response'}>
+              {processing
+                ? <div className="text-xs text-emerald-300/80 flex items-center gap-2"><span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-70" /><span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" /></span>The model has the prompt and hasn't returned tokens yet.</div>
+                : <pre className="text-[10px] text-gray-500 whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">{session.response}</pre>}
             </Panel>
           )}
-          {resp.finishReason && <div className="text-[10px] text-gray-600">finish_reason: <span className="text-gray-400">{resp.finishReason}</span></div>}
           <details className="rounded-xl bg-white/[0.02] border border-white/5">
-            <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-300">Raw SSE response</summary>
+            <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-300 flex items-center gap-2">
+              <span>Raw SSE response</span>
+              <span className="ml-auto"><CopyButton text={session.response} /></span>
+            </summary>
             <pre className="p-3 text-[10px] text-gray-500 overflow-x-auto font-mono max-h-96 overflow-y-auto whitespace-pre-wrap">{session.response}</pre>
           </details>
         </div>
@@ -213,7 +331,44 @@ function SessionDetail({ session }) {
   );
 }
 
-function Panel({ title, accent = 'cyan', children }) {
+// Render one message's content: strings as text, and multimodal arrays with
+// image_url parts shown as thumbnails, text/doc parts shown readably — instead
+// of dumping raw JSON.
+function MessageContent({ m }) {
+  const c = m.content;
+  if (typeof c === 'string') {
+    return <pre className="p-2.5 text-[11px] text-gray-300 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono">{c || (m.tool_calls ? JSON.stringify(m.tool_calls, null, 2) : '(empty)')}</pre>;
+  }
+  if (Array.isArray(c)) {
+    return (
+      <div className="p-2.5 space-y-2">
+        {c.map((part, i) => {
+          const type = part.type || (part.image_url ? 'image_url' : part.text != null ? 'text' : 'unknown');
+          if (type === 'image_url') {
+            const url = (part.image_url && (part.image_url.url || part.image_url)) || part.url || '';
+            return (
+              <div key={i} className="flex items-start gap-2">
+                <span className="text-[9px] uppercase tracking-wider text-cyan-400/70 pt-1 shrink-0">image</span>
+                {url ? <img src={url} alt="attached image" className="max-h-40 rounded-lg border border-white/10 object-contain bg-black/30" />
+                     : <span className="text-[11px] text-gray-500">(no url)</span>}
+              </div>
+            );
+          }
+          const text = part.text != null ? part.text : (typeof part === 'string' ? part : JSON.stringify(part, null, 2));
+          return (
+            <div key={i} className="flex items-start gap-2">
+              <span className="text-[9px] uppercase tracking-wider text-gray-500 pt-1 shrink-0">{type}</span>
+              <pre className="text-[11px] text-gray-300 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono flex-1">{text}</pre>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  return <pre className="p-2.5 text-[11px] text-gray-300 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono">{JSON.stringify(c ?? m, null, 2)}</pre>;
+}
+
+function Panel({ title, accent = 'cyan', children, copy }) {
   const accentColors = {
     cyan: 'border-cyan-500/20', purple: 'border-purple-500/20', green: 'border-emerald-500/20',
   };
@@ -222,6 +377,7 @@ function Panel({ title, accent = 'cyan', children }) {
     <section className={`rounded-xl bg-white/[0.03] border ${accentColors[accent]} backdrop-blur-sm overflow-hidden`}>
       <h3 className="px-3 py-2 text-xs font-semibold text-gray-300 border-b border-white/5 flex items-center gap-2">
         <span className={`w-1.5 h-1.5 rounded-full ${dotColors[accent]}`} />{title}
+        {copy != null && copy !== '' && <span className="ml-auto"><CopyButton text={copy} label="" /></span>}
       </h3>
       <div className="p-3">{children}</div>
     </section>
@@ -231,9 +387,15 @@ function Panel({ title, accent = 'cyan', children }) {
 function roleColor(role) {
   return { system: '#a78bfa', user: '#22d3ee', assistant: '#34d399', tool: '#fbbf24' }[role] || '#9ca3af';
 }
-function msgContent(m) {
+// Flatten a message to plain text for the clipboard (images become a marker).
+function msgPlainText(m) {
   if (typeof m.content === 'string') return m.content;
-  if (Array.isArray(m.content)) return m.content.map(c => c.text || c.content || JSON.stringify(c)).join('\n');
+  if (Array.isArray(m.content)) {
+    return m.content.map(c => {
+      if (c.type === 'image_url' || c.image_url) return '[image]';
+      return c.text != null ? c.text : (typeof c === 'string' ? c : JSON.stringify(c));
+    }).join('\n');
+  }
   if (m.tool_calls) return JSON.stringify(m.tool_calls, null, 2);
   return JSON.stringify(m.content ?? m, null, 2);
 }
