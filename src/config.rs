@@ -274,7 +274,7 @@ impl Default for Config {
             auto_approve: false,
             auto_tier: AutoTier::Ask,
             sandbox: true,
-            shell: "/bin/sh".into(),
+            shell: default_shell(),
             command_timeout_ms: 120_000,
             max_file_bytes: 256 * 1024,
             max_tool_output_bytes: 24 * 1024,
@@ -305,12 +305,45 @@ impl Default for Config {
     }
 }
 
-/// `$XDG_CONFIG_HOME/koda`, else `~/.config/koda`. macOS CLI tools conventionally
-/// use `~/.config` rather than `~/Library/Application Support`.
+/// The default command shell for the current OS: `cmd` on Windows, the user's
+/// `$SHELL` or `/bin/sh` elsewhere.
+pub fn default_shell() -> String {
+    if cfg!(windows) {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd".into())
+    } else {
+        "/bin/sh".into()
+    }
+}
+
+/// The flag that tells a shell "run this command string": `/C` for a Windows
+/// `cmd`/`powershell`, `-c` for POSIX shells.
+pub fn shell_flag(shell: &str) -> &'static str {
+    // Split on both separators so a Windows path parses correctly even when the
+    // binary runs on unix (and vice versa).
+    let base = shell
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "cmd" | "powershell" | "pwsh" => "/C",
+        _ => "-c",
+    }
+}
+
+/// Where the config lives. Honours `$XDG_CONFIG_HOME` first (Linux/macOS
+/// convention); on unix falls back to `~/.config/koda`; on Windows uses the
+/// platform config dir (`%APPDATA%\koda`) via the `dirs` crate.
 pub fn config_dir() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         if !x.is_empty() {
             return PathBuf::from(x).join("koda");
+        }
+    }
+    if cfg!(windows) {
+        if let Some(d) = dirs::config_dir() {
+            return d.join("koda");
         }
     }
     dirs::home_dir()
@@ -525,3 +558,24 @@ subagent_max_steps = 12
 subagent_review_rounds = 1
 max_subagent_depth = 1
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_flag_matches_the_shell() {
+        assert_eq!(shell_flag("/bin/sh"), "-c");
+        assert_eq!(shell_flag("/usr/bin/zsh"), "-c");
+        assert_eq!(shell_flag("bash"), "-c");
+        assert_eq!(shell_flag("cmd"), "/C");
+        assert_eq!(shell_flag("C:\\Windows\\System32\\cmd.exe"), "/C");
+        assert_eq!(shell_flag("powershell"), "/C");
+        assert_eq!(shell_flag("pwsh.exe"), "/C");
+    }
+
+    #[test]
+    fn default_shell_is_nonempty() {
+        assert!(!default_shell().is_empty());
+    }
+}

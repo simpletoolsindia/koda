@@ -231,6 +231,10 @@ pub struct Agent {
     /// call has failed — small models tend to re-issue the exact same invalid
     /// call, so we detect that and escalate the corrective feedback.
     last_failure: Option<(String, u32)>,
+    /// Outcomes for read-only tools pre-computed concurrently for the current
+    /// step, keyed by call id, so `execute` can reuse them instead of re-running
+    /// the work serially. Drained as the step's calls are processed.
+    prefetched: std::collections::HashMap<String, tools::Outcome>,
 }
 
 /// One reversible file change. `before: None` means the file did not exist, so
@@ -309,6 +313,7 @@ impl Agent {
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
+            prefetched: std::collections::HashMap::new(),
         })
     }
 
@@ -380,6 +385,7 @@ impl Agent {
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
+            prefetched: std::collections::HashMap::new(),
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
             mode: self.mode,
@@ -627,6 +633,13 @@ impl Agent {
                 self.history
                     .push(Message::assistant_calls(text, result.calls.clone()));
             }
+
+            // Parallel tool calls: when the model asks for several read-only
+            // tools in one step, run their work concurrently and cache the
+            // results. The loop below still processes calls in order (so events,
+            // history and approvals stay sequential and predictable) but reuses
+            // these outcomes instead of re-doing the I/O one at a time.
+            self.prefetch_parallel(&result.calls).await;
 
             for call in &result.calls {
                 if self.cancelled() {
@@ -914,6 +927,34 @@ impl Agent {
         tools::spec(&candidate.function.name).map(|_| candidate)
     }
 
+    /// Run the read-only tools in `calls` concurrently and stash their outcomes
+    /// by call id, so `execute` can hand them back without re-running the work.
+    /// Only fires with two or more parallel-safe calls. The per-tool event
+    /// stream, approvals and cancellation are still handled in the sequential
+    /// loop that follows — only the I/O is parallelised.
+    async fn prefetch_parallel(&mut self, calls: &[ToolCall]) {
+        self.prefetched.clear();
+        let safe: Vec<&ToolCall> = calls
+            .iter()
+            .filter(|c| tools::is_parallel_safe(&c.function.name) && !c.args().is_null())
+            .collect();
+        if safe.len() < 2 {
+            return;
+        }
+        let futures = safe.iter().map(|c| {
+            let name = c.function.name.clone();
+            let args = c.args();
+            let ctx = self.ctx.clone();
+            let id = c.id.clone();
+            async move { (id, tools::run(&name, args, &ctx).await) }
+        });
+        let results = futures_util::future::join_all(futures).await;
+        for (id, outcome) in results {
+            self.prefetched.insert(id, outcome);
+        }
+        crate::tel_debug!("agent", "parallel prefetch", "count" => self.prefetched.len());
+    }
+
     async fn execute(&mut self, call: &ToolCall, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
         let name = call.function.name.clone();
         let args = call.args();
@@ -1022,7 +1063,11 @@ impl Agent {
                     }
                 }
             }
-            _ => tools::run(&name, args, &self.ctx).await,
+            _ => match self.prefetched.remove(&call.id) {
+                // Reuse the result computed concurrently in prefetch_parallel.
+                Some(o) => o,
+                None => tools::run(&name, args, &self.ctx).await,
+            },
         };
         // Command outcomes are the one thing worth learning without being asked:
         // next session should know which test runner actually works here.

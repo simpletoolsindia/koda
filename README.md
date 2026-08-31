@@ -113,6 +113,7 @@ contents.
 | `ctrl+t` | expand the last reasoning block |
 | `pgup`/`pgdn` | scroll · `up`/`down` input history |
 | `ctrl+a/e/k/u/w` | line editing · `tab` complete a command |
+| `ctrl+l` | clear the screen (twice to confirm) |
 | `y` / `a` / `n` | at an approval prompt: once / always / deny |
 
 ## Commands
@@ -133,7 +134,11 @@ contents.
 | `/settings` | interactive settings page for everything below |
 | `/think` | show or hide model reasoning |
 | `/motion` `/reveal` | animation on/off · progressive text reveal on/off |
+| `/mouse` | toggle mouse capture — off lets you select & copy text with the mouse |
+| `/undo` | put back the files the agent changed in the last turn |
 | `/keys` `/tools` `/copy` `/clear` `/cwd` `/help` `/quit` | |
+
+The full command list is in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
 ## Autonomy
 
@@ -184,7 +189,8 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `todo` | — | the plan you see in the transcript |
 | `remember` | — | durable facts, kept for next session |
 | `delegate` | — | hand a read-only investigation to a subagent |
-| `web_search` | — | your SearXNG instance, off by default |
+| `web_search` | — | SearXNG or DuckDuckGo, off by default |
+| `ask_user` | — | asks *you* a question mid-task; your reply is the answer |
 | `write_file` `edit_file` | asks | shows a diff first |
 | `run_command` | asks | builds, tests, git |
 
@@ -196,8 +202,8 @@ something `sh` would.
 - Writes and commands need your approval. `y` once, `a` for the session, `n`
   denies and tells the model to ask you instead.
 - Every write shows a unified diff **before** it is applied, and again after.
-- `sandbox = true` confines file tools to the workspace root. Off by default so
-  you can read across projects; turn it on if you want the belt.
+- `sandbox = true` (the default) confines file tools to the workspace root.
+  Turn it off with `--no-sandbox` if you want to read across projects.
 - `-y` / `--yolo` skips approvals. Genuinely dangerous with a model that
   hallucinates `rm -rf`; use it in a git repo with a clean tree.
 - Headless has nobody to ask, so a write without `--yolo` is denied and koda
@@ -264,15 +270,18 @@ delete — nothing is inferred behind your back and nothing is hidden.
 
 ## Web search
 
-Off until you point it at a SearXNG instance you control, which needs `json` in
-`search.formats` in its `settings.yml`.
+Off by default. Turn it on with `/websearch` (or `web_search = true`). It has two
+backends, chosen automatically: your own **SearXNG** instance when `searx_url` is
+set (private, self-hosted; needs `json` in `search.formats` in its
+`settings.yml`), otherwise a fallback to **DuckDuckGo**'s keyless HTML endpoint so
+search works out of the box with nothing to host.
 
 ```toml
 web_search = true
-searx_url = "http://localhost:8888"
+searx_url = "http://localhost:8888"   # optional; omit to use DuckDuckGo
 ```
 
-Toggle per session with `/websearch`.
+Toggle per session with `/websearch` — koda tells you which backend is active.
 
 ## When things go wrong
 
@@ -306,19 +315,23 @@ progress, and only the keys that apply right now.
 The plan (`todo` tool) gets a standing block with a progress gauge: done steps are
 struck through and the step in flight is the only bold row.
 
-`/theme` shows a swatch of each palette so you can pick by eye. The default is a
-dark palette, because the fills need colours that can be predicted — `ansi` uses
-your terminal's own sixteen and drops the fills for a rule instead.
+`/theme` shows a swatch of each palette so you can pick by eye. The default is the
+vibrant `neon` palette, because the fills need colours that can be predicted —
+`ansi` uses your terminal's own sixteen and drops the fills for a rule instead.
 
 ## Themes
 
-`/theme` switches live. `ansi` (the default) uses your terminal's own 16 colours,
-so it matches whatever you already run. Also: `catppuccin-mocha`, `tokyo-night`,
-`gruvbox-dark`, `nord`, `dracula`, `rose-pine`, `solarized-light`, `mono`.
+`/theme` switches live, and with no argument shows a swatch of each palette so
+you can pick by eye. The default (`theme = "auto"`) resolves to the vibrant
+`neon` palette, because the block fills that give the transcript its shape need
+colours that can be predicted. The full set: `dark`, `neon`, `ansi`,
+`catppuccin-mocha`, `tokyo-night`, `gruvbox-dark`, `nord`, `dracula`,
+`rose-pine`, `solarized-light`, `mono`. `ansi` uses your terminal's own 16
+colours and drops the fills for a rule instead.
 
-`NO_COLOR=1` or `TERM=dumb` forces monochrome — hierarchy then comes from bold
-and dim alone. `icons = "ascii"` replaces box drawing and braille for terminals
-that cannot render them. The layout adapts at 92 and 64 columns.
+`NO_COLOR=1` or `TERM=dumb` forces monochrome (`mono`) — hierarchy then comes
+from bold and dim alone. `icons = "ascii"` replaces box drawing and braille for
+terminals that cannot render them. The layout adapts at 92 and 64 columns.
 
 ## Configuration
 
@@ -332,6 +345,7 @@ api_key = "local"
 model = "qwen2.5-coder:14b"
 
 temperature = 0.2          # low is better for code
+top_p = 0.95
 max_tokens = 0             # 0 = server default
 context_tokens = 16000     # history is trimmed to fit
 auto_compact_at = 0.85     # summarize at this fraction; 0 disables
@@ -339,26 +353,37 @@ auto_compact_at = 0.85     # summarize at this fraction; 0 disables
 mode = "execute"           # plan | execute | vibe
 tool_protocol = "auto"     # auto | native | text
 max_steps = 24             # model<->tool round trips per turn
-auto_approve = false
-sandbox = false
+auto_approve = false       # true = same as auto_tier = "full"
+auto_tier = "ask"          # ask | write | full — cycle live with /auto
+sandbox = true             # confine file tools to the workspace root
 
 subagents = true
 subagent_max_steps = 12
 subagent_review_rounds = 1 # vibe-mode re-prompts of a bad report
+max_subagent_depth = 1
 
 codegraph = true
+sessions = true            # save conversations for /resume, /search, /fork
 memory = true
-web_search = false
+web_search = false         # falls back to DuckDuckGo when searx_url is unset
 searx_url = ""
+search_results = 6
 
 max_retries = 3
 log_level = "info"         # debug | info | warn | error
 log_to_file = true
+log_detail = false         # verbose telemetry in /logs
 
-theme = "auto"
+theme = "auto"             # auto resolves to the neon palette
 icons = "auto"
+motion = true              # animation; toggle with /motion
+reveal = true              # progressive text reveal; toggle with /reveal
+mouse_capture = true       # off (/mouse) = select & copy text with the mouse
+sync_output = true         # atomic frames (DEC 2026)
 shell = "/bin/sh"
 command_timeout_ms = 120000
+max_file_bytes = 262144
+max_tool_output_bytes = 24576
 
 instructions = ""          # extra project rules for the prompt
 ```

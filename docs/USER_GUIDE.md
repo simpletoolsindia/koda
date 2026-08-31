@@ -1,0 +1,508 @@
+# koda user guide
+
+koda is a terminal coding agent for **local**, OpenAI-compatible LLMs. It talks
+to anything speaking the OpenAI chat-completions API — Ollama, LM Studio,
+llama.cpp, and similar — reads and edits your code, runs commands, and shows you
+a diff before it changes anything.
+
+This guide covers installation, configuration, every slash command, the tool
+set, the operating modes, autonomy tiers, keyboard shortcuts, sessions, role
+agents and orchestration, web search, image input, memory, and themes. Every
+command, flag, and config key below is drawn directly from the source.
+
+---
+
+## Contents
+
+1. [Install](#install)
+2. [Point it at a model](#point-it-at-a-model)
+3. [Command line](#command-line)
+4. [Configuration](#configuration)
+5. [Modes](#modes)
+6. [Autonomy tiers](#autonomy-tiers)
+7. [Slash commands](#slash-commands)
+8. [Keyboard shortcuts](#keyboard-shortcuts)
+9. [Tools](#tools)
+10. [Sessions: resume, search, fork](#sessions-resume-search-fork)
+11. [Role agents and orchestration](#role-agents-and-orchestration)
+12. [Web search](#web-search)
+13. [Image input](#image-input)
+14. [Skills](#skills)
+15. [Memory and self-improvement](#memory-and-self-improvement)
+16. [Code graph](#code-graph)
+17. [Themes and appearance](#themes-and-appearance)
+
+---
+
+## Install
+
+Requires Rust 1.82+.
+
+```sh
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
+./install.sh
+```
+
+`install.sh` builds the release binary and installs it in `~/.local/bin` (no
+sudo). Install elsewhere with `PREFIX=/usr/local ./install.sh`.
+
+Or build by hand:
+
+```sh
+cargo build --release
+cp target/release/koda ~/.local/bin/     # or /usr/local/bin
+```
+
+---
+
+## Point it at a model
+
+Start koda and run `/setup`, which fetches the model list from whatever endpoint
+you type and writes your config. Or configure from the shell:
+
+```sh
+# Ollama
+ollama serve
+ollama pull qwen2.5-coder:14b
+koda -u http://localhost:11434/v1 -m qwen2.5-coder:14b
+
+# LM Studio
+koda -u http://localhost:1234/v1
+
+# llama.cpp
+koda -u http://localhost:8080/v1
+```
+
+If you omit `-m`, koda uses the first model the server reports. `koda models`
+lists what is available.
+
+---
+
+## Command line
+
+`koda [OPTIONS] [PROMPT]...` — a bare prompt seeds the TUI; with `-p` it runs
+headless.
+
+| Flag | Description |
+| --- | --- |
+| `[PROMPT]...` | First message. Without `-p` it seeds the TUI. |
+| `-p`, `--print` | Headless: stream the answer to stdout and exit. |
+| `-m`, `--model <MODEL>` | Model name, e.g. `qwen2.5-coder:14b`. |
+| `-u`, `--url <BASE_URL>` | OpenAI-compatible base URL, e.g. `http://localhost:1234/v1`. |
+| `--api-key <KEY>` | API key, if the server needs one. |
+| `-C`, `--dir <DIR>` | Workspace root. Defaults to the current directory. |
+| `-y`, `--yolo` | Approve file writes and commands without asking. |
+| `--protocol <PROTOCOL>` | Tool-call protocol: `auto`, `native`, or `text`. |
+| `--no-sandbox` | Allow file tools outside the workspace root. |
+| `-t`, `--temperature <T>` | Sampling temperature. |
+| `--theme <THEME>` | Palette (see [Themes](#themes-and-appearance)). |
+| `--icons <ICONS>` | Glyphs: `auto`, `unicode`, `ascii`. |
+| `--mode <MODE>` | Start in `plan`, `execute`, or `vibe` mode. |
+| `-c`, `--continue` (alias `--resume`) | Reopen the most recent conversation in this project. |
+
+### Subcommands
+
+| Subcommand | Description |
+| --- | --- |
+| `koda models` | List models reported by the endpoint. |
+| `koda skills [--init]` | List skills; `--init` writes a starter skill into `<project>/.koda/skills/`. |
+| `koda config [--init]` | Show the effective configuration; `--init` writes a starter config file. |
+
+### Headless mode
+
+`koda -p "your question"` streams the answer to stdout and tool activity to
+stderr, then exits. Because there is no user to answer prompts, a write or
+command without `--yolo` is denied and koda exits with status 2. If the agent
+tries to ask a question with `ask_user`, headless mode reports it and proceeds
+with no answer.
+
+---
+
+## Configuration
+
+koda layers configuration in this order (later wins): built-in defaults →
+`~/.config/koda/config.toml` → a project `koda.toml` / `.koda.toml` →
+environment variables → CLI flags.
+
+Environment variables: `KODA_BASE_URL` / `OPENAI_BASE_URL`, `KODA_API_KEY` /
+`OPENAI_API_KEY`, `KODA_MODEL` / `OPENAI_MODEL`.
+
+`koda config --init` writes a fully commented starter file. Every field, with
+its default:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `base_url` | `http://localhost:11434/v1` | OpenAI-compatible base URL. |
+| `api_key` | `local` | API key, if the server needs one. |
+| `model` | `""` | Empty auto-picks the first model the server reports. |
+| `temperature` | `0.2` | Sampling temperature. |
+| `top_p` | `0.95` | Nucleus sampling. |
+| `max_tokens` | `0` | 0 = let the server decide. |
+| `context_tokens` | `16000` | Soft budget; history is trimmed to fit. |
+| `tool_protocol` | `auto` | `auto`, `native`, or `text`. |
+| `max_steps` | `24` | Max model↔tool round trips per user turn. |
+| `auto_approve` | `false` | Skip approval prompts (equivalent to `auto_tier = full`). |
+| `auto_tier` | `ask` | Tiered autonomy: `ask`, `write`, or `full`. |
+| `sandbox` | `true` | Confine file tools to the workspace root. |
+| `shell` | `/bin/sh` | Shell used for commands. |
+| `command_timeout_ms` | `120000` | Command timeout. |
+| `max_file_bytes` | `262144` | Max bytes read from a file (also caps attached images). |
+| `max_tool_output_bytes` | `24576` | Max bytes of tool output. |
+| `instructions` | `""` | Appended verbatim to the system prompt. |
+| `sync_output` | `true` | Wrap each frame in DEC 2026 synchronized-update markers. |
+| `motion` | `true` | Animate the UI (spinners, gauges, text reveal). |
+| `reveal` | `true` | Reveal streaming replies progressively. Needs `motion`. |
+| `mouse_capture` | `true` | Capture the mouse for wheel-scrolling. |
+| `theme` | `auto` | Palette name, or `auto`/`""`. |
+| `icons` | `auto` | `auto`, `unicode`, or `ascii`. |
+| `sessions` | `true` | Record each session to `<project>/.koda/sessions`. |
+| `memory` | `true` | Carry notes and command outcomes in `<project>/.koda/memory.md`. |
+| `codegraph` | `true` | Scan the project into a symbol graph on open. |
+| `web_search` | `false` | Allow the `web_search` tool. |
+| `searx_url` | `""` | Base URL of a SearXNG instance with JSON output enabled. |
+| `search_results` | `6` | Results per search. |
+| `max_retries` | `3` | Attempts per request before giving up (1 = no retry). |
+| `log_level` | `info` | `debug`, `info`, `warn`, or `error`. |
+| `log_to_file` | `true` | Mirror the event log to `~/.local/state/koda/koda.log`. |
+| `log_detail` | `false` | Show debug-level telemetry in the `/logs` view. |
+| `mode` | `execute` | Starting mode: `plan`, `execute`, or `vibe`. |
+| `auto_compact_at` | `0.85` | Auto-compact once context passes this fraction of budget; 0 disables. |
+| `subagents` | `true` | Let the agent delegate read-only investigations to subagents. |
+| `subagent_max_steps` | `12` | Step budget for one subagent run. |
+| `subagent_review_rounds` | `1` | Vibe-mode re-prompts of a subagent report; 0 disables review. |
+| `max_subagent_depth` | `1` | How deep delegation may nest (1 = subagents cannot delegate). |
+
+koda also reads `AGENTS.md`, `CLAUDE.md`, or `.koda.md` from the workspace root
+and appends it to the system prompt.
+
+The config file lives at `$XDG_CONFIG_HOME/koda/config.toml`, or
+`~/.config/koda/config.toml` when `XDG_CONFIG_HOME` is unset.
+
+---
+
+## Modes
+
+`ctrl+p` cycles modes (`plan → execute → vibe`); `/mode` shows or sets one. The
+current mode is always in the status bar.
+
+| Mode | Label | What it does |
+| --- | --- | --- |
+| `plan` | `PLAN` | Reads and thinks only. The write and command tools are unavailable, so nothing on disk changes. Produces a plan. |
+| `execute` | `EXEC` | Normal operation: edits and commands, each gated by approval. |
+| `vibe` | `VIBE` | Writes an explicit spec first, does the work, then checks its own work — and its subagents' work — against the spec before finishing. |
+
+In plan mode the agent may only use read-only tools: `read_file`, `list_dir`,
+`find_files`, `search`, `delegate`, `todo`, `skill`, `web_search`, `codegraph`,
+`remember`.
+
+---
+
+## Autonomy tiers
+
+Autonomy is independent of mode. It decides whether mutating actions need a
+prompt. Reading is always free. Cycle live with `/auto` (`ask → write → full`),
+or set a tier directly with `/auto ask|write|full`, or in `/settings`.
+
+| Tier | Label | Behaviour |
+| --- | --- | --- |
+| `ask` (default) | `ASK` | Prompts before every write and command. |
+| `write` | `AUTO-WRITE` | Auto-approves `write_file` and `edit_file`; still asks before running commands. |
+| `full` | `FULL-AUTO` | Approves everything — autonomous, no prompts. |
+
+`auto_approve = true` (or the `-y`/`--yolo` flag) is equivalent to the `full`
+tier.
+
+At an approval prompt, the action row is `y / a / n`:
+
+- `y` (or `enter`) — approve once.
+- `a` — always allow this tool for the session.
+- `n` (or `esc`) — deny, and tell the model to ask you what to do instead.
+
+The agent can also ask *you* a question mid-task with the `ask_user` tool. Your
+next message is treated as the answer, not a new turn.
+
+---
+
+## Slash commands
+
+These are the exact command names koda recognizes. Type `/` to see them all;
+`↑`/`↓` to pick, `tab` to complete.
+
+| Command | Description |
+| --- | --- |
+| `/help` (`/?`) | Keys and commands. |
+| `/keys` | Keyboard shortcuts (same panel as `/help`). |
+| `/model [name]` | Show the current model, or switch to `name`. |
+| `/models` | List models on the server. |
+| `/mode [plan\|execute\|vibe]` | Show or set the mode. |
+| `/logs` | What the agent has been doing this session. |
+| `/websearch` (`/web`) | Turn web search on or off. |
+| `/skills [reload]` | List skills, or reload them from disk (`/skills reload`). |
+| `/orc <task>` | Orchestrate: decompose a task and delegate to role agents. |
+| `/setup` (`/provider`, `/config`) | Set the endpoint, model, and API key. |
+| `/settings` (`/preferences`, `/prefs`) | Interactive settings page. |
+| `/resume` (`/sessions`) | Open a picker of every saved conversation in this project. |
+| `/search <text>` (`/find`) | Search saved conversations by text. |
+| `/fork` (`/branch`) | Branch the current conversation into a copy. |
+| `/undo` | Put back the files the agent changed in the last turn. |
+| `/session` | Show which session is in play. |
+| `/theme [name]` | Show a palette swatch list, or switch to `name`. |
+| `/url [url]` (`/endpoint`) | Show or change the API base URL. |
+| `/clear` (`/new`, `/reset`) | Drop the conversation context (confirm by running twice). |
+| `/compact` | Summarize context to free tokens. |
+| `/auto [ask\|write\|full]` | Cycle or set the autonomy tier. |
+| `/tools` | List available tools. |
+| `/think` | Show or hide model reasoning. |
+| `/motion` | Turn animation on or off. |
+| `/mouse` (`/select`) | Toggle mouse capture. Off = select & copy text with the mouse. |
+| `/reveal` | Toggle progressive text reveal. |
+| `/copy` | Copy the last reply to the clipboard. |
+| `/cwd` (`/pwd`) | Show the workspace root. |
+| `/quit` (`/exit`, `/q`) | Exit koda. |
+
+Notes:
+
+- `/help` and `/keys` open the same combined examples/keys panel.
+- `/clear` requires running twice to confirm before wiping the conversation.
+- `/mouse` off hands click-drag text selection back to the terminal; scroll then
+  uses `pgup`/`pgdn`.
+- `/motion` and `/reveal` are distinct: `/motion` governs all animation
+  (spinners, gauges, text reveal); `/reveal` controls only the progressive
+  typing-in of streaming text and takes effect only when motion is on.
+
+---
+
+## Keyboard shortcuts
+
+| Key | Action |
+| --- | --- |
+| `enter` | Send the message. |
+| `ctrl+j` (or `alt/ctrl+enter`) | Insert a newline. |
+| `ctrl+c` | Interrupt the current turn; press twice to quit. |
+| `ctrl+d` | Quit (deletes a character if the input is non-empty). |
+| `ctrl+l` | Clear the screen (confirm by pressing twice). |
+| `ctrl+p` | Cycle mode (`plan → execute → vibe`). |
+| `ctrl+r` | Expand the last tool output. |
+| `ctrl+t` | Expand the last reasoning block. |
+| `pgup` / `pgdn` | Scroll the transcript (mouse wheel works too). |
+| `up` / `down` | Input history / picker navigation. |
+| `tab` | Complete a command, or pick a mentioned file. |
+| `@` | Mention a file (or attach an image). |
+| `ctrl+a` / `ctrl+e` | Start / end of line. |
+| `ctrl+k` / `ctrl+u` / `ctrl+w` | Kill to end / start / previous word. |
+| `alt+b` / `alt+f` (or `alt+←/→`) | Move by word. |
+| `esc` | Interrupt if busy, otherwise clear the input; closes an overlay. |
+| `y` / `a` / `n` | At an approval prompt: once / always this tool / deny. |
+| `↑` / `↓` at an approval prompt | Scroll the pending tool preview. |
+
+---
+
+## Tools
+
+The model chooses these itself; you approve the mutating ones according to your
+autonomy tier. `/tools` lists them live.
+
+| Tool | Mutating | Description |
+| --- | --- | --- |
+| `read_file` | no | Read a UTF-8 text file; returns numbered lines. Use `offset`/`limit` for large files. |
+| `list_dir` | no | List directory entries; respects `.gitignore`; `depth>1` recurses. |
+| `find_files` | no | Find files by glob, e.g. `**/*.rs`; respects `.gitignore`. |
+| `search` | no | Regex search across file contents; returns `path:line:text`. |
+| `write_file` | **yes** | Create or overwrite a file; parent dirs are created. |
+| `edit_file` | **yes** | Replace an exact substring in a file (`replace_all` for every occurrence). |
+| `ask_user` | no | Ask the user a question and wait for the answer. |
+| `remember` | no | Record a durable project fact (or `forget` one that turned out wrong). |
+| `codegraph` | no | Query the symbol graph: `overview`, `symbol`, or `file`. |
+| `skill` | no | Read a project skill by name before doing that kind of work. |
+| `web_search` | no | Search the web for docs, errors, versions (returns titles/URLs/snippets). |
+| `todo` | no | Track a multi-step plan the user can watch progress on. |
+| `delegate` | no | Hand a read-only investigation to a subagent with fresh context. |
+| `run_command` | **yes** | Run a shell command in the workspace root; returns exit code, stdout, stderr. |
+
+File tools run in-process, so they are fast and confined by the `sandbox`
+setting. Writes and `run_command` require approval per your autonomy tier; every
+write shows a unified diff before it is applied.
+
+---
+
+## Sessions: resume, search, fork
+
+With `sessions = true`, koda records each conversation to
+`<project>/.koda/sessions/` as append-only JSONL — one header line, then one
+line per message. That store powers three commands:
+
+- **`/resume`** (also `koda -c` / `--continue` / `--resume` from the shell)
+  opens a picker of every past session in this project, not just the last one.
+  `koda -c` from the shell reopens the most recent one directly.
+- **`/search <text>`** does a case-insensitive full-text scan across every saved
+  session and shows the matches newest-first, each with a hit count. Press
+  `enter` to open one.
+- **`/fork`** branches the current conversation. It byte-copies the JSONL with a
+  fresh id, then continues on the branch, so the original is left untouched.
+  You need to have said something first (there must be a session to fork).
+
+`/session` reports which session file is currently in play.
+
+---
+
+## Role agents and orchestration
+
+A skill file with a `role:` line becomes a specialised subagent. The role's body
+becomes that agent's operating instructions.
+
+```markdown
+---
+name: qa-agent
+role: qa
+when: Testing a change end to end
+---
+Run the suite, report failures with the exact command and output.
+```
+
+`koda skills --init` writes both an `example` skill and a `dev`-role starter
+(`dev-agent.md`). Common roles are `dev`, `qa`, `tester`, and `manager`, but any
+role name works as long as a skill file defines it.
+
+Two ways to use roles:
+
+- **`delegate`** — the main agent can hand a subtask to a role by passing
+  `role` (e.g. `dev`, `qa`). The subagent runs read-only in its own context and
+  returns a written report.
+- **`/orc <task>`** — turns koda into an orchestrator. It frames the task as an
+  orchestration brief: lay out subtasks with `todo`, write a
+  goal/change/validation brief for each, delegate each to the right role agent,
+  then integrate the reports and verify each against its validation criteria. If
+  no role skills exist, it delegates without a role.
+
+Subagents cannot modify files or run commands — they can only read, list, find,
+and search. In vibe mode, the parent checks each subagent report against the
+actual files and can send it back for another pass (`subagent_review_rounds`).
+
+---
+
+## Web search
+
+Web search is off until you turn it on with `/websearch` (or `web_search = true`
+in config). It has two backends, chosen automatically:
+
+- **SearXNG** — used when `searx_url` is set. Private and self-hosted; the
+  instance needs `json` in `search.formats` in its `settings.yml`.
+- **DuckDuckGo** — the fallback when no `searx_url` is configured. It uses
+  DuckDuckGo's keyless HTML endpoint, so search works out of the box with
+  nothing to set up.
+
+```toml
+web_search = true
+searx_url = "http://localhost:8888"   # optional; omit to use DuckDuckGo
+search_results = 6
+```
+
+When you enable it with `/websearch`, koda tells you which backend is active
+("your SearXNG instance" or "DuckDuckGo"). Results are titles, URLs, and
+snippets — not full pages.
+
+---
+
+## Image input
+
+Mention an image the way you mention any file — `@screenshot.png` — and koda
+attaches it to your message as vision content for a vision-capable model.
+Recognized image types are detected by extension; a `@`-token that resolves to
+an image under the workspace is read, size-checked against `max_file_bytes`, and
+encoded as a data URL. koda shows an "attached image" notice when it succeeds.
+
+Non-image `@` mentions are left as plain paths that the model can open with
+`read_file`. A text-only model simply never sees the extra vision content, so it
+is safe to leave on.
+
+---
+
+## Skills
+
+A skill is instructions loaded only when relevant, so the system prompt stays
+short. The prompt carries one line per skill (its `name` and `when`); the body
+arrives only when you call the `skill` tool.
+
+```sh
+koda skills --init      # writes a commented example + a dev-role starter
+koda skills             # list what is loaded, and from where
+```
+
+Skills are plain markdown with frontmatter:
+
+```markdown
+---
+name: migrations
+when: Writing or reviewing a database migration
+---
+
+Migrations live in db/migrate/, named <timestamp>_<verb>_<subject>.sql.
+```
+
+`when:` may also be written as `description:` or `desc:`. A `role:` line turns
+the skill into a [role agent](#role-agents-and-orchestration).
+
+Skills are read from `~/.config/koda/skills/` (yours, every project) and
+`<project>/.koda/skills/` (the repo's — commit them for your team). A project
+skill overrides a personal one of the same name. Reload after editing with
+`/skills reload`.
+
+---
+
+## Memory and self-improvement
+
+With `memory = true`, koda keeps `<project>/.koda/memory.md` — plain markdown you
+can read, edit, or delete. Nothing is inferred behind your back and nothing is
+hidden. It records three things:
+
+- **Notes** — durable facts the agent chose to remember through the `remember`
+  tool (say `forget` with a phrase to drop one). Capped at 60.
+- **Commands** — which shell commands succeeded and failed here, so the next
+  session runs your real test command instead of guessing. Capped at 40.
+- **Files** — how many times each file has been edited, so koda learns which
+  parts of the project you actually work in ("hot files") and can orient there
+  first next session. This is observed fact, not inference about intent.
+
+---
+
+## Code graph
+
+On open, with `codegraph = true`, koda scans the project into a symbol graph —
+definitions, references, imports — exposed to the model through the `codegraph`
+tool so it can ask where something lives instead of grepping. Three questions:
+
+- `overview` — maps the project.
+- `symbol` — where a name is defined and which files use it.
+- `file` — what a file defines and imports, and who depends on it.
+
+It is regex-based rather than a full parser: accurate enough to point at the
+right file, which the model then reads properly.
+
+---
+
+## Themes and appearance
+
+`/theme` switches the palette live and, with no argument, shows a swatch of each
+so you can pick by eye. The `--theme` flag and `theme` config key set it at
+start.
+
+Available palettes: `dark`, `neon`, `ansi`, `catppuccin-mocha`, `tokyo-night`,
+`gruvbox-dark`, `nord`, `dracula`, `rose-pine`, `solarized-light`, `mono`.
+
+The default (`theme = "auto"` or empty) resolves to the vibrant **neon**
+palette, because the block fills that give the transcript its shape need
+predictable colours. `NO_COLOR=1` or `TERM=dumb` forces the monochrome `mono`
+palette regardless of config. The `ansi` palette uses your terminal's own 16
+colours and drops the block fills for a rule.
+
+Other appearance controls:
+
+- `icons` (`auto`/`unicode`/`ascii`) picks the glyph set; `ascii` replaces box
+  drawing and braille for terminals that cannot render them.
+- `/motion` toggles all animation; `/reveal` toggles just the progressive text
+  reveal. `NO_MOTION`/`REDUCED_MOTION` env vars and a non-tty stdout disable
+  animation regardless of config.
+- `/mouse` toggles mouse capture: on, the wheel scrolls the transcript; off, you
+  can select and copy text with the mouse and scroll with `pgup`/`pgdn`.
+- `sync_output` (DEC 2026 synchronized updates) presents each frame atomically
+  to stop tearing.

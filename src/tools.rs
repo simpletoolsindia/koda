@@ -204,17 +204,34 @@ pub fn specs() -> Vec<Spec> {
         },
         Spec {
             name: "edit_file",
-            desc: "Replace an exact substring in a file. `old` must appear exactly once unless \
-                   replace_all is true. Include surrounding lines to make it unique.",
+            desc: "Replace exact text in a file. Give `old` (copied verbatim from the file) \
+                   and `new`; `old` must be unique unless replace_all is true. For several \
+                   changes in one file, pass an `edits` array of {old, new, replace_all} — \
+                   they apply in order as a single atomic write. If `old` is not found \
+                   exactly, koda retries ignoring each line's indentation, so a slight \
+                   whitespace mismatch still lands.",
             params: json!({
                 "type": "object",
                 "properties": {
                     "path": str_prop("File path."),
                     "old": str_prop("Exact text to replace, copied verbatim from the file."),
                     "new": str_prop("Replacement text."),
-                    "replace_all": { "type": "boolean", "description": "Replace every occurrence." }
+                    "replace_all": { "type": "boolean", "description": "Replace every occurrence." },
+                    "edits": {
+                        "type": "array",
+                        "description": "Multiple edits applied in order; alternative to a single old/new.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old": str_prop("Exact text to replace."),
+                                "new": str_prop("Replacement text."),
+                                "replace_all": { "type": "boolean" }
+                            },
+                            "required": ["old", "new"]
+                        }
+                    }
                 },
-                "required": ["path", "old", "new"]
+                "required": ["path"]
             }),
             mutating: true,
         },
@@ -366,6 +383,18 @@ pub fn specs() -> Vec<Spec> {
             mutating: true,
         },
     ]
+}
+
+/// Read-only tools whose work has no side effects and no ordering constraints,
+/// so when the model requests several in one step koda can run them at once.
+/// Everything else (writes, commands, delegate, ask_user, todo, remember, web)
+/// stays sequential — either it mutates, needs approval, or its ordering or
+/// shared state matters.
+pub const PARALLEL_SAFE: &[&str] = &["read_file", "list_dir", "find_files", "search"];
+
+/// Whether a tool may be executed concurrently with other parallel-safe tools.
+pub fn is_parallel_safe(name: &str) -> bool {
+    PARALLEL_SAFE.contains(&name)
 }
 
 /// Tools available in plan mode: everything that cannot change the workspace.
@@ -607,15 +636,32 @@ pub fn preview(name: &str, args: &Value, ctx: &ToolCtx) -> Option<String> {
         }
         "edit_file" => {
             let path = args.get("path")?.as_str()?;
-            let old_s = args.get("old").and_then(|c| c.as_str()).unwrap_or("");
-            let new_s = args.get("new").and_then(|c| c.as_str()).unwrap_or("");
             let full = resolve(ctx, path).ok()?;
             let content = std::fs::read_to_string(&full).ok()?;
-            let replaced = if arg_bool(args, "replace_all") {
-                content.replace(old_s, new_s)
+            // Mirror edit_file's edit collection so the preview matches what will
+            // actually be applied (single or multi, exact or tolerant match).
+            let mut edits: Vec<(String, String, bool)> = Vec::new();
+            if let Some(arr) = args.get("edits").and_then(|e| e.as_array()) {
+                for e in arr {
+                    edits.push((
+                        e.get("old").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        e.get("new").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        e.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                    ));
+                }
             } else {
-                content.replacen(old_s, new_s, 1)
-            };
+                edits.push((
+                    args.get("old").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    args.get("new").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    arg_bool(args, "replace_all"),
+                ));
+            }
+            let mut replaced = content.clone();
+            for (old_s, new_s, all) in &edits {
+                if let Ok((updated, _)) = apply_edit(&replaced, old_s, new_s, *all) {
+                    replaced = updated;
+                }
+            }
             Some(unified_diff(&content, &replaced, &rel(ctx, &full)))
         }
         "run_command" => {
@@ -1049,42 +1095,82 @@ fn diff_stats(diff: &str) -> (usize, usize) {
 
 fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let path = arg_str(args, "path")?;
-    let old_s = arg_str(args, "old")?;
-    let new_s = arg_str(args, "new").unwrap_or_default();
-    let replace_all = arg_bool(args, "replace_all");
     let full = resolve(ctx, &path)?;
 
-    let content = match std::fs::read_to_string(&full) {
+    let original = match std::fs::read_to_string(&full) {
         Ok(c) => c,
         Err(_) => return Ok(Outcome::err(format!("cannot read {path}"))),
     };
-    if old_s.is_empty() {
-        return Ok(Outcome::err("`old` must not be empty; use write_file to create files"));
-    }
-    let count = content.matches(old_s.as_str()).count();
-    if count == 0 {
-        return Ok(Outcome::err(format!(
-            "`old` text not found in {path}. Re-read the file and copy the exact text, \
-             including indentation."
-        )));
-    }
-    if count > 1 && !replace_all {
-        return Ok(Outcome::err(format!(
-            "`old` text appears {count} times in {path}. Add surrounding lines to make it \
-             unique, or pass replace_all=true."
-        )));
-    }
-    let updated = if replace_all {
-        content.replace(old_s.as_str(), &new_s)
+
+    // Collect the edits: either a single {old,new,replace_all} or a list under
+    // `edits`, applied in order so a multi-hunk change is one atomic write.
+    let mut edits: Vec<(String, String, bool)> = Vec::new();
+    if let Some(arr) = args.get("edits").and_then(|e| e.as_array()) {
+        for (i, e) in arr.iter().enumerate() {
+            let old_s = e.get("old").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let new_s = e.get("new").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let all = e.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+            if old_s.is_empty() {
+                return Ok(Outcome::err(format!(
+                    "edit #{}: `old` must not be empty; use write_file to create files",
+                    i + 1
+                )));
+            }
+            edits.push((old_s, new_s, all));
+        }
+        if edits.is_empty() {
+            return Ok(Outcome::err("`edits` was empty"));
+        }
     } else {
-        content.replacen(old_s.as_str(), &new_s, 1)
-    };
-    std::fs::write(&full, &updated).with_context(|| format!("writing {path}"))?;
-    let diff = unified_diff(&content, &updated, &rel(ctx, &full));
+        let old_s = arg_str(args, "old")?;
+        if old_s.is_empty() {
+            return Ok(Outcome::err("`old` must not be empty; use write_file to create files"));
+        }
+        edits.push((
+            old_s,
+            arg_str(args, "new").unwrap_or_default(),
+            arg_bool(args, "replace_all"),
+        ));
+    }
+
+    // Apply each edit to the working copy, matching exactly first and falling
+    // back to a whitespace-tolerant match so a slightly mis-indented `old` (the
+    // most common small-model mistake) still lands instead of failing outright.
+    let mut content = original.clone();
+    let mut total_reps = 0usize;
+    for (i, (old_s, new_s, replace_all)) in edits.iter().enumerate() {
+        match apply_edit(&content, old_s, new_s, *replace_all) {
+            Ok((updated, reps)) => {
+                content = updated;
+                total_reps += reps;
+            }
+            Err(e) => {
+                let where_ = if edits.len() > 1 {
+                    format!("edit #{} on {path}: ", i + 1)
+                } else {
+                    format!("{path}: ")
+                };
+                return Ok(Outcome::err(format!("{where_}{e}")));
+            }
+        }
+    }
+
+    if content == original {
+        return Ok(Outcome::err(format!("{path}: no change (old and new are identical)")));
+    }
+
+    std::fs::write(&full, &content).with_context(|| format!("writing {path}"))?;
+    let diff = unified_diff(&original, &content, &rel(ctx, &full));
     let (added, removed) = diff_stats(&diff);
+    let n_edits = edits.len();
+    let summary = if n_edits > 1 {
+        format!("edit {} ({n_edits} edits, {total_reps} replacement(s))", rel(ctx, &full))
+    } else {
+        format!("edit {} ({total_reps} replacement(s))", rel(ctx, &full))
+    };
     Ok(Outcome::ok(
-        format!("edited {} ({count} replacement(s))\n{}", rel(ctx, &full), truncate(&diff, 4000)),
-        format!("edit {} ({count} replacement(s))", rel(ctx, &full)),
+        format!("edited {}\n{}", rel(ctx, &full), truncate(&diff, 4000)),
+        summary,
     )
     .with(ToolView::Diff {
         path: rel(ctx, &full),
@@ -1093,6 +1179,105 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         removed,
         created: false,
     }))
+}
+
+/// Apply one old→new replacement to `content`, returning the result and how
+/// many replacements happened. Tries an exact match first; if that misses,
+/// retries ignoring each line's leading/trailing whitespace so a model that got
+/// the indentation slightly wrong still succeeds. Errors carry actionable
+/// guidance rather than a bare "not found".
+fn apply_edit(content: &str, old_s: &str, new_s: &str, replace_all: bool) -> Result<(String, usize)> {
+    let exact = content.matches(old_s).count();
+    if exact == 1 || (exact > 1 && replace_all) {
+        let updated = if replace_all {
+            content.replace(old_s, new_s)
+        } else {
+            content.replacen(old_s, new_s, 1)
+        };
+        return Ok((updated, if replace_all { exact } else { 1 }));
+    }
+    if exact > 1 && !replace_all {
+        bail!(
+            "`old` appears {exact} times — add surrounding lines to make it unique, or pass \
+             replace_all=true"
+        );
+    }
+
+    // Exact miss: try a whitespace-tolerant match on a contiguous run of lines.
+    if let Some((start, end)) = fuzzy_line_span(content, old_s) {
+        let matched = &content[start..end];
+        // Only accept a unique fuzzy match, to avoid editing the wrong place.
+        if count_fuzzy_spans(content, old_s) == 1 {
+            let mut updated = String::with_capacity(content.len());
+            updated.push_str(&content[..start]);
+            updated.push_str(new_s);
+            updated.push_str(&content[end..]);
+            let _ = matched;
+            return Ok((updated, 1));
+        }
+        bail!(
+            "`old` text was not found exactly; a whitespace-insensitive match is ambiguous. \
+             Re-read the file and copy the exact text including indentation"
+        );
+    }
+
+    bail!(
+        "`old` text not found. Re-read the file and copy the exact text, including indentation \
+         and surrounding lines"
+    )
+}
+
+/// Find the byte span of the first contiguous line-run in `content` that equals
+/// `needle` after trimming each line's surrounding whitespace. Returns the span
+/// in the *original* content so the replacement preserves everything else.
+fn fuzzy_line_span(content: &str, needle: &str) -> Option<(usize, usize)> {
+    let want: Vec<&str> = needle.lines().map(|l| l.trim()).collect();
+    if want.is_empty() {
+        return None;
+    }
+    // Precompute byte offsets of each line start in content.
+    let lines: Vec<(usize, &str)> = {
+        let mut v = Vec::new();
+        let mut off = 0usize;
+        for l in content.split_inclusive('\n') {
+            v.push((off, l.trim_end_matches('\n')));
+            off += l.len();
+        }
+        v
+    };
+    for i in 0..lines.len() {
+        if i + want.len() > lines.len() {
+            break;
+        }
+        let matches = (0..want.len()).all(|k| lines[i + k].1.trim() == want[k]);
+        if matches {
+            let start = lines[i].0;
+            let last = &lines[i + want.len() - 1];
+            let end = last.0 + last.1.len();
+            return Some((start, end));
+        }
+    }
+    None
+}
+
+/// How many distinct fuzzy line-run matches exist, to reject ambiguous edits.
+fn count_fuzzy_spans(content: &str, needle: &str) -> usize {
+    let want: Vec<&str> = needle.lines().map(|l| l.trim()).collect();
+    if want.is_empty() {
+        return 0;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut n = 0;
+    let mut i = 0;
+    while i + want.len() <= lines.len() {
+        if (0..want.len()).all(|k| lines[i + k].trim() == want[k]) {
+            n += 1;
+            i += want.len();
+        } else {
+            i += 1;
+        }
+    }
+    n
 }
 
 async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
@@ -1106,7 +1291,7 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         .clamp(100, 30 * 60_000);
 
     let child = match tokio::process::Command::new(&ctx.cfg.shell)
-        .arg("-c")
+        .arg(crate::config::shell_flag(&ctx.cfg.shell))
         .arg(&cmd)
         .current_dir(&ctx.root)
         .env("KODA", "1")
@@ -1253,6 +1438,64 @@ mod tests {
         assert!(is_image_path(Path::new("a/b/c.JPEG")));
         assert!(!is_image_path(Path::new("main.rs")));
         assert!(!is_image_path(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn apply_edit_exact_and_replace_all() {
+        // Single unique match replaces once.
+        let (out, n) = apply_edit("x b c", "x", "X", false).unwrap();
+        assert_eq!(out, "X b c");
+        assert_eq!(n, 1);
+        // replace_all replaces every occurrence and reports the count.
+        let (out, n) = apply_edit("a b a", "a", "X", true).unwrap();
+        assert_eq!(out, "X b X");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn apply_edit_rejects_ambiguous_without_replace_all() {
+        let err = apply_edit("a b a", "a", "X", false).unwrap_err().to_string();
+        assert!(err.contains("appears 2 times"), "{err}");
+    }
+
+    #[test]
+    fn apply_edit_tolerates_indentation_mismatch() {
+        // File has 4-space indent; the model supplies 2-space. Exact match
+        // fails, the whitespace-tolerant fallback finds the unique line-run.
+        let content = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
+        let (out, n) = apply_edit(content, "  let x = 1;", "  let x = 42;", false).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains("let x = 42;"), "{out}");
+        // The rest of the file is untouched (indentation of other lines kept).
+        assert!(out.contains("    let y = 2;"), "{out}");
+    }
+
+    #[test]
+    fn apply_edit_reports_missing_text_clearly() {
+        let err = apply_edit("hello\n", "nonexistent", "x", false).unwrap_err().to_string();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn multi_edit_applies_in_order() {
+        let dir = std::env::temp_dir().join("koda-multiedit-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.txt");
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        let c = ctx(&dir);
+        let args = json!({
+            "path": "m.txt",
+            "edits": [
+                {"old": "one", "new": "1"},
+                {"old": "three", "new": "3"}
+            ]
+        });
+        let out = edit_file(&args, &c).unwrap();
+        assert!(out.ok, "{}", out.content);
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(after, "1\ntwo\n3\n");
+        assert!(out.summary.contains("2 edits"), "{}", out.summary);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

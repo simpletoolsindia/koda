@@ -118,11 +118,14 @@ const TIPS: &[&str] = &[
     "/undo reverts the whole last turn's file changes",
 ];
 
-/// A tip chosen from wall-clock time, so it rotates without any state.
+/// A tip chosen from wall-clock time, so it rotates without any state. It
+/// changes only once every few seconds (not every frame) so each tip stays on
+/// screen long enough to actually read.
 fn random_tip() -> &'static str {
+    const ROTATE_SECS: u64 = 8;
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() / ROTATE_SECS)
         .unwrap_or(0) as usize;
     TIPS[n % TIPS.len()]
 }
@@ -1500,9 +1503,11 @@ impl App {
 fn copy_to_clipboard(text: &str) -> Result<()> {
     use std::process::{Command as Proc, Stdio};
     for (bin, args) in [
-        ("pbcopy", &[][..]),
-        ("wl-copy", &[]),
-        ("xclip", &["-selection", "clipboard"]),
+        ("pbcopy", &[][..]),            // macOS
+        ("clip", &[]),                  // Windows
+        ("wl-copy", &[]),               // Linux/Wayland
+        ("xclip", &["-selection", "clipboard"]), // Linux/X11
+        ("xsel", &["--clipboard", "--input"]),   // Linux/X11 alt
     ] {
         let spawned = Proc::new(bin)
             .args(args)
@@ -2347,7 +2352,30 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
     let body_w = max_w.saturating_sub(4) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
+    // Action row FIRST, so it is always visible even when the previewed diff or
+    // command output is long — the user should never have to scroll to the
+    // bottom to find the allow/deny choices.
+    let key = |k: &str, label: &str, c: ratatui::style::Color| {
+        vec![
+            Span::styled(
+                format!(" {k} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(c)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {label}   "), t.body()),
+        ]
+    };
+    let mut action = Vec::new();
+    action.extend(key("y", "allow once", t.success));
+    action.extend(key("a", "always allow", t.info));
+    action.extend(key("n", "decline", t.error));
+    lines.push(Line::from(action));
     lines.push(Line::from(Span::styled(kind.to_string(), t.dim())));
+    lines.push(Line::default());
+
+    // Then the payload the choice is about.
     match &p.preview {
         Some(text) if p.name == "run_command" => {
             for l in md::hard_wrap(text, body_w) {
@@ -2364,27 +2392,6 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
-
-    // The action row: colour-coded keys, spelled out, always the last thing the
-    // eye lands on. This is the part users said they could not find before.
-    lines.push(Line::default());
-    let key = |k: &str, label: &str, c: ratatui::style::Color| {
-        vec![
-            Span::styled(
-                format!(" {k} "),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(c)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" {label}   "), t.body()),
-        ]
-    };
-    let mut action = Vec::new();
-    action.extend(key("y", "yes, once", t.success));
-    action.extend(key("a", "always", t.info));
-    action.extend(key("n", "no", t.error));
-    lines.push(Line::from(action));
 
     let content_w = lines
         .iter()

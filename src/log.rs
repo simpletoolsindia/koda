@@ -104,6 +104,11 @@ pub fn log_dir() -> PathBuf {
             return PathBuf::from(x).join("koda");
         }
     }
+    if cfg!(windows) {
+        if let Some(d) = dirs::data_local_dir() {
+            return d.join("koda");
+        }
+    }
     dirs::home_dir()
         .map(|h| h.join(".local").join("state").join("koda"))
         .unwrap_or_else(|| PathBuf::from(".koda"))
