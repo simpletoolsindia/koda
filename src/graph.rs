@@ -78,9 +78,97 @@ fn language_of(path: &Path) -> Option<&'static str> {
     })
 }
 
+/// Remove leading visibility/modifier tokens from a definition line so the core
+/// keyword (`fn`, `struct`, `class`, …) reaches the prefix table. Conservative:
+/// it only strips a known set of modifier words and never consumes the keyword
+/// itself. Language-aware so, e.g., Go's `func` is never mistaken for a modifier.
+fn strip_def_modifiers(lang: &str, line: &str) -> String {
+    // Modifiers that may precede a definition keyword, per language family.
+    // Kept as whole words; `extern "C"`/`pub(crate)`/annotations are handled below.
+    let words: &[&str] = match lang {
+        "rust" => &["pub", "async", "unsafe", "extern", "default"],
+        "javascript" | "typescript" => &[
+            "export", "default", "public", "private", "protected", "static",
+            "readonly", "abstract", "async", "declare",
+        ],
+        "java" | "kotlin" | "swift" | "csharp" | "scala" | "dart" => &[
+            "public", "private", "protected", "internal", "static", "final",
+            "abstract", "sealed", "open", "override", "suspend", "inline",
+            "virtual", "async", "partial",
+        ],
+        "python" => &["async"],
+        _ => &[],
+    };
+    let mut s = line.trim_start();
+    // Drop a leading decorator/annotation (`@Override`, `@dataclass`, …): keep
+    // only what follows on the same line if the annotation is inline.
+    if s.starts_with('@') {
+        // A decorator on its own line has no following keyword; leave it be so
+        // it simply doesn't match. When it's `@Ann def foo`, skip the token.
+        if let Some(rest) = s.split_whitespace().nth(1) {
+            // Reconstruct from the first non-annotation token onward.
+            if let Some(idx) = s.find(rest) {
+                s = &s[idx..];
+            }
+        }
+    }
+    // Special-case `pub(crate)` / `pub(super)` / `pub(in ...)`.
+    if lang == "rust" {
+        if let Some(rest) = s.strip_prefix("pub(") {
+            if let Some(close) = rest.find(')') {
+                s = rest[close + 1..].trim_start();
+            }
+        }
+    }
+    loop {
+        let word: String = s.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if word.is_empty() || !words.contains(&word.as_str()) {
+            break;
+        }
+        let after = &s[word.len()..];
+        // Only strip when the word is followed by whitespace (it's a real
+        // modifier, not the start of the name/keyword).
+        let Some(next) = after.strip_prefix(|c: char| c.is_whitespace()) else {
+            break;
+        };
+        // `extern "C"` — also drop the following string literal.
+        if lang == "rust" && word == "extern" {
+            let n = next.trim_start();
+            if let Some(after_quote) = n.strip_prefix('"') {
+                if let Some(end) = after_quote.find('"') {
+                    s = after_quote[end + 1..].trim_start();
+                    continue;
+                }
+            }
+        }
+        s = next.trim_start();
+    }
+    // After general modifiers are gone, handle Rust's `const fn` / `static`:
+    // these words are modifiers ONLY before `fn`/`async`/`unsafe`; otherwise
+    // they are themselves definition keywords, so leave them in place.
+    if lang == "rust" {
+        for kw in ["const ", "static "] {
+            if let Some(rest) = s.strip_prefix(kw) {
+                let r = rest.trim_start();
+                if r.starts_with("fn ") || r.starts_with("async ") || r.starts_with("unsafe ") {
+                    s = r;
+                }
+            }
+        }
+    }
+    s.to_string()
+}
+
 /// Definition patterns per language. Each returns (kind, name) for a line.
 fn definitions(lang: &str, line: &str) -> Option<(&'static str, String)> {
     let t = line.trim_start();
+    // Strip leading modifier/visibility tokens so a decorated definition still
+    // matches the keyword table. Without this, `pub async fn f`, `pub(crate) fn`,
+    // `unsafe fn`, `pub extern "C" fn`, or an annotated Java/TS method are all
+    // missed just because the prefix isn't verbatim. We normalise once here and
+    // match the core keyword against the same table as before.
+    let t = strip_def_modifiers(lang, t);
+    let t = t.as_str();
     let take = |rest: &str| -> Option<String> {
         let name: String = rest
             .chars()
@@ -210,22 +298,108 @@ fn import_of(lang: &str, line: &str) -> Option<String> {
     }
 }
 
-/// Identifiers mentioned in a line, for the reference pass.
-fn identifiers(line: &str, out: &mut BTreeSet<String>) {
+/// Identifiers mentioned in a line, for the reference pass. Strips string/char
+/// literals and comments first, and skips language keywords, so a reference set
+/// isn't inflated by `"run"` in a string, a `// comment`, or keywords like
+/// `return`/`func` that happen to be ≥3 chars.
+fn identifiers(lang: &str, line: &str, out: &mut BTreeSet<String>) {
+    let code = strip_literals_and_comments(lang, line);
+    let kw = keywords(lang);
     let mut cur = String::new();
-    for c in line.chars() {
+    for c in code.chars() {
         if c.is_alphanumeric() || c == '_' {
             cur.push(c);
         } else if !cur.is_empty() {
-            if cur.len() > 2 && !cur.chars().all(|c| c.is_ascii_digit()) {
+            if cur.len() > 2 && !cur.chars().all(|c| c.is_ascii_digit()) && !kw.contains(&cur.as_str()) {
                 out.insert(std::mem::take(&mut cur));
             } else {
                 cur.clear();
             }
         }
     }
-    if cur.len() > 2 {
+    if cur.len() > 2 && !kw.contains(&cur.as_str()) {
         out.insert(cur);
+    }
+}
+
+/// Blank out string/char literals and strip line/block comments from a single
+/// line so identifier extraction only sees code. Line-local (no multi-line
+/// block-comment state), which is enough to kill the common false positives.
+fn strip_literals_and_comments(lang: &str, line: &str) -> String {
+    let line_comment: &[&str] = match lang {
+        "python" | "ruby" | "shell" | "perl" | "r" | "elixir" | "julia" => &["#"],
+        "lua" | "haskell" => &["--"],
+        _ => &["//"],
+    };
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        // Line comment: drop the rest.
+        if line_comment.iter().any(|p| line[i..].starts_with(p)) {
+            break;
+        }
+        // Block comment start `/* … */` (C-family): drop to a same-line close.
+        if matches!(lang, "rust" | "c" | "cpp" | "java" | "javascript" | "typescript" | "csharp" | "go" | "swift" | "kotlin" | "scala" | "dart" | "php")
+            && line[i..].starts_with("/*")
+        {
+            if let Some(end) = line[i..].find("*/") {
+                for _ in 0..end + 1 {
+                    chars.next();
+                }
+                continue;
+            }
+            break;
+        }
+        // String / char literal: skip to its close, keeping a placeholder space.
+        if c == '"' || c == '\'' || c == '`' {
+            out.push(' ');
+            while let Some((_, d)) = chars.next() {
+                if d == '\\' {
+                    chars.next(); // skip the escaped char
+                    continue;
+                }
+                if d == c {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Language keywords that must never be counted as symbol references.
+fn keywords(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "rust" => &[
+            "let", "mut", "fn", "pub", "use", "mod", "struct", "enum", "impl",
+            "trait", "for", "while", "loop", "match", "return", "self", "super",
+            "crate", "async", "await", "move", "ref", "dyn", "where", "const",
+            "static", "type", "unsafe", "extern", "continue", "break", "else",
+        ],
+        "python" => &[
+            "def", "class", "return", "import", "from", "for", "while", "with",
+            "and", "not", "elif", "else", "None", "True", "False", "self",
+            "lambda", "yield", "async", "await", "pass", "raise", "except",
+            "finally", "global", "nonlocal", "assert",
+        ],
+        "javascript" | "typescript" => &[
+            "let", "var", "const", "function", "return", "import", "export",
+            "from", "for", "while", "class", "extends", "async", "await",
+            "this", "new", "typeof", "instanceof", "else", "case", "switch",
+            "interface", "type", "public", "private", "readonly", "static",
+        ],
+        "go" => &[
+            "func", "var", "type", "struct", "interface", "return", "import",
+            "package", "for", "range", "chan", "defer", "else", "map", "const",
+        ],
+        "java" | "kotlin" | "csharp" | "swift" | "scala" => &[
+            "public", "private", "protected", "class", "interface", "return",
+            "import", "static", "final", "void", "new", "this", "else", "for",
+            "while", "func", "fun", "val", "var", "override",
+        ],
+        _ => &[],
     }
 }
 
@@ -245,16 +419,126 @@ fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
     let mut defs = Vec::new();
     let mut imports = Vec::new();
     let mut ids = BTreeSet::new();
+    // Method/receiver association: remember the enclosing type so a method is
+    // also recorded as `Type::method`. For brace languages we track a stack by
+    // brace depth; for Python we track by indentation. Conservative — when we
+    // aren't sure of the owner we just record the bare name as before.
+    let brace_lang = matches!(
+        lang,
+        "rust" | "javascript" | "typescript" | "go" | "java" | "kotlin"
+            | "swift" | "csharp" | "scala" | "cpp" | "c" | "php" | "dart"
+    );
+    // (type_name, brace_depth_at_open) for brace langs.
+    let mut type_stack: Vec<(String, i32)> = Vec::new();
+    let mut depth: i32 = 0;
+    // (type_name, indent_cols) for Python.
+    let mut py_class: Option<(String, usize)> = None;
+
     for (i, line) in text.lines().enumerate() {
-        if let Some((kind, name)) = definitions(lang, line) {
-            defs.push((name, kind, i + 1));
+        let def = definitions(lang, line);
+
+        // Maintain the Python class context by indentation before recording.
+        if lang == "python" {
+            let indent = line.len() - line.trim_start().len();
+            if let Some((_, cindent)) = &py_class {
+                // Dedented out of the class body: pop it.
+                if !line.trim().is_empty() && indent <= *cindent {
+                    py_class = None;
+                }
+            }
         }
+
+        if let Some((kind, name)) = def {
+            let owner = if lang == "python" {
+                py_class.as_ref().map(|(t, _)| t.clone())
+            } else if brace_lang {
+                type_stack.last().map(|(t, _)| t.clone())
+            } else {
+                None
+            };
+            // A method (fn inside a type) is also recorded as `Type::method`,
+            // so both `symbol(method)` and `symbol(Type::method)` resolve.
+            if kind == "fn" {
+                if let Some(t) = &owner {
+                    defs.push((format!("{t}::{name}"), "method", i + 1));
+                }
+            }
+            defs.push((name.clone(), kind, i + 1));
+
+            // Opening a type scope: remember it as the current owner.
+            let opens_type = matches!(kind, "class" | "struct" | "trait" | "interface" | "enum");
+            if opens_type {
+                if lang == "python" {
+                    let indent = line.len() - line.trim_start().len();
+                    py_class = Some((name.clone(), indent));
+                } else if brace_lang {
+                    type_stack.push((name.clone(), depth));
+                }
+            }
+            // Rust `impl Type` / `impl Trait for Type` also sets the owner.
+            if lang == "rust" {
+                if let Some(t) = rust_impl_target(line) {
+                    type_stack.push((t, depth));
+                }
+            }
+        } else if lang == "rust" {
+            // `impl` blocks aren't definitions but establish the owner.
+            if let Some(t) = rust_impl_target(line) {
+                type_stack.push((t, depth));
+            }
+        }
+
         if let Some(imp) = import_of(lang, line) {
             imports.push(imp);
         }
-        identifiers(line, &mut ids);
+        identifiers(lang, line, &mut ids);
+
+        // Update brace depth and pop any type scope whose block closed.
+        if brace_lang {
+            let stripped = strip_literals_and_comments(lang, line);
+            for c in stripped.chars() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        while type_stack.last().map(|(_, d)| *d >= depth).unwrap_or(false) {
+                            type_stack.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     FileParse { rel, lang, defs, imports, ids }
+}
+
+/// Extract the target type of a Rust `impl` line: `impl Foo`, `impl<T> Foo<T>`,
+/// `impl Trait for Foo` → `Foo`. Returns None for non-impl lines.
+fn rust_impl_target(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let rest = t.strip_prefix("impl")?;
+    // Must be `impl` as a word (followed by space or `<`).
+    if !rest.starts_with([' ', '<']) {
+        return None;
+    }
+    // `impl Trait for Foo` → take what's after `for`; else the first type token.
+    let target = if let Some(idx) = rest.find(" for ") {
+        &rest[idx + 5..]
+    } else {
+        rest
+    };
+    // Skip generics `<...>` then read the type name.
+    let target = target.trim_start();
+    let target = target.strip_prefix('<').map_or(target, |r| {
+        r.find('>').map(|i| target[i + 2..].trim_start()).unwrap_or(target)
+    });
+    let name: String = target
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// Parse many files across worker threads and return the results. Uses scoped
@@ -679,6 +963,77 @@ mod tests {
         assert_eq!(definitions("zig", "pub fn main() void {"), Some(("fn", "main".into())));
         assert_eq!(definitions("perl", "sub run {"), Some(("fn", "run".into())));
         assert_eq!(definitions("php", "trait Loggable {"), Some(("trait", "Loggable".into())));
+    }
+
+    #[test]
+    fn detects_definitions_behind_modifiers() {
+        // Rust: modifiers that used to defeat the verbatim prefix match.
+        assert_eq!(definitions("rust", "pub async fn fetch() {}"), Some(("fn", "fetch".into())));
+        assert_eq!(definitions("rust", "pub(crate) fn helper() {}"), Some(("fn", "helper".into())));
+        assert_eq!(definitions("rust", "    pub unsafe fn raw() {}"), Some(("fn", "raw".into())));
+        assert_eq!(definitions("rust", "pub const fn zero() -> u8 { 0 }"), Some(("fn", "zero".into())));
+        assert_eq!(definitions("rust", "pub extern \"C\" fn c_abi() {}"), Some(("fn", "c_abi".into())));
+        // But `const`/`static` as real definition keywords are still recognised.
+        assert_eq!(definitions("rust", "pub const MAX: usize = 8;"), Some(("const", "MAX".into())));
+        assert_eq!(definitions("rust", "static REG: u32 = 0;"), Some(("static", "REG".into())));
+        // TS/JS: export/async/decorated.
+        assert_eq!(definitions("typescript", "export async function load() {}"), Some(("fn", "load".into())));
+        assert_eq!(definitions("typescript", "export abstract class Base {"), Some(("class", "Base".into())));
+        // Java-family: multi-modifier and annotated.
+        assert_eq!(definitions("java", "public static final class Config {"), Some(("class", "Config".into())));
+        assert_eq!(definitions("kotlin", "override suspend fun run() {}"), Some(("fn", "run".into())));
+        assert_eq!(definitions("python", "async def handler():"), Some(("fn", "handler".into())));
+    }
+
+    #[test]
+    fn references_ignore_literals_comments_and_keywords() {
+        let mut ids = BTreeSet::new();
+        // `Widget` in code counts; `Widget` inside a string does not; the
+        // keyword `return` never counts.
+        identifiers("rust", r#"    return Widget::new("Widget in a string");"#, &mut ids);
+        assert!(ids.contains("Widget"), "real reference should be kept: {ids:?}");
+        assert!(!ids.contains("return"), "keyword must be dropped: {ids:?}");
+        assert!(!ids.contains("string"), "string-literal word must be dropped: {ids:?}");
+
+        // A line-comment's words are ignored.
+        let mut ids2 = BTreeSet::new();
+        identifiers("rust", "let x = 1; // TokenInComment matters not", &mut ids2);
+        assert!(!ids2.contains("TokenInComment"), "comment word must be dropped: {ids2:?}");
+        assert!(!ids2.contains("let"), "keyword dropped: {ids2:?}");
+
+        // Python uses # comments.
+        let mut ids3 = BTreeSet::new();
+        identifiers("python", "value = compute()  # HiddenName here", &mut ids3);
+        assert!(ids3.contains("compute"));
+        assert!(!ids3.contains("HiddenName"), "py comment dropped: {ids3:?}");
+    }
+
+    #[test]
+    fn methods_are_associated_with_their_type() {
+        let dir = std::env::temp_dir().join("koda-graph-methods");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub struct Cart;\nimpl Cart {\n    pub fn total(&self) -> u32 { 0 }\n    fn helper(&self) {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app.py"),
+            "class Order:\n    def submit(self):\n        pass\n\ndef free_function():\n    pass\n",
+        )
+        .unwrap();
+        let g = scan(&dir);
+        // Bare names still resolve (backward compatible).
+        assert!(g.defs.contains_key("total"), "{:?}", g.defs.keys());
+        assert!(g.defs.contains_key("submit"));
+        // And now the qualified method name resolves too.
+        assert!(g.defs.contains_key("Cart::total"), "impl method not associated: {:?}", g.defs.keys());
+        assert!(g.defs.contains_key("Order::submit"), "py method not associated: {:?}", g.defs.keys());
+        // A module-level function is NOT falsely attributed to the class.
+        assert!(g.defs.contains_key("free_function"));
+        assert!(!g.defs.contains_key("Order::free_function"), "dedented fn wrongly attributed");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
