@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: "1.82" # matches rust-version in Cargo.toml
+  RUST_TOOLCHAIN: "1.85" # min version that supports edition2024 deps in the tree
 
 jobs:
   # ---------------------------------------------------------------------------
