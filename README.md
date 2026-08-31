@@ -43,7 +43,7 @@ Fixed. `apply_discount` subtracted the percent instead of applying it.
 Requires Rust 1.82+ (`brew install rust` or [rustup](https://rustup.rs)).
 
 ```sh
-git clone <this repo> koda && cd koda
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
 cargo build --release
 cp target/release/koda ~/.local/bin/     # or /usr/local/bin
 ```
