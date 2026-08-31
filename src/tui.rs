@@ -110,6 +110,7 @@ const TIPS: &[&str] = &[
     "/mouse off lets you select and copy text with the mouse",
     "/settings opens an interactive control page for everything",
     "/search <text> finds past conversations · /fork branches one",
+    "/resume opens a picker of every past session — not just the last",
     "ctrl+p cycles plan → execute → vibe mode",
     "paste a big block and it becomes @paste1, expanded when you send",
     "/theme neon · tokyo-night · dracula … switch palette live",

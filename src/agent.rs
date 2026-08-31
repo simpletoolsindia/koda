@@ -227,6 +227,10 @@ pub struct Agent {
     /// rather than one file at a time. Bumped at the start of each top-level
     /// user turn.
     turn_seq: u32,
+    /// The last tool call that failed and how many times in a row an identical
+    /// call has failed — small models tend to re-issue the exact same invalid
+    /// call, so we detect that and escalate the corrective feedback.
+    last_failure: Option<(String, u32)>,
 }
 
 /// One reversible file change. `before: None` means the file did not exist, so
@@ -304,6 +308,7 @@ impl Agent {
             session: None,
             undo: Vec::new(),
             turn_seq: 0,
+            last_failure: None,
         })
     }
 
@@ -374,6 +379,7 @@ impl Agent {
             session: None,
             undo: Vec::new(),
             turn_seq: 0,
+            last_failure: None,
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
             mode: self.mode,
@@ -627,7 +633,47 @@ impl Agent {
                     break;
                 }
                 let outcome = self.execute(call, tx).await;
-                let content = outcome.content;
+                let mut content = outcome.content;
+
+                // Small-model reliability: if the model re-issues the *same*
+                // call that just failed, it is stuck in a retry loop. Escalate
+                // the feedback so it changes approach instead of repeating, and
+                // after several repeats stop the turn rather than spin.
+                if !outcome.ok {
+                    let sig = format!("{}::{}", call.function.name, call.function.arguments);
+                    let n = match &self.last_failure {
+                        Some((prev, n)) if *prev == sig => n + 1,
+                        _ => 1,
+                    };
+                    self.last_failure = Some((sig, n));
+                    if n == 2 {
+                        content.push_str(
+                            "\n\nNOTE: this is the SAME call that just failed. Do not repeat it. \
+                             Read the error, then either fix the arguments, try a different \
+                             tool, or ask the user.",
+                        );
+                    } else if n >= 3 {
+                        // Three identical failures: break the loop deterministically.
+                        self.last_failure = None;
+                        self.history.push(Message::tool(
+                            &call.id,
+                            &call.function.name,
+                            format!(
+                                "{content}\n\nStopping: this call failed {n} times unchanged. \
+                                 Summarise what you were trying to do and what is blocking you."
+                            ),
+                        ));
+                        let _ = tx.send(Event::Notice(format!(
+                            "{} failed {n}× with the same input — stopping the loop",
+                            call.function.name
+                        )));
+                        // Let the model produce a final summary next step, then end.
+                        break;
+                    }
+                } else {
+                    self.last_failure = None;
+                }
+
                 if self.text_mode {
                     self.history.push(Message::user(format!(
                         "Tool result ({}):\n{}",
@@ -983,6 +1029,18 @@ impl Agent {
         if name == "run_command" && self.cfg.memory && self.depth == 0 {
             if let Some(cmd) = args_for_memory.get("command").and_then(|c| c.as_str()) {
                 self.memory.record_command(cmd, outcome.ok);
+                let _ = self.memory.save(&self.ctx.root);
+            }
+        }
+        // Which files the work happens in is also observed fact worth carrying
+        // forward, so next session koda orients to the active areas first.
+        if matches!(name.as_str(), "write_file" | "edit_file")
+            && outcome.ok
+            && self.cfg.memory
+            && self.depth == 0
+        {
+            if let Some(p) = args_for_memory.get("path").and_then(|c| c.as_str()) {
+                self.memory.record_edit(p);
                 let _ = self.memory.save(&self.ctx.root);
             }
         }

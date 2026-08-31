@@ -26,6 +26,10 @@ pub struct Memory {
     pub notes: Vec<String>,
     /// command -> (successes, failures)
     pub commands: BTreeMap<String, (u32, u32)>,
+    /// file path -> times edited, so koda learns which parts of the project the
+    /// user actually works in and can orient there first next session. This is
+    /// observed fact (koda edited these), not inference about intent.
+    pub hot_files: BTreeMap<String, u32>,
     dirty: bool,
 }
 
@@ -46,6 +50,7 @@ impl Memory {
                 section = match h.trim().to_ascii_lowercase().as_str() {
                     "notes" => "notes",
                     "commands" => "commands",
+                    "files" => "files",
                     _ => "",
                 };
                 continue;
@@ -79,6 +84,20 @@ impl Memory {
                         }
                     }
                 }
+                "files" => {
+                    // `src/agent.rs` — 7 edits
+                    if let Some((file, rest)) = item.rsplit_once(" — ") {
+                        let file = file.trim().trim_matches('`').to_string();
+                        let n: u32 = rest
+                            .split_whitespace()
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        if !file.is_empty() && n > 0 {
+                            m.hot_files.insert(file, n);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -92,7 +111,28 @@ impl Memory {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.notes.is_empty() && self.commands.is_empty()
+        self.notes.is_empty() && self.commands.is_empty() && self.hot_files.is_empty()
+    }
+
+    /// Note that a file was edited, so koda learns where the work happens.
+    pub fn record_edit(&mut self, path: &str) {
+        let key: String = path.trim().chars().take(80).collect();
+        if key.is_empty() {
+            return;
+        }
+        *self.hot_files.entry(key).or_insert(0) += 1;
+        const MAX_FILES: usize = 40;
+        if self.hot_files.len() > MAX_FILES {
+            if let Some(coldest) = self
+                .hot_files
+                .iter()
+                .min_by_key(|(_, n)| **n)
+                .map(|(k, _)| k.clone())
+            {
+                self.hot_files.remove(&coldest);
+            }
+        }
+        self.dirty = true;
     }
 
     /// Record a fact. Returns false if it was already known.
@@ -203,6 +243,18 @@ impl Memory {
             let list: Vec<String> = broken.iter().map(|c| format!("`{c}`")).collect();
             let _ = writeln!(out, "Commands that failed here: {}", list.join(", "));
         }
+        // The files the user actually works in — start here, not from scratch.
+        let mut hot: Vec<(&String, u32)> = self.hot_files.iter().map(|(k, n)| (k, *n)).collect();
+        hot.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let hot: Vec<String> = hot
+            .iter()
+            .filter(|(_, n)| *n >= 2)
+            .take(6)
+            .map(|(f, _)| format!("`{f}`"))
+            .collect();
+        if !hot.is_empty() {
+            let _ = writeln!(out, "Files most often worked on here: {}", hot.join(", "));
+        }
         out
     }
 
@@ -230,6 +282,16 @@ impl Memory {
             text.push_str("\n## Commands\n");
             for (cmd, (ok, fail)) in &self.commands {
                 let _ = writeln!(text, "- `{cmd}` — {ok} ok, {fail} failed");
+            }
+        }
+        if !self.hot_files.is_empty() {
+            text.push_str("\n## Files\n");
+            // Most-edited first.
+            let mut files: Vec<(&String, u32)> =
+                self.hot_files.iter().map(|(k, n)| (k, *n)).collect();
+            files.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            for (file, n) in files {
+                let _ = writeln!(text, "- `{file}` — {n} edits");
             }
         }
         std::fs::write(&file, text)?;
@@ -275,6 +337,25 @@ mod tests {
         assert_eq!(loaded.notes, vec!["migrations live in db/migrate"]);
         assert_eq!(loaded.commands.get("just test"), Some(&(2, 0)));
         assert_eq!(loaded.commands.get("npm test"), Some(&(0, 1)));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn learns_and_round_trips_hot_files() {
+        let d = dir("hotfiles");
+        let mut m = Memory::default();
+        m.record_edit("src/agent.rs");
+        m.record_edit("src/agent.rs");
+        m.record_edit("src/tui.rs");
+        assert!(m.save(&d).unwrap());
+        let loaded = Memory::load(&d);
+        assert_eq!(loaded.hot_files.get("src/agent.rs"), Some(&2));
+        assert_eq!(loaded.hot_files.get("src/tui.rs"), Some(&1));
+        // Only files touched 2+ times surface in the brief (signal over noise).
+        let b = loaded.brief();
+        assert!(b.contains("Files most often worked on here"), "{b}");
+        assert!(b.contains("src/agent.rs"), "{b}");
+        assert!(!b.contains("src/tui.rs"), "single-edit file should not surface: {b}");
         std::fs::remove_dir_all(&d).ok();
     }
 
