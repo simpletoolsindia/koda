@@ -219,6 +219,22 @@ pub fn specs() -> Vec<Spec> {
             mutating: true,
         },
         Spec {
+            name: "ask_user",
+            desc: "Ask the user a question and wait for their answer. Use this when a \
+                   decision genuinely needs the user — an ambiguous requirement, a choice \
+                   between real alternatives, a missing detail you cannot infer. Do not use \
+                   it for things you can determine yourself by reading the code. Keep the \
+                   question short and specific; the user's reply comes back as the result.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "question": str_prop("The question to put to the user, one or two sentences.")
+                },
+                "required": ["question"]
+            }),
+            mutating: false,
+        },
+        Spec {
             name: "remember",
             desc: "Record something about this project that will still be true next session: \
                    the test command, where a subsystem lives, a convention you had to \
@@ -326,7 +342,10 @@ pub fn specs() -> Vec<Spec> {
                     "task": str_prop("The question or investigation, stated so it makes sense \
                                       with no other context."),
                     "context": str_prop("Optional facts the subagent should start from: paths \
-                                         already known, findings so far.")
+                                         already known, findings so far."),
+                    "role": str_prop("Optional role-agent to run as (e.g. dev, qa, manager, \
+                                      tester) — must match a role skill file. The role's \
+                                      instructions shape how the subagent works.")
                 },
                 "required": ["task"]
             }),

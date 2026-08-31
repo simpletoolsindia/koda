@@ -27,6 +27,10 @@ pub struct Skill {
     /// One line telling the model when this is relevant.
     pub when: String,
     pub body: String,
+    /// If set, this skill defines a *role* a subagent can be spun up as
+    /// (e.g. "dev", "qa", "manager", "tester"). The body becomes that agent's
+    /// operating instructions when the orchestrator delegates to the role.
+    pub role: Option<String>,
     pub source: PathBuf,
 }
 
@@ -111,6 +115,7 @@ pub fn parse(text: &str) -> Option<Skill> {
 
     let mut name = String::new();
     let mut when = String::new();
+    let mut role = None;
     for line in front.lines() {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -119,6 +124,7 @@ pub fn parse(text: &str) -> Option<Skill> {
         match k.trim().to_ascii_lowercase().as_str() {
             "name" => name = v,
             "when" | "description" | "desc" => when = v,
+            "role" => role = if v.is_empty() { None } else { Some(v.to_ascii_lowercase()) },
             _ => {}
         }
     }
@@ -126,6 +132,7 @@ pub fn parse(text: &str) -> Option<Skill> {
         name,
         when,
         body,
+        role,
         source: PathBuf::new(),
     })
 }
@@ -142,6 +149,16 @@ pub fn catalogue(skills: &[Skill]) -> String {
     for s in skills {
         let _ = writeln!(out, "- {}: {}", s.name, s.when);
     }
+    let roles = roles(skills);
+    if !roles.is_empty() {
+        out.push_str(
+            "\nRole agents — delegate a subtask to one with `delegate` (pass `role`). \
+             Use `/orc`-style decomposition for multi-part work:\n",
+        );
+        for (role, when) in roles {
+            let _ = writeln!(out, "- {role}: {when}");
+        }
+    }
     out
 }
 
@@ -157,6 +174,20 @@ pub fn find<'a>(skills: &'a [Skill], name: &str) -> Option<&'a Skill> {
         })
 }
 
+/// The available role-agents defined by skill files: (role, when).
+pub fn roles(skills: &[Skill]) -> Vec<(String, String)> {
+    skills
+        .iter()
+        .filter_map(|s| s.role.as_ref().map(|r| (r.clone(), s.when.clone())))
+        .collect()
+}
+
+/// Find a role-agent skill by its role name (e.g. "dev", "qa").
+pub fn find_role<'a>(skills: &'a [Skill], role: &str) -> Option<&'a Skill> {
+    let want = role.trim().to_ascii_lowercase();
+    skills.iter().find(|s| s.role.as_deref() == Some(want.as_str()))
+}
+
 /// Write a starter skill so `koda skills --init` gives the user something to edit.
 pub fn write_example(root: &Path) -> std::io::Result<PathBuf> {
     let dir = root.join(".koda").join("skills");
@@ -164,6 +195,10 @@ pub fn write_example(root: &Path) -> std::io::Result<PathBuf> {
     let path = dir.join("example.md");
     if !path.exists() {
         std::fs::write(&path, EXAMPLE)?;
+    }
+    let role_path = dir.join("dev-agent.md");
+    if !role_path.exists() {
+        std::fs::write(&role_path, ROLE_EXAMPLE)?;
     }
     Ok(path)
 }
@@ -191,6 +226,23 @@ Files here are read from:
   <project>/.koda/skills/    this repo's, commit them for your team
 "#;
 
+/// A starter *role* skill: a skill with a `role:` line becomes a specialised
+/// subagent the orchestrator (`/orc`) or `delegate` can spin up.
+pub const ROLE_EXAMPLE: &str = r#"---
+name: dev-agent
+role: dev
+when: Implementing a feature or fixing a bug end to end
+---
+
+You are the dev agent. Given a subtask brief (goal, what to change, how to
+validate):
+
+- Read the relevant code first; match the project's existing style and helpers.
+- Make the change, then run the validation the brief names (tests, build, lint).
+- Report exactly what you changed (files and why) and the validation result.
+- If the brief is ambiguous, state the assumption you made rather than stalling.
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +254,20 @@ mod tests {
         assert_eq!(s.name, "migrations");
         assert_eq!(s.when, "Writing a migration");
         assert_eq!(s.body.trim(), "Always add a down.");
+        // No role by default.
+        assert_eq!(s.role, None);
+    }
+
+    #[test]
+    fn parses_a_role_agent_and_finds_it() {
+        let s = parse("---\nname: qa-agent\nrole: QA\nwhen: Testing a change\n---\nRun the suite.\n")
+            .unwrap();
+        assert_eq!(s.role.as_deref(), Some("qa"), "role is lowercased");
+        let skills = vec![s];
+        assert!(find_role(&skills, "qa").is_some());
+        assert!(find_role(&skills, "QA").is_some());
+        assert!(find_role(&skills, "dev").is_none());
+        assert_eq!(roles(&skills), vec![("qa".to_string(), "Testing a change".to_string())]);
     }
 
     #[test]
@@ -222,12 +288,14 @@ mod tests {
                 name: "a".into(),
                 when: "doing a".into(),
                 body: "x".into(),
+                role: None,
                 source: PathBuf::new(),
             },
             Skill {
                 name: "b".into(),
                 when: "doing b".into(),
                 body: "y".into(),
+                role: None,
                 source: PathBuf::new(),
             },
         ];
@@ -245,6 +313,7 @@ mod tests {
             name: "migrations".into(),
             when: "w".into(),
             body: "b".into(),
+            role: None,
             source: PathBuf::new(),
         }];
         assert!(find(&skills, "Migrations").is_some());

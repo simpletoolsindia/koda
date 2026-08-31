@@ -116,11 +116,43 @@ contents.
 | `/websearch` | turn web search on or off |
 | `/compact` | summarize the conversation to free context |
 | `/resume` `/search` `/fork` | reopen, search by text, or branch a saved conversation |
+| `/orc` | orchestrate: split a task across role agents |
 | `/models` `/model` `/url` | what the server has, and what you are using |
-| `/auto` | approve writes and commands without asking |
+| `/auto` | cycle autonomy: ask → auto-write → full-auto |
+| `/settings` | interactive settings page for everything below |
 | `/think` | show or hide model reasoning |
 | `/motion` `/reveal` | animation on/off · progressive text reveal on/off |
-| `/tools` `/copy` `/clear` `/cwd` `/help` `/quit` | |
+| `/keys` `/tools` `/copy` `/clear` `/cwd` `/help` `/quit` | |
+
+## Autonomy
+
+koda has three autonomy tiers, cycled live with `/auto` (or set in `/settings`):
+
+| Tier | Behaviour |
+| --- | --- |
+| `ASK` (default) | Prompts before every write and command. |
+| `AUTO-WRITE` | Auto-approves file writes; still asks before running commands. |
+| `FULL-AUTO` | Approves everything — autonomous, no prompts. Shown in red in the status bar. |
+
+Approval prompts are a loud, docked block: amber for a write, red for a command, with a clear `y / a / n` action row. The agent can also ask *you* a question mid-task with the `ask_user` tool — your next message is the answer.
+
+## Role agents and orchestration
+
+A skill file with a `role:` field becomes a specialised subagent:
+
+```markdown
+---
+name: qa-agent
+role: qa
+when: Testing a change end to end
+---
+Run the suite, report failures with the exact command and output.
+```
+
+`koda skills --init` writes a `dev` role example. The main agent can `delegate`
+a subtask to a role, and `/orc <task>` turns koda into an orchestrator: it
+decomposes the task, writes a goal/change/validation brief for each part, hands
+each to the right role agent, then integrates and verifies the results.
 
 ## Images
 

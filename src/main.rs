@@ -14,6 +14,7 @@ mod memory;
 mod prompt;
 mod theme;
 mod session;
+mod settings;
 mod setup;
 mod skills;
 mod tools;
@@ -339,6 +340,12 @@ async fn headless(
                     failed = true;
                 }
                 let _ = reply.send(decision);
+            }
+            Event::AskUser { question, reply } => {
+                // Headless has nobody to ask; dropping the sender makes the tool
+                // return its "no answer, proceed" result.
+                eprintln!("· agent asked: {question} (no user in headless mode)");
+                drop(reply);
             }
             Event::Notice(msg) => eprintln!("· {msg}"),
             Event::Error(msg) => {

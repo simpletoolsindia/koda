@@ -8,10 +8,11 @@
 
 use crate::anim;
 use crate::agent::{Agent, Approval, Command, Event};
-use crate::config::{Config, Mode};
+use crate::config::{AutoTier, Config, Mode};
 use crate::fuzzy::FileIndex;
 use crate::log;
 use crate::session::{self, Summary};
+use crate::settings;
 use crate::setup::{self, Setup};
 use crate::editor::Editor;
 use crate::md;
@@ -31,7 +32,7 @@ use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -49,13 +50,16 @@ const SPINNER_DELAY: Duration = Duration::from_millis(200);
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "keys and commands"),
+    ("/keys", "keyboard shortcuts"),
     ("/model", "show or switch model"),
     ("/models", "list models on the server"),
     ("/mode", "plan, execute or vibe"),
     ("/logs", "what the agent has been doing"),
     ("/websearch", "turn web search on or off"),
     ("/skills", "list skills, or reload them from disk"),
+    ("/orc", "orchestrate: split a task across role agents"),
     ("/setup", "set the endpoint, model and API key"),
+    ("/settings", "interactive settings page"),
     ("/resume", "reopen an earlier conversation"),
     ("/search", "search saved conversations by text"),
     ("/fork", "branch this conversation into a copy"),
@@ -118,11 +122,14 @@ pub struct App {
     reveal_pref: bool,
     turn_started: Option<Instant>,
     pending: Option<Pending>,
+    /// A question the agent asked via `ask_user`, awaiting the user's next
+    /// message. `(question, reply-channel)`.
+    asking: Option<(String, oneshot::Sender<String>)>,
     model: String,
     endpoint: String,
     tokens: usize,
     context_budget: usize,
-    auto: bool,
+    auto_tier: AutoTier,
     web: bool,
     searx_configured: bool,
     mode: Mode,
@@ -143,12 +150,16 @@ pub struct App {
     files: FileIndex,
     /// Which row of the `@` completion list is selected.
     mention_sel: usize,
+    /// Which row of the slash-command completion list is selected.
+    cmd_sel: usize,
     /// Whether the file index had finished at the last frame.
     files_ready: bool,
     /// Session picker: the list, and which row is selected.
     picker: Option<(Vec<Summary>, usize)>,
     /// Provider setup overlay.
     setup: Option<Setup>,
+    /// Interactive settings overlay.
+    settings: Option<settings::Settings>,
     /// Working copy of the config, edited by the setup screen.
     cfg: Config,
     root: PathBuf,
@@ -233,6 +244,15 @@ impl App {
                     reply: Some(reply),
                     scroll: 0,
                 });
+            }
+            Event::AskUser { question, reply } => {
+                // Show the question as a distinct prose block, and route the
+                // user's next message into the reply channel.
+                self.transcript.finish_reveal();
+                self.transcript
+                    .assistant_delta(&format!("\n**{question}**\n"));
+                self.asking = Some((question, reply));
+                self.follow = true;
             }
             Event::Tokens(n) => self.tokens = n,
             Event::NeedsExecuteMode(_) => self.plan_blocked = true,
@@ -337,6 +357,14 @@ impl App {
 
         let mut p = Panel::new(format!("koda {}", env!("CARGO_PKG_VERSION")), width)
             .footer("ctrl+p mode · @ file · /help");
+
+        // Eyebrow tagline: one dim line under the heading for hierarchy, then a
+        // blank, so the card breathes instead of opening on a dense block.
+        p.row(vec![Span::styled(
+            "terminal coding agent for local models".to_string(),
+            t.dim(),
+        )]);
+        p.blank();
 
         let mut facts: Vec<(String, String)> = Vec::new();
 
@@ -463,6 +491,10 @@ impl App {
             self.setup_key(key);
             return;
         }
+        if self.settings.is_some() {
+            self.settings_key(key);
+            return;
+        }
         if self.picker.is_some() {
             self.picker_key(key);
             return;
@@ -493,6 +525,30 @@ impl App {
                     // Leave the text, just dismiss the list.
                     self.editor.insert(" ");
                     self.mention_sel = 0;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Interactive slash autocomplete: navigate and accept the command list.
+        let cmds = self.command_matches();
+        if cmds.len() > 1 && !ctrl && !alt {
+            match key.code {
+                KeyCode::Up => {
+                    self.cmd_sel = self.cmd_sel.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.cmd_sel = (self.cmd_sel + 1).min(cmds.len() - 1);
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    let pick = cmds[self.cmd_sel.min(cmds.len() - 1)];
+                    self.editor.clear();
+                    self.editor.insert(pick);
+                    self.editor.insert(" ");
+                    self.cmd_sel = 0;
                     return;
                 }
                 _ => {}
@@ -566,6 +622,20 @@ impl App {
         };
         self.files.ensure(&self.root);
         self.files.matches(&query, 8)
+    }
+
+    /// Slash-command names matching the current buffer, for interactive
+    /// autocomplete. Empty unless the buffer is a bare `/word` with no space.
+    fn command_matches(&self) -> Vec<&'static str> {
+        let buf = &self.editor.buf;
+        if !buf.starts_with('/') || buf.contains(' ') {
+            return Vec::new();
+        }
+        COMMANDS
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| c.starts_with(buf.as_str()))
+            .collect()
     }
 
     fn picker_key(&mut self, key: KeyEvent) {
@@ -684,6 +754,64 @@ impl App {
             }
         }
         self.follow = true;
+    }
+
+    fn settings_key(&mut self, key: KeyEvent) {
+        let Some(s) = self.settings.as_mut() else { return };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => s.up(),
+            KeyCode::Down | KeyCode::Char('j') => s.down(),
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+                s.change(true);
+                self.apply_settings();
+            }
+            KeyCode::Left => {
+                s.change(false);
+                self.apply_settings();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Save & close.
+                let dirty = self.settings.as_ref().map(|s| s.dirty).unwrap_or(false);
+                let new_cfg = self.settings.take().map(|s| s.cfg);
+                if let Some(cfg) = new_cfg {
+                    if dirty {
+                        match crate::config::save(&cfg) {
+                            Ok(path) => self.note(format!("settings saved to {}", path.display())),
+                            Err(e) => self.transcript.error(format!("could not save settings: {e}")),
+                        }
+                    }
+                }
+                self.follow = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Push the settings overlay's working config into the live app and agent,
+    /// so a change is visible immediately rather than only after close.
+    fn apply_settings(&mut self) {
+        let Some(cfg) = self.settings.as_ref().map(|s| s.cfg.clone()) else { return };
+        // Theme.
+        if cfg.theme != self.cfg.theme {
+            let th = theme::resolve(&cfg.theme);
+            self.set_theme(th);
+        }
+        // Motion / reveal.
+        self.motion = if cfg.motion { anim::Motion::Full } else { anim::Motion::Reduced };
+        self.reveal_pref = cfg.reveal;
+        self.transcript.animate_reveal = self.motion.animates() && self.reveal_pref;
+        if !self.transcript.animate_reveal {
+            self.transcript.finish_reveal();
+        }
+        // Mode + autonomy: mirror into app state and tell the agent.
+        if cfg.mode != self.mode {
+            self.set_mode(cfg.mode);
+        }
+        if cfg.auto_tier != self.auto_tier {
+            self.auto_tier = cfg.auto_tier;
+            self.send(Command::SetAutoTier(cfg.auto_tier));
+        }
+        self.cfg = cfg;
     }
 
     /// Returns true when the key belonged to the log overlay.
@@ -823,6 +951,14 @@ impl App {
             self.slash(rest);
             return;
         }
+        // If the agent asked a question, this message is the answer, not a new
+        // turn. Echo it and hand it to the waiting tool.
+        if let Some((_, reply)) = self.asking.take() {
+            self.transcript.user(trimmed.clone());
+            self.follow = true;
+            let _ = reply.send(trimmed);
+            return;
+        }
         self.transcript.user(trimmed.clone());
         self.follow = true;
         self.plan_blocked = false;
@@ -841,6 +977,7 @@ impl App {
 
         match cmd.as_str() {
             "help" | "?" => self.show_help(),
+            "keys" => self.show_help(),
             "model" => {
                 if arg.is_empty() {
                     let m = self.model.clone();
@@ -907,6 +1044,39 @@ impl App {
                 self.setup = Some(Setup::new(&self.cfg));
                 self.send(Command::ProbeModels(self.endpoint.clone()));
             }
+            "settings" | "preferences" | "prefs" => {
+                self.settings = Some(settings::Settings::new(&self.cfg));
+            }
+            "orc" | "orchestrate" => {
+                if arg.is_empty() {
+                    self.note("usage: /orc <task> — decompose and delegate to role agents");
+                    return;
+                }
+                // Frame the task as an orchestration brief. The main agent stays
+                // the orchestrator: it plans with `todo`, then delegates each
+                // subtask to the right role-agent via `delegate` with a role.
+                let brief = format!(
+                    "You are the ORCHESTRATOR. Break this task down and coordinate role \
+                     agents to do it — do not do the hands-on work yourself.\n\n\
+                     Task: {arg}\n\n\
+                     Do this:\n\
+                     1. Use the `todo` tool to lay out the subtasks.\n\
+                     2. For each subtask, write a crisp brief — goal, what to change, and how \
+                     to validate the result — and hand it to the right role with `delegate` \
+                     (pass a `role` such as dev, qa, tester, or manager, matching a role \
+                     skill file). If no role skills exist, delegate without a role.\n\
+                     3. Integrate the reports, verify each against its validation criteria, \
+                     and summarise what was done and what remains.",
+                );
+                self.transcript.user(format!("/orc {arg}"));
+                self.follow = true;
+                if self.busy {
+                    self.queued.push_back(brief);
+                    self.note("queued until the current turn finishes");
+                } else {
+                    self.send(Command::User(brief));
+                }
+            }
             "skills" | "skill" => {
                 if arg.starts_with("re") {
                     self.send(Command::ReloadSkills);
@@ -954,10 +1124,28 @@ impl App {
                 self.send(Command::Clear);
             }
             "compact" => self.send(Command::Compact),
-            "auto" => {
-                self.auto = !self.auto;
-                let v = self.auto;
-                self.send(Command::SetAutoApprove(v));
+            "auto" | "autonomy" => {
+                // `/auto` cycles ask → auto-write → full-auto; `/auto <tier>`
+                // sets it directly.
+                let tier = if arg.is_empty() {
+                    self.auto_tier.next()
+                } else {
+                    match arg.parse::<AutoTier>() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            self.note(e);
+                            return;
+                        }
+                    }
+                };
+                self.auto_tier = tier;
+                self.send(Command::SetAutoTier(tier));
+                let hint = match tier {
+                    AutoTier::Ask => "asks before writes and commands",
+                    AutoTier::Write => "auto-approves writes, asks before commands",
+                    AutoTier::Full => "runs everything without asking — autonomous",
+                };
+                self.note(format!("autonomy: {} — {hint}", tier.label()));
             }
             "tools" => {
                 let width = self.panel_width();
@@ -1134,7 +1322,12 @@ impl App {
 
     /// Panels stop short of the full width so they do not touch the scrollbar.
     fn panel_width(&self) -> usize {
-        (self.last_size.0 as usize).saturating_sub(6).clamp(30, 100)
+        // Match the transcript's usable text width (full width minus gutters and
+        // a possible scrollbar). Cap at 100 for readability, but never exceed
+        // what the transcript can actually show — otherwise pre-rendered panel
+        // rows get clipped on the right (the "half a banner" bug).
+        let usable = (self.last_size.0 as usize).saturating_sub(4).max(8);
+        usable.min(100)
     }
 
     fn approval_key(&mut self, key: KeyEvent) {
@@ -1365,6 +1558,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     if let Some(s) = &app.setup {
         setup::draw(f, area, s, &app.theme, &app.glyphs);
     }
+    if let Some(s) = &app.settings {
+        s.draw(f, area, &app.theme, &app.glyphs);
+    }
     if app.logs.is_some() {
         log_overlay(f, app, area);
     }
@@ -1381,15 +1577,18 @@ fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
     let w = area.width.saturating_sub(4).max(20);
     let h = area.height.saturating_sub(4).max(6);
     let rect = Rect {
-        x: (area.width - w) / 2,
-        y: (area.height - h) / 2,
+        x: area.width.saturating_sub(w) / 2,
+        y: area.height.saturating_sub(h) / 2,
         width: w,
         height: h,
     };
     let inner_h = rect.height.saturating_sub(2) as usize;
     let inner_w = rect.width.saturating_sub(2) as usize;
 
-    let entries = log::recent(log::Level::Debug, 500);
+    let entries = log::recent(
+        if app.cfg.log_detail { log::Level::Debug } else { log::Level::Info },
+        500,
+    );
     let mut lines: Vec<Line> = Vec::new();
     for e in &entries {
         let style = match e.level {
@@ -1561,6 +1760,8 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     // Only the keys that apply to the current state.
     let hints: &[(&str, &str)] = if app.pending.is_some() {
         &[("y", "once"), ("a", "always"), ("n", "deny")]
+    } else if app.asking.is_some() {
+        &[("type", "your answer"), ("enter", "send")]
     } else if app.picker.is_some() || app.setup.is_some() {
         &[("↑↓", "move"), ("enter", "choose"), ("esc", "cancel")]
     } else if app.plan_blocked {
@@ -1572,7 +1773,7 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     } else if m.tiny {
         &[("/help", "")]
     } else {
-        &[("@", "file"), ("ctrl+p", "mode"), ("/help", "")]
+        &[("@", "file"), ("ctrl+p", "mode"), ("/keys", "")]
     };
     let mut right: Vec<Span<'static>> = Vec::new();
     for (i, (key, label)) in hints.iter().enumerate() {
@@ -1624,8 +1825,13 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     if app.web {
         right.push(Segment::new("web", t.info));
     }
-    if app.auto {
-        right.push(Segment::new("auto", t.error));
+    if app.auto_tier != AutoTier::Ask {
+        // Full-auto is the loud one (red): it means no human in the loop.
+        let colour = match app.auto_tier {
+            AutoTier::Full => t.error,
+            _ => t.warning,
+        };
+        right.push(Segment::new(app.auto_tier.label(), colour));
     }
     let (warns, errors) = log::counts();
     if errors > 0 {
@@ -1746,28 +1952,29 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     // Otherwise lay the names out across as many rows as it takes, so a growing
     // command list never silently clips entries off the right edge (which would
     // hide real commands and, worse, hide them non-deterministically as the
-    // terminal width changes).
+    // terminal width changes). The selected command (arrow-navigable) is shown
+    // in the accent colour and bold.
+    let sel = app.cmd_sel.min(hits.len().saturating_sub(1));
     let avail = input.width.max(8) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;
-    for (name, _) in &hits {
+    for (i, (name, _)) in hits.iter().enumerate() {
         let w = name.len() + 1; // name plus a separating space
         if used + w > avail && !row.is_empty() {
             lines.push(Line::from(std::mem::take(&mut row)));
             used = 0;
         }
-        row.push(Span::styled(format!("{name} "), t.dim()));
+        let style = if i == sel {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            t.dim()
+        };
+        row.push(Span::styled(format!("{name} "), style));
         used += w;
     }
     if !row.is_empty() {
         lines.push(Line::from(row));
-    }
-    // Highlight the first command (the one tab would complete) on the first row.
-    if let Some(Line { spans, .. }) = lines.first_mut() {
-        if let Some(first) = spans.first_mut() {
-            first.style = t.fg(t.accent);
-        }
     }
     let h = (lines.len() as u16).min(4);
     if input.y < h {
@@ -1924,14 +2131,30 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
 fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
     let Some(p) = &app.pending else { return };
     let t = &app.theme;
+    let g = &app.glyphs;
+
+    // A distinct, loud colour so an approval prompt is impossible to miss and
+    // never reads as just another tool block: amber for a write, red for a
+    // command (the higher-risk, exec tier).
+    let (accent, verb, kind) = match p.name.as_str() {
+        "run_command" => (t.error, "RUN COMMAND", "about to run a shell command"),
+        "write_file" => (t.warning, "WRITE FILE", "about to write a file"),
+        "edit_file" => (t.warning, "EDIT FILE", "about to edit a file"),
+        _ => (t.warning, "APPROVE", "needs your approval"),
+    };
 
     let max_w = area.width.saturating_sub(6).clamp(20, 110);
-    let body_w = max_w.saturating_sub(2) as usize;
+    let body_w = max_w.saturating_sub(4) as usize;
     let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(kind.to_string(), t.dim())));
     match &p.preview {
         Some(text) if p.name == "run_command" => {
             for l in md::hard_wrap(text, body_w) {
-                lines.push(Line::from(Span::styled(l, t.fg(t.warning))));
+                lines.push(Line::from(vec![
+                    Span::styled("$ ".to_string(), t.dim()),
+                    Span::styled(l, t.emphasis(t.text)),
+                ]));
             }
         }
         Some(text) => lines.extend(md::render_diff(text, body_w, t)),
@@ -1942,29 +2165,54 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
+    // The action row: colour-coded keys, spelled out, always the last thing the
+    // eye lands on. This is the part users said they could not find before.
+    lines.push(Line::default());
+    let key = |k: &str, label: &str, c: ratatui::style::Color| {
+        vec![
+            Span::styled(
+                format!(" {k} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(c)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {label}   "), t.body()),
+        ]
+    };
+    let mut action = Vec::new();
+    action.extend(key("y", "yes, once", t.success));
+    action.extend(key("a", "always", t.info));
+    action.extend(key("n", "no", t.error));
+    lines.push(Line::from(action));
+
     let content_w = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0) as u16;
-    let w = (content_w + 2).clamp(44, max_w);
-    let h = (lines.len() as u16 + 2).clamp(5, area.height.saturating_sub(4).max(5));
+    let w = (content_w + 4).clamp(48, max_w);
+    let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(2).max(6));
+    // Dock it low-centre, just above the input, so it appears where the user's
+    // attention already is rather than floating in the middle of the screen.
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
-        y: (area.height.saturating_sub(h)) / 2,
+        y: area.height.saturating_sub(h + 2).max(1),
         width: w,
         height: h,
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(t.fg(t.border_focus))
+        .border_type(ratatui::widgets::BorderType::Thick)
+        .border_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
         .title(Span::styled(
-            format!(" approve {} ", p.name),
+            format!(" {} {verb} ", g.pending),
             Style::default()
-                .fg(t.border_focus)
-                .add_modifier(Modifier::BOLD),
-        ));
+                .fg(accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ))
+        .title_bottom(Span::styled(" ↑↓ scroll · esc = no ", t.dim()));
 
     f.render_widget(Clear, rect);
     f.render_widget(
@@ -2051,11 +2299,12 @@ pub async fn run(
         reveal_pref: cfg.reveal,
         turn_started: None,
         pending: None,
+        asking: None,
         model: cfg.model.clone(),
         endpoint: cfg.endpoint(),
         tokens: 0,
         context_budget: cfg.context_tokens,
-        auto: cfg.auto_approve,
+        auto_tier: if cfg.auto_approve { AutoTier::Full } else { cfg.auto_tier },
         web: cfg.web_search && !cfg.searx_url.trim().is_empty(),
         searx_configured: !cfg.searx_url.trim().is_empty(),
         mode: cfg.mode,
@@ -2071,9 +2320,11 @@ pub async fn run(
         confirm: None,
         files: FileIndex::new(),
         mention_sel: 0,
+        cmd_sel: 0,
         files_ready: false,
         picker: None,
         setup: None,
+        settings: None,
         cfg: (*cfg).clone(),
         branch: git_branch(&root),
         root: root.clone(),

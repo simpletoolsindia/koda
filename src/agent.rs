@@ -36,6 +36,13 @@ pub enum Event {
         preview: Option<String>,
         reply: oneshot::Sender<Approval>,
     },
+    /// The agent is asking the user a question and waiting for a typed answer.
+    /// The TUI routes the user's next message into `reply` instead of starting
+    /// a new turn.
+    AskUser {
+        question: String,
+        reply: oneshot::Sender<String>,
+    },
     ToolStart {
         id: String,
         name: String,
@@ -82,7 +89,9 @@ pub enum Command {
     ReloadSkills,
     SetModel(String),
     SetEndpoint(String),
+    #[allow(dead_code)]
     SetAutoApprove(bool),
+    SetAutoTier(crate::config::AutoTier),
     SetMode(Mode),
     SetWebSearch(bool),
     Quit,
@@ -189,6 +198,7 @@ pub struct Agent {
     pub model: String,
     pub endpoint: String,
     pub auto_approve: bool,
+    pub auto_tier: crate::config::AutoTier,
     client: Client,
     ctx: ToolCtx,
     system: String,
@@ -266,6 +276,11 @@ impl Agent {
         Ok(Self {
             model: cfg.model.clone(),
             auto_approve: cfg.auto_approve,
+            auto_tier: if cfg.auto_approve {
+                crate::config::AutoTier::Full
+            } else {
+                cfg.auto_tier
+            },
             cfg,
             endpoint,
             client,
@@ -342,6 +357,7 @@ impl Agent {
             endpoint: self.endpoint.clone(),
             // Its tools cannot mutate anything, so there is nothing to approve.
             auto_approve: true,
+            auto_tier: crate::config::AutoTier::Full,
             client: self.client.clone(),
             ctx: self.ctx.clone(),
             system: prompt::subagent(&self.ctx.root),
@@ -513,6 +529,13 @@ impl Agent {
                     "auto-approve {}",
                     if v { "on" } else { "off" }
                 )));
+            }
+            Command::SetAutoTier(tier) => {
+                self.auto_tier = tier;
+                // `auto_approve` stays as the hard override; the tier is the
+                // nuanced control the UI now drives.
+                self.auto_approve = tier == crate::config::AutoTier::Full;
+                let _ = tx.send(Event::Notice(format!("autonomy: {}", tier.label())));
             }
             Command::Quit => {}
         }
@@ -921,6 +944,7 @@ impl Agent {
         }
         let outcome = match name.as_str() {
             "delegate" => self.delegate(&args, tx).await,
+            "ask_user" => self.ask_user(&args, tx).await,
             "remember" => self.remember(&args),
             "codegraph" => self.query_graph(&args).await,
             "skill" => self.read_skill(&args),
@@ -1130,6 +1154,59 @@ impl Agent {
             msg.push_str(&format!("; could not undo {}", failed.join(", ")));
         }
         msg
+    }
+
+    /// Put a question to the user and block this turn until they answer. In a
+    /// subagent (no direct user) or headless run there is nobody to ask, so it
+    /// fails cleanly and tells the model to decide for itself.
+    async fn ask_user(&mut self, args: &Value, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
+        let question = args
+            .get("question")
+            .and_then(|q| q.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if question.is_empty() {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: `question` is required.".into(),
+                summary: "ask_user: empty".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
+        if self.quiet || self.depth > 0 {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: no user is available to answer here. Decide yourself and \
+                          proceed."
+                    .into(),
+                summary: "ask_user: no user".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
+        let (reply, rx) = oneshot::channel();
+        let _ = tx.send(Event::AskUser {
+            question: question.clone(),
+            reply,
+        });
+        match rx.await {
+            Ok(answer) if !answer.trim().is_empty() => {
+                crate::tel_info!("agent", "user answered", "q" => question);
+                tools::Outcome {
+                    ok: true,
+                    content: format!("The user answered: {answer}"),
+                    summary: "answered".into(),
+                    view: tools::ToolView::Plain,
+                }
+            }
+            _ => tools::Outcome {
+                ok: false,
+                content: "ERROR: the user did not answer. Proceed with your best judgement."
+                    .into(),
+                summary: "ask_user: no answer".into(),
+                view: tools::ToolView::Plain,
+            },
+        }
     }
 
     fn remember(&mut self, args: &Value) -> tools::Outcome {
@@ -1380,14 +1457,36 @@ impl Agent {
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .trim();
+        let role = args.get("role").and_then(|r| r.as_str()).unwrap_or("").trim();
 
         crate::tel_info!(
             "subagent",
             "delegating",
             "task" => task.chars().take(80).collect::<String>(),
+            "role" => role,
         );
         let mut child = self.child();
         let mut brief = String::new();
+        // A role-agent runs with its skill body as operating instructions, so a
+        // "qa" or "tester" subagent behaves differently from a plain one.
+        if !role.is_empty() {
+            match crate::skills::find_role(&self.skills, role) {
+                Some(skill) => {
+                    let _ = writeln!(
+                        brief,
+                        "You are acting as the **{}** agent. Operate by these role \
+                         instructions:\n\n{}\n",
+                        role, skill.body
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        brief,
+                        "(No `{role}` role skill found; proceeding as a general subagent.)\n"
+                    );
+                }
+            }
+        }
         if !extra.is_empty() {
             let _ = writeln!(brief, "Starting context:\n{extra}\n");
         }
@@ -1603,7 +1702,11 @@ impl Agent {
         args: &Value,
         tx: &mpsc::UnboundedSender<Event>,
     ) -> bool {
-        if !tools::is_mutating(name) || self.auto_approve || self.always.contains(name) {
+        if !tools::is_mutating(name)
+            || self.auto_approve
+            || self.auto_tier.auto_allows(name)
+            || self.always.contains(name)
+        {
             return true;
         }
         let (reply, rx) = oneshot::channel();

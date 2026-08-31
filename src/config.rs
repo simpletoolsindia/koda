@@ -61,6 +61,70 @@ impl std::fmt::Display for Mode {
     }
 }
 
+/// How much the agent may do without asking. Modelled on oh-my-pi's approval
+/// tiers: read is always free; the tier decides whether writes and commands
+/// need a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoTier {
+    /// Ask before every mutating action (writes and commands). The default.
+    #[default]
+    Ask,
+    /// Auto-approve file writes, but still ask before running commands.
+    Write,
+    /// Full-auto: approve everything, no prompts. Autonomous operation.
+    Full,
+}
+
+impl AutoTier {
+    pub fn label(&self) -> &'static str {
+        match self {
+            AutoTier::Ask => "ASK",
+            AutoTier::Write => "AUTO-WRITE",
+            AutoTier::Full => "FULL-AUTO",
+        }
+    }
+    /// Cycle for a keybinding / `/auto`: ask → write → full → ask.
+    pub fn next(&self) -> AutoTier {
+        match self {
+            AutoTier::Ask => AutoTier::Write,
+            AutoTier::Write => AutoTier::Full,
+            AutoTier::Full => AutoTier::Ask,
+        }
+    }
+    /// Whether a mutating tool of this name may run without a prompt.
+    pub fn auto_allows(&self, tool: &str) -> bool {
+        match self {
+            AutoTier::Ask => false,
+            // Writes are pre-approved; commands (and anything exec-tier) still ask.
+            AutoTier::Write => matches!(tool, "write_file" | "edit_file"),
+            AutoTier::Full => true,
+        }
+    }
+}
+
+impl std::str::FromStr for AutoTier {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ask" | "off" | "false" => Ok(AutoTier::Ask),
+            "write" | "auto-write" | "writes" => Ok(AutoTier::Write),
+            "full" | "full-auto" | "yolo" | "on" | "true" => Ok(AutoTier::Full),
+            other => Err(format!("unknown auto tier `{other}` (ask|write|full)")),
+        }
+    }
+}
+
+impl std::fmt::Display for AutoTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AutoTier::Ask => "ask",
+            AutoTier::Write => "write",
+            AutoTier::Full => "full",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolProtocol {
@@ -113,6 +177,9 @@ pub struct Config {
     pub max_steps: usize,
     /// Skip approval prompts for mutating tools.
     pub auto_approve: bool,
+    /// Tiered autonomy: ask (default), write (auto-approve writes), or full
+    /// (approve everything). `auto_approve = true` implies `full`.
+    pub auto_tier: AutoTier,
     /// Confine file tools to the workspace root.
     pub sandbox: bool,
     pub shell: String,
@@ -165,6 +232,10 @@ pub struct Config {
     pub log_level: String,
     /// Mirror the event log to ~/.local/state/koda/koda.log.
     pub log_to_file: bool,
+    /// Show detailed (debug-level) telemetry in the `/logs` view. Off keeps the
+    /// view concise (info and above); on surfaces every request, tool arg, and
+    /// timing. Toggle live in the settings page.
+    pub log_detail: bool,
 
     /// Starting mode: plan, execute or vibe.
     pub mode: Mode,
@@ -196,6 +267,7 @@ impl Default for Config {
             tool_protocol: ToolProtocol::Auto,
             max_steps: 24,
             auto_approve: false,
+            auto_tier: AutoTier::Ask,
             sandbox: true,
             shell: "/bin/sh".into(),
             command_timeout_ms: 120_000,
@@ -216,6 +288,7 @@ impl Default for Config {
             max_retries: 3,
             log_level: "info".into(),
             log_to_file: true,
+            log_detail: false,
             mode: Mode::Execute,
             auto_compact_at: 0.85,
             subagents: true,
@@ -367,7 +440,10 @@ context_tokens = 16000  # soft budget; history is trimmed to fit
 tool_protocol = "auto"
 
 max_steps = 24
-auto_approve = false    # true = never ask before writes/commands
+auto_approve = false    # true = never ask before writes/commands (same as auto_tier=full)
+# Tiered autonomy, cycled live with /auto: ask (prompt for every write/command),
+# write (auto-approve writes, still ask before commands), full (approve everything).
+auto_tier = "ask"
 sandbox = true          # confine file tools to the workspace root
 
 shell = "/bin/sh"
