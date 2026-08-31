@@ -476,7 +476,14 @@ fn save_settings(root: &Path, body: &str) -> String {
     }
 }
 
-/// Load the built React app if present, else a helpful placeholder page.
+/// The full React UI, embedded at compile time so the installed binary serves
+/// it no matter which directory koda runs in. A dev checkout can still override
+/// it with a freshly rebuilt file on disk (see `load_index`).
+const EMBEDDED_INDEX: &str = include_str!("../web-ui/dist/index.html");
+
+/// Load the built React app: prefer a dist on disk (so `web-ui/build.sh` during
+/// development is picked up without recompiling), else the copy embedded in the
+/// binary, else — only if the embed is somehow empty — the tiny fallback page.
 fn load_index(root: &Path) -> String {
     for candidate in [
         root.join("web-ui").join("dist").join("index.html"),
@@ -485,6 +492,9 @@ fn load_index(root: &Path) -> String {
         if let Ok(html) = std::fs::read_to_string(&candidate) {
             return html;
         }
+    }
+    if !EMBEDDED_INDEX.trim().is_empty() {
+        return EMBEDDED_INDEX.to_string();
     }
     FALLBACK_INDEX.to_string()
 }
