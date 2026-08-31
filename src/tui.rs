@@ -47,6 +47,19 @@ use tokio::sync::{mpsc, oneshot, Notify};
 
 /// A spinner that flashes for instant work is noise, so hold it back briefly.
 const SPINNER_DELAY: Duration = Duration::from_millis(200);
+/// How long the welcome banner's entrance shimmer plays before it settles into
+/// the static gradient. Kept short so it never delays getting to work.
+const WELCOME_ANIM: Duration = Duration::from_millis(1400);
+
+/// The KODA banner art, shared by the static welcome and its entrance shimmer.
+const BANNER_ART: [&str; 6] = [
+    "█  ██   ██████   ██████    █████  ",
+    "█ ██    ██   ██  ██   ██  ██   ██ ",
+    "███     ██   ██  ██   ██  ███████ ",
+    "█ ██    ██   ██  ██   ██  ██   ██ ",
+    "█  ██   ██████   ██████   ██   ██ ",
+    "                                  ",
+];
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "keys and commands"),
@@ -113,6 +126,15 @@ fn random_tip() -> &'static str {
     TIPS[n % TIPS.len()]
 }
 
+/// RGB components of a truecolor, for gradient maths. `None` for ANSI/named
+/// colours, where a gradient is not meaningful and callers fall back to flat.
+fn as_rgb(c: Color) -> Option<(u8, u8, u8)> {
+    match c {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    }
+}
+
 /// Width bands. Every layout decision reads these instead of raw numbers.
 #[derive(Clone, Copy)]
 struct Metrics {
@@ -167,6 +189,9 @@ pub struct App {
     /// Log version at the last draw, so a new entry triggers a repaint while
     /// the overlay is open.
     log_version: u64,
+    /// When the welcome banner was shown, for its brief entrance shimmer. None
+    /// once the animation has finished (or when motion is off).
+    welcome_at: Option<Instant>,
     /// Emit DEC 2026 markers around each frame.
     sync_output: bool,
     /// Whether the mouse is currently captured (wheel scroll vs native select).
@@ -364,6 +389,10 @@ impl App {
             || self.files.scanning()
             // Text may still be catching up after the turn itself finished.
             || self.transcript.revealing()
+            // The welcome banner's brief entrance shimmer.
+            || self
+                .welcome_at
+                .is_some_and(|t| t.elapsed() < WELCOME_ANIM)
     }
 
     fn show_welcome(&mut self, cfg: &Config) {
@@ -387,43 +416,67 @@ impl App {
             return;
         }
 
-        // KODA as block-letter ANSI art, in the accent colour. The banner is
-        // the welcome — project, model and branch already live in the bottom
-        // bar, so they are not repeated here.
-        const ART: [&str; 5] = [
-            "██  ██  ██████  ██████   █████ ",
-            "██ ██  ██    ██ ██   ██ ██   ██",
-            "████   ██    ██ ██   ██ ███████",
-            "██ ██  ██    ██ ██   ██ ██   ██",
-            "██  ██  ██████  ██████  ██   ██",
-        ];
+        // KODA as block-letter art with a diagonal colour gradient across the
+        // letters — the look modern CLIs (Claude Code, Gemini CLI, oh-my-logo)
+        // converged on. The gradient runs accent → accent-alt over row+col, so
+        // it reads as a single lit object rather than flat text. Falls back to a
+        // flat accent when the palette is not truecolor (ANSI/mono).
+        let art = BANNER_ART;
+        let rows = art.len();
+        let cols = art.iter().map(|r| r.chars().count()).max().unwrap_or(1);
+        let grad = |row: usize, col: usize| -> ratatui::style::Color {
+            match (as_rgb(t.accent), as_rgb(t.accent_alt)) {
+                (Some(a), Some(b)) => {
+                    // Diagonal position 0..1 across the whole banner.
+                    let d = (row as f32 / rows as f32 + col as f32 / cols as f32) / 2.0;
+                    let (r, g, bl) = anim::lerp_rgb(a, b, d);
+                    ratatui::style::Color::Rgb(r, g, bl)
+                }
+                _ => t.accent,
+            }
+        };
+
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::default());
-        for (i, row) in ART.iter().enumerate() {
-            // A subtle two-tone gradient down the letters so the banner has depth.
-            let colour = if i < 2 { t.accent } else { t.accent_alt };
-            lines.push(Line::from(vec![
-                Span::raw("  ".to_string()),
-                Span::styled((*row).to_string(), t.emphasis(colour)),
-            ]));
+        for (i, row) in art.iter().enumerate() {
+            // Colour each character by its gradient position; group nothing, the
+            // banner is small enough that per-cell spans are cheap and paint once.
+            let mut spans = vec![Span::raw("  ".to_string())];
+            for (j, ch) in row.chars().enumerate() {
+                if ch == ' ' {
+                    spans.push(Span::raw(" ".to_string()));
+                } else {
+                    spans.push(Span::styled(
+                        ch.to_string(),
+                        Style::default().fg(grad(i, j)).add_modifier(Modifier::BOLD),
+                    ));
+                }
+            }
+            lines.push(Line::from(spans));
         }
         lines.push(Line::from(vec![
             Span::raw("  ".to_string()),
             Span::styled(
-                format!("terminal coding agent for local models · v{}", env!("CARGO_PKG_VERSION")),
+                format!("terminal coding agent for local models  {}  v{}", g.sep, env!("CARGO_PKG_VERSION")),
                 t.dim(),
             ),
         ]));
         lines.push(Line::default());
         // One rotating tip so the first thing on screen also teaches a feature.
         lines.push(Line::from(vec![
-            Span::styled("  tip  ".to_string(), t.emphasis(t.accent)),
-            Span::styled(random_tip().to_string(), t.body()),
+            Span::styled("  tip  ".to_string(), Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+            Span::styled(format!(" {}", random_tip()), t.body()),
         ]));
         lines.push(Line::default());
 
         self.transcript.raw(lines);
         self.follow = true;
+        // Arm a brief entrance shimmer over the banner, but only when motion is
+        // on and the terminal is a real TTY — never delay or animate for a pipe
+        // or a reduced-motion preference (the research is unanimous on this).
+        if self.motion.animates() {
+            self.welcome_at = Some(Instant::now());
+        }
     }
 
     fn show_models(&mut self, list: Vec<String>) {
@@ -1513,6 +1566,18 @@ fn draw(f: &mut Frame, app: &mut App) {
         Paragraph::new(app.transcript.window(app.scroll, app.body_h)),
         text_area,
     );
+    // Brief entrance shimmer over the banner: while the welcome animation window
+    // is open and we are scrolled to the top, sweep a bright band across the six
+    // art rows. It repaints only those rows (over identical content), so when it
+    // ends there is no visible jump — just the shimmer stopping.
+    if let Some(started) = app.welcome_at {
+        let elapsed = started.elapsed();
+        if elapsed < WELCOME_ANIM && app.scroll == 0 && app.motion.animates() {
+            welcome_shimmer(f, app, text_area, elapsed);
+        } else if elapsed >= WELCOME_ANIM {
+            app.welcome_at = None;
+        }
+    }
     if total > app.body_h {
         draw_scrollbar(
             f,
@@ -2037,6 +2102,51 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     f.render_widget(Paragraph::new(lines), rect);
 }
 
+/// The banner's entrance shimmer: repaint the six art rows with the same
+/// gradient plus a soft bright band travelling left→right, so the logo "lights
+/// up" once on open. Draws over identical content, so when it stops there is no
+/// visible jump. Reduced-motion and non-TTY paths never reach here.
+fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration) {
+    let t = &app.theme;
+    let (Some(a), Some(b)) = (as_rgb(t.accent), as_rgb(t.accent_alt)) else {
+        return; // No gradient on non-truecolor palettes; nothing to shimmer.
+    };
+    let rows = BANNER_ART.len();
+    let cols = BANNER_ART.iter().map(|r| r.chars().count()).max().unwrap_or(1);
+    // A band that sweeps across the banner width over the animation window.
+    let bright = anim::shimmer(cols, elapsed, WELCOME_ANIM);
+    for (i, row) in BANNER_ART.iter().enumerate() {
+        // Row 0 of the banner sits one line below the top (a leading blank).
+        let y = text_area.y + 1 + i as u16;
+        if y >= text_area.y + text_area.height {
+            break;
+        }
+        let mut spans = vec![Span::raw("  ".to_string())];
+        for (j, ch) in row.chars().enumerate() {
+            if ch == ' ' {
+                spans.push(Span::raw(" ".to_string()));
+                continue;
+            }
+            let d = (i as f32 / rows as f32 + j as f32 / cols as f32) / 2.0;
+            let (mut r, mut gg, mut bl) = anim::lerp_rgb(a, b, d);
+            // Lift toward white where the band is brightest.
+            let lift = bright.get(j).copied().unwrap_or(0.0);
+            if lift > 0.0 {
+                let (wr, wg, wb) = anim::lerp_rgb((r, gg, bl), (255, 255, 255), lift * 0.85);
+                r = wr;
+                gg = wg;
+                bl = wb;
+            }
+            spans.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(Color::Rgb(r, gg, bl)).add_modifier(Modifier::BOLD),
+            ));
+        }
+        let rect = Rect { x: text_area.x, y, width: text_area.width, height: 1 };
+        f.render_widget(Paragraph::new(Line::from(spans)), rect);
+    }
+}
+
 /// The `@` file list, above the input. Selected row is reversed so it reads as
 /// a selection rather than just a colour change.
 fn mention_popup(f: &mut Frame, app: &App, input: Rect, hits: &[String]) {
@@ -2356,6 +2466,7 @@ pub async fn run(
         plan_blocked: false,
         logs: None,
         log_version: 0,
+        welcome_at: None,
         // Emission is decoupled from config alone: a terminal that mishandles
         // DEC 2026 (Apple Terminal, screen) must get neither the faster cadence
         // nor the markers, or it tears *worse*. Both the draw wrapper below and
