@@ -200,11 +200,25 @@ class Tui:
             self.send("\x04")  # ctrl+d
         except OSError:
             pass
-        try:
-            return self.proc.wait(timeout=12)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            return -1
+        # Keep draining stdout while we wait. koda paints one last frame as it
+        # quits; if we stop reading, the pty buffer can fill and block that
+        # write, which looks like a hang. A real terminal always drains, so this
+        # mirrors real conditions rather than papering over a bug.
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            try:
+                os.set_blocking(self.master, False)
+                data = os.read(self.master, 65536)
+                if data:
+                    self.vt.feed(data.decode("utf-8", "replace"))
+            except (BlockingIOError, OSError):
+                pass
+            rc = self.proc.poll()
+            if rc is not None:
+                return rc
+            time.sleep(0.02)
+        self.proc.kill()
+        return -1
 
 
 def workspace():

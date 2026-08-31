@@ -141,7 +141,13 @@ fn main() -> Result<()> {
         eprintln!("koda: {e:#}");
         std::process::exit(1);
     }
-    Ok(())
+    // Exit the process explicitly rather than falling through to dropping the
+    // runtime. After the agent has spawned a child process (e.g. a `!command`
+    // or run_command), tokio's process reaper plus the blocking stdin reader
+    // thread can keep runtime teardown from completing, which manifested as
+    // koda hanging on ctrl+d. A clean run has already restored the terminal, so
+    // terminating here is safe and immediate.
+    std::process::exit(0);
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
