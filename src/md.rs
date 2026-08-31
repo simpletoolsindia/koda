@@ -220,64 +220,129 @@ fn split_row(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Render a table with a dim rule under the header. No outer box: the columns
-/// already align, and a border around them would just add clutter.
+/// Render a table with light column separators and a rule under the header.
+/// Cells are rendered through `inline`, so **bold**, *italic*, `code` and links
+/// inside a cell are styled rather than shown as raw markdown.
 fn render_table(rows: &[Vec<String>], width: usize, t: &Theme) -> Vec<Line<'static>> {
     let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     if cols == 0 {
         return Vec::new();
     }
+    // Column widths are measured on the DISPLAY text (markdown markers removed),
+    // so a `**bold**` cell doesn't reserve width for the asterisks.
     let mut w = vec![0usize; cols];
     for r in rows {
         for (cell_w, cell) in w.iter_mut().zip(r.iter()) {
-            *cell_w = (*cell_w).max(cell.width());
+            *cell_w = (*cell_w).max(strip_inline(cell).width());
         }
     }
-    // Shrink proportionally if the natural width does not fit.
-    let gap = 2usize;
-    let natural: usize = w.iter().sum::<usize>() + gap * (cols - 1) + 1;
+    // Shrink the widest column(s) proportionally if the natural width overflows.
+    let gap = 3usize; // " │ " separator
+    let sep = " │ ";
+    let border = |n: usize| "─".repeat(n);
+    let natural: usize = w.iter().sum::<usize>() + gap * cols.saturating_sub(1) + 1;
     if natural > width {
-        let over = natural - width;
-        let widest = w.iter().copied().max().unwrap_or(1);
-        for cell in w.iter_mut() {
-            if *cell == widest {
-                *cell = cell.saturating_sub(over).max(4);
+        let mut over = natural - width;
+        // Trim from the widest columns first, keeping a floor of 4.
+        while over > 0 {
+            let (idx, &widest) = w.iter().enumerate().max_by_key(|(_, v)| **v).unwrap();
+            if widest <= 4 {
                 break;
             }
+            w[idx] -= 1;
+            over -= 1;
         }
     }
 
+    let total: usize = w.iter().sum::<usize>() + gap * cols.saturating_sub(1);
     let mut out = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
         let mut spans = vec![Span::raw(" ".to_string())];
         for (c, &cw) in w.iter().enumerate() {
             let cell = row.get(c).map(String::as_str).unwrap_or("");
-            let shown: String = if cell.width() > cw {
-                let mut s: String = cell.chars().take(cw.saturating_sub(1)).collect();
-                s.push('…');
-                s
-            } else {
-                format!("{cell:<width$}", width = cw)
-            };
-            let style = if ri == 0 {
+            // Header stays bold+plain (predictable); body cells get inline styling.
+            let base = if ri == 0 {
                 Style::default().fg(t.text).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(t.text)
+                t.body()
             };
-            spans.push(Span::styled(shown, style));
+            let mut cell_spans = if ri == 0 {
+                vec![Span::styled(strip_inline(cell), base)]
+            } else {
+                inline(cell, base, t)
+            };
+            // Truncate to the column width on display width, then pad.
+            let shown_w: usize = cell_spans.iter().map(|s| s.content.width()).sum();
+            if shown_w > cw {
+                cell_spans = clip_spans(cell_spans, cw);
+            }
+            let pad = cw.saturating_sub(cell_spans.iter().map(|s| s.content.width()).sum::<usize>());
+            spans.extend(cell_spans);
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
             if c + 1 < cols {
-                spans.push(Span::raw(" ".repeat(gap)));
+                spans.push(Span::styled(sep.to_string(), t.dim()));
             }
         }
         out.push(Line::from(spans));
         if ri == 0 {
-            let rule: usize = w.iter().sum::<usize>() + gap * (cols - 1);
             out.push(Line::from(vec![
                 Span::raw(" ".to_string()),
-                Span::styled("─".repeat(rule.min(width)), Style::default().fg(t.border)),
+                Span::styled(border(total.min(width)), Style::default().fg(t.border)),
             ]));
         }
     }
+    out
+}
+
+/// Remove inline markdown markers so a cell's on-screen width is measured on
+/// what the reader actually sees, not the asterisks/backticks around it.
+fn strip_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            i += 1;
+            continue;
+        }
+        if c == '*' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            continue;
+        }
+        if c == '*' || c == '_' {
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Clip a run of spans to `max` display columns, appending an ellipsis.
+fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    let cap = max.saturating_sub(1);
+    for sp in spans {
+        if used >= cap {
+            break;
+        }
+        let w = sp.content.width();
+        if used + w <= cap {
+            used += w;
+            out.push(sp);
+        } else {
+            let take = cap - used;
+            let s: String = sp.content.chars().take(take).collect();
+            out.push(Span::styled(s, sp.style));
+            break;
+        }
+    }
+    out.push(Span::raw("…".to_string()));
     out
 }
 
@@ -792,6 +857,21 @@ mod tests {
         let h = text[0].find("time").unwrap();
         let r = text[2].find("8ms").unwrap();
         assert_eq!(h, r, "columns misaligned: {text:?}");
+    }
+
+    #[test]
+    fn table_cells_render_inline_formatting() {
+        // A cell with `code` and **bold** should show the text, not the raw
+        // markdown markers, and columns should still align.
+        let md = "| name | note |\n|---|---|\n| `learning.rs` | **new** module |\n| tui.rs | old |";
+        let lines = render(md, 70, &th());
+        let text = text_of(&lines);
+        let joined = text.join("\n");
+        assert!(joined.contains("learning.rs"), "code cell text shown: {text:?}");
+        assert!(!joined.contains("`learning.rs`"), "backticks stripped: {text:?}");
+        assert!(joined.contains("new"), "bold cell text shown: {text:?}");
+        assert!(!joined.contains("**new**"), "asterisks stripped: {text:?}");
+        assert!(text.iter().any(|l| l.contains('│')), "column separators present: {text:?}");
     }
 
     #[test]

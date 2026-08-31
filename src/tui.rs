@@ -51,6 +51,39 @@ const SPINNER_DELAY: Duration = Duration::from_millis(200);
 /// the static gradient. Kept short so it never delays getting to work.
 const WELCOME_ANIM: Duration = Duration::from_millis(1400);
 
+/// Light-hearted status messages shown while koda is working and no specific
+/// tool activity is in flight. They rotate every ~10s so a long turn feels
+/// alive and a little fun, rather than a frozen "working". Kept short so they
+/// fit the one-line status even on a narrow terminal.
+const WORKING_MSGS: &[&str] = &[
+    "cooking",
+    "summoning tokens",
+    "reticulating splines",
+    "thinking hard",
+    "consulting the rubber duck",
+    "untangling the logic",
+    "warming up the neurons",
+    "doing the needful",
+    "chasing semicolons",
+    "herding functions",
+    "compiling thoughts",
+    "reading between the lines",
+    "aligning the bits",
+    "brewing a fix",
+    "poking the codebase",
+    "connecting the dots",
+    "wrangling edge cases",
+    "still on it",
+];
+
+/// Pick a working message from the elapsed time so it advances every ~10s and
+/// stays stable within each 10s window (no jitter between redraws).
+fn working_message(elapsed: Duration) -> &'static str {
+    let slot = (elapsed.as_secs() / 10) as usize;
+    WORKING_MSGS[slot % WORKING_MSGS.len()]
+}
+
+
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
 /// A bold "ANSI Shadow" face with drop shadows — fancier and more striking than
@@ -337,14 +370,28 @@ impl App {
                 self.transcript.todos(items);
                 self.follow = true;
             }
-            Event::Notice(msg) => self.note(msg),
+            Event::Notice(msg) => {
+                // While the provider setup is open, a probe result (e.g. an
+                // unreachable server) belongs in the overlay, not the transcript
+                // behind it — so the user sees why the model list is empty and
+                // can fix the URL or just type the model name.
+                if let Some(s) = &mut self.setup {
+                    s.status = Some(msg);
+                } else {
+                    self.note(msg);
+                }
+            }
             Event::Error(msg) => {
                 self.transcript.error(msg);
                 self.follow = true;
             }
             Event::Models(list) => {
                 if let Some(s) = &mut self.setup {
-                    s.status = Some(format!("{} model(s) — ctrl+n to cycle", list.len()));
+                    s.status = Some(if list.is_empty() {
+                        "couldn't list models — check the URL/key, or just type the model name and press enter".into()
+                    } else {
+                        format!("{} model(s) — ctrl+n to cycle", list.len())
+                    });
                     s.available = list;
                 } else {
                     self.show_models(list);
@@ -647,11 +694,15 @@ impl App {
             KeyCode::Char('u') if ctrl => self.editor.kill_to_start(),
             KeyCode::Char('w') if ctrl => self.editor.kill_word(),
             KeyCode::Char('r') if ctrl => {
-                self.follow |= self.transcript.toggle_last_tool();
+                self.follow |= self.transcript.toggle_tools_pref();
+                let on = self.transcript.expand_tools;
+                self.note(if on { "tool output expanded (stays until ctrl+r)" } else { "tool output collapsed" });
             }
             KeyCode::Char('p') if ctrl => self.cycle_mode(),
             KeyCode::Char('t') if ctrl => {
-                self.follow |= self.transcript.toggle_last_reasoning();
+                self.follow |= self.transcript.toggle_reasoning_pref();
+                let on = self.transcript.show_reasoning;
+                self.note(if on { "reasoning shown (stays until ctrl+t)" } else { "reasoning hidden" });
             }
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
             KeyCode::Char('b') if alt => self.editor.word_left(),
@@ -1308,6 +1359,13 @@ impl App {
                 self.send(Command::Clear);
             }
             "compact" => self.send(Command::Compact),
+            "fam" | "fullauto" | "yolo" => {
+                // One-shot switch straight to full-auto: approve everything, no
+                // prompts. Shown in red in the status bar so it's never a surprise.
+                self.auto_tier = AutoTier::Full;
+                self.send(Command::SetAutoTier(AutoTier::Full));
+                self.note("full-auto — approving everything, no prompts (/auto to dial back)");
+            }
             "learn" => {
                 use crate::agent::LearnAction;
                 let mut it = arg.split_whitespace();
@@ -1697,20 +1755,26 @@ fn draw(f: &mut Frame, app: &mut App) {
     let input_w = area.width.saturating_sub(3).max(4) as usize;
     let (rows, crow, ccol) = app.editor.visual(input_w);
     // A roomier composer: it grows well before it starts scrolling. When empty
-    // it stays a single line so it never steals space from the transcript, but
-    // once you start typing it can expand up to a tall field.
-    let max_input = if m.tiny { 5 } else { 12 };
-    let min_input = if app.editor.is_empty() { 1 } else { 2 };
-    let input_h = rows.len().clamp(min_input, max_input) as u16;
+    // it stays a two-line field so it reads as a real input box, and it can
+    // expand to a tall field as you type.
+    let max_input = if m.tiny { 6 } else { 14 };
+    let min_input = if app.editor.is_empty() { if m.tiny { 1 } else { 2 } } else { 3 };
+    let input_h = rows.len().saturating_add(1).clamp(min_input, max_input) as u16;
+
+    // A one-row gap between the transcript/hint area and the input keeps the
+    // last line of tool output (a long command, a diff) from colliding with the
+    // input and bottom bar — the user can always read the full final line.
+    let spacer = if m.tiny { 0 } else { 1 };
 
     let chunks = Layout::vertical([
         Constraint::Min(1),          // transcript
         Constraint::Length(1),       // hint / state row (status + keys)
+        Constraint::Length(spacer),  // breathing room above the input
         Constraint::Length(input_h), // input
         Constraint::Length(1),       // powerline status bar (mode + model)
     ])
     .split(area);
-    let (body, rule, input, status) = (chunks[0], chunks[1], chunks[2], chunks[3]);
+    let (body, rule, input, status) = (chunks[0], chunks[1], chunks[3], chunks[4]);
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
     let total_before = app.transcript.total_lines();
@@ -1773,9 +1837,15 @@ fn draw(f: &mut Frame, app: &mut App) {
     // The input sits on its own tinted surface, so it reads as a distinct field
     // without a frame around it.
     let input_lines: Vec<Line> = if app.editor.is_empty() && !app.busy {
+        let (label, style) = if app.asking.is_some() {
+            // koda asked a question — make the input read as an answer field.
+            ("type your answer and press enter".to_string(), t.emphasis(t.accent))
+        } else {
+            ("ask, or /help for commands".to_string(), t.dim())
+        };
         vec![Line::from(vec![
             Span::styled(format!("{} ", g.prompt), prompt_style),
-            Span::styled("ask, or /help for commands".to_string(), t.dim()),
+            Span::styled(label, style),
         ])]
     } else {
         let shown = input_h as usize;
@@ -1843,6 +1913,16 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.pending.is_some() {
         approval_popup(f, app, area);
+    }
+    // A focused question card when koda asked something and nothing else is up.
+    if app.asking.is_some()
+        && app.pending.is_none()
+        && app.setup.is_none()
+        && app.settings.is_none()
+        && app.logs.is_none()
+        && app.picker.is_none()
+    {
+        asking_popup(f, app, area);
     }
 }
 
@@ -1974,8 +2054,14 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 g.thinking[0]
             };
             left.push(Span::styled(format!(" {glyph} "), t.fg(t.accent)));
-            // Show what the agent is doing right now, not a generic "working".
-            let verb = app.activity.as_deref().unwrap_or("working");
+            // Show what the agent is doing right now (reading X, editing Y). When
+            // no specific tool activity is in flight, rotate a light-hearted
+            // message every ~10s so a long turn feels alive rather than frozen.
+            let verb = app
+                .activity
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| working_message(started.elapsed()).to_string());
             let label = format!("{verb}  {}", anim::short_elapsed(started.elapsed()));
             if app.motion.animates() {
                 // A highlight sweeping the label reads as ongoing activity
@@ -2550,12 +2636,13 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
         .max()
         .unwrap_or(0) as u16;
     let w = (content_w + 4).clamp(48, max_w);
-    let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(2).max(6));
-    // Dock it low-centre, just above the input, so it appears where the user's
-    // attention already is rather than floating in the middle of the screen.
+    let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(4).max(6));
+    // Center it — it's a modal decision, so it belongs in the middle of the
+    // screen where the eye lands, dimmed context behind it, not tucked at the
+    // bottom edge.
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
-        y: area.height.saturating_sub(h + 2).max(1),
+        y: (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
     };
@@ -2572,11 +2659,70 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
         ))
         .title_bottom(Span::styled(" ↑↓ scroll · esc = no ", t.dim()));
 
+    // Dim the whole screen behind the modal so the decision stands out.
+    if let Some(bg) = t.bg_panel {
+        f.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
     f.render_widget(Clear, rect);
     f.render_widget(
         Paragraph::new(lines).block(block).scroll((p.scroll, 0)),
         rect,
     );
+}
+
+/// A focused question card shown when koda calls `ask_user`. The answer is the
+/// user's next message (routed to the waiting tool), so this just presents the
+/// question prominently and points at the input — a one-shot, unmissable prompt
+/// rather than a line of text lost in the transcript.
+fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let Some((question, _)) = &app.asking else { return };
+    let t = &app.theme;
+    let g = &app.glyphs;
+
+    let max_w = area.width.saturating_sub(6).clamp(24, 96);
+    let body_w = max_w.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "koda has a question".to_string(),
+        t.emphasis(t.info),
+    )));
+    lines.push(Line::default());
+    for l in md::hard_wrap(question, body_w) {
+        lines.push(Line::from(Span::styled(l, t.emphasis(t.text))));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "↓ type your answer in the input and press enter".to_string(),
+        t.dim(),
+    )));
+
+    let content_w = lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0) as u16;
+    let w = (content_w + 4).clamp(40, max_w);
+    let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(6).max(6));
+    // Sit it in the upper-middle so it doesn't cover the input the user answers in.
+    let rect = Rect {
+        x: (area.width.saturating_sub(w)) / 2,
+        y: (area.height.saturating_sub(h)) / 3,
+        width: w,
+        height: h,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(t.info).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            format!(" {} question ", g.pending),
+            Style::default().fg(t.info).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ));
+
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 // ------------------------------------------------------------------- lifecycle

@@ -255,6 +255,11 @@ pub struct Agent {
     /// call has failed — small models tend to re-issue the exact same invalid
     /// call, so we detect that and escalate the corrective feedback.
     last_failure: Option<(String, u32)>,
+    /// How many times in a row the model has produced neither a tool call nor
+    /// usable text this turn. Small models sometimes reply empty (or with only
+    /// hidden reasoning); we nudge once with a concrete hint, then stop cleanly
+    /// instead of looping. Reset at the start of each top-level turn.
+    empty_replies: u32,
     /// Outcomes for read-only tools pre-computed concurrently for the current
     /// step, keyed by call id, so `execute` can reuse them instead of re-running
     /// the work serially. Drained as the step's calls are processed.
@@ -344,6 +349,7 @@ impl Agent {
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
+            empty_replies: 0,
             prefetched: std::collections::HashMap::new(),
         })
     }
@@ -418,6 +424,7 @@ impl Agent {
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
+            empty_replies: 0,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
@@ -672,6 +679,7 @@ impl Agent {
             self.cancel.store(false, Ordering::Relaxed);
             // Each top-level turn is its own undo group.
             self.turn_seq = self.turn_seq.wrapping_add(1);
+            self.empty_replies = 0;
             let _ = tx.send(Event::TurnStart);
         }
         self.history.push(self.user_message(&input, tx));
@@ -725,12 +733,34 @@ impl Agent {
 
             if result.calls.is_empty() {
                 if result.text.trim().is_empty() {
+                    // Small-model reliability: an empty or reasoning-only reply
+                    // is usually a stuck model, not a finished one. Nudge it
+                    // once with a concrete hint, then stop cleanly rather than
+                    // relaying the same non-answer over and over.
+                    self.empty_replies += 1;
+                    if self.empty_replies == 1 {
+                        self.history.push(Message::user(
+                            "You replied with no answer and no tool call. If you are done, \
+                             say so in plain text. Otherwise take ONE concrete action now: \
+                             call a tool (e.g. read_file or list_dir to gather context, or \
+                             write_file/edit_file to make a change), or ask the user a \
+                             specific question. Do not reply empty again.",
+                        ));
+                        let _ = tx.send(Event::Notice(
+                            "empty reply — nudging the model to take one concrete action".into(),
+                        ));
+                        continue;
+                    }
+                    // Second empty reply in a row: stop the loop deterministically.
                     let _ = tx.send(Event::Error(self.empty_reply_hint(result.reasoning_len)));
                     break;
                 }
+                self.empty_replies = 0;
                 self.history.push(Message::assistant(result.text));
                 break;
             }
+            // Any usable progress resets the empty-reply guard.
+            self.empty_replies = 0;
 
             // Record the assistant turn, then execute the requested tools.
             if self.text_mode {
@@ -1137,6 +1167,7 @@ impl Agent {
     }
 
     fn parse_fenced_call(&mut self, text: &str) -> Option<ToolCall> {
+        // First preference: a JSON object inside a fenced block (``` or ```json).
         let mut best: Option<&str> = None;
         for (i, _) in text.match_indices("```") {
             let rest = &text[i + 3..];
@@ -1144,14 +1175,32 @@ impl Agent {
             let body = &rest[body_start..];
             let end = body.find("```").unwrap_or(body.len());
             let body = body[..end].trim();
-            if body.starts_with('{') && body.contains("\"name\"") {
+            if body.starts_with('{') && (body.contains("\"name\"") || body.contains("\"tool\"")) {
                 best = Some(body);
             }
         }
-        let payload = best?;
-        let candidate = self.parse_text_call(payload)?;
-        // Only accept if it names a real tool: avoids hijacking sample JSON.
-        tools::spec(&candidate.function.name).map(|_| candidate)
+        if let Some(payload) = best {
+            if let Some(c) = self.parse_text_call(payload) {
+                if tools::spec(&c.function.name).is_some() {
+                    return Some(c);
+                }
+            }
+        }
+        // Fallback for models that forget the fences and drop a bare JSON tool
+        // call into prose. Scan for balanced `{...}` objects that mention a
+        // tool key and try to parse each; only accept one naming a real tool so
+        // we never hijack sample JSON in an explanation.
+        for cand in balanced_json_objects(text) {
+            if !(cand.contains("\"name\"") || cand.contains("\"tool\"")) {
+                continue;
+            }
+            if let Some(c) = self.parse_text_call(cand) {
+                if tools::spec(&c.function.name).is_some() {
+                    return Some(c);
+                }
+            }
+        }
+        None
     }
 
     /// Run the read-only tools in `calls` concurrently and stash their outcomes
@@ -1186,11 +1235,20 @@ impl Agent {
         let name = call.function.name.clone();
         let args = call.args();
         if args.is_null() {
+            // Malformed JSON arguments. Small models often emit almost-JSON
+            // (trailing commas, Python literals, prose around it). `args()`
+            // already tries to repair it; if it still won't parse, don't hard
+            // error — hand back a short, corrective message naming the tool and
+            // the parameters it expects so the model can re-issue it cleanly.
+            let hint = required_params_hint(&name);
             return tools::Outcome {
                 ok: false,
                 content: format!(
-                    "ERROR: could not parse arguments for {name}: {}",
-                    call.function.arguments
+                    "ERROR: could not parse the JSON arguments for `{name}`. {hint} \
+                     Re-send the call with a single valid JSON object as `arguments` \
+                     (double-quoted keys and strings, no trailing commas, no extra prose). \
+                     Got: {}",
+                    call.function.arguments.trim()
                 ),
                 summary: format!("{name}: bad arguments"),
                 view: tools::ToolView::Plain,
@@ -2503,6 +2561,81 @@ impl Agent {
     }
 }
 
+/// Extract top-level balanced `{...}` substrings from arbitrary text, ignoring
+/// braces that appear inside JSON strings. Used as a lenient last resort to
+/// find a tool call a model buried in prose without code fences.
+fn balanced_json_objects(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let mut depth = 0i32;
+            let mut in_str = false;
+            let mut escaped = false;
+            let mut j = i;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if in_str {
+                    if escaped {
+                        escaped = false;
+                    } else if c == b'\\' {
+                        escaped = true;
+                    } else if c == b'"' {
+                        in_str = false;
+                    }
+                } else if c == b'"' {
+                    in_str = true;
+                } else if c == b'{' {
+                    depth += 1;
+                } else if c == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        if text.is_char_boundary(i) && text.is_char_boundary(j + 1) {
+                            out.push(&text[i..=j]);
+                        }
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A short reminder of what a tool expects, for when a model sends unparseable/// arguments. Names the required parameters (falling back to all declared ones)
+/// so a small model can re-issue the call without guessing the schema.
+fn required_params_hint(name: &str) -> String {
+    let Some(spec) = tools::spec(name) else {
+        return format!("`{name}` is not a known tool.");
+    };
+    let required: Vec<String> = spec
+        .params
+        .pointer("/required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let params = if required.is_empty() {
+        // No explicit `required`: list the declared property names instead.
+        spec.params
+            .pointer("/properties")
+            .and_then(|p| p.as_object())
+            .map(|o| o.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    } else {
+        required
+    };
+    if params.is_empty() {
+        format!("`{name}` takes a JSON object of arguments.")
+    } else {
+        format!("`{name}` needs these parameters: {}.", params.join(", "))
+    }
+}
+
 /// One plain sentence for the screen. `ApiError` already carries a written
 /// message; anything else gets its chain flattened rather than debug-printed.
 pub fn user_message(e: &anyhow::Error) -> String {
@@ -2704,8 +2837,7 @@ mod tests {
 
     /// Undo reverts a whole turn's edits at once, and only the latest turn.
     #[test]
-    fn undo_reverts_a_whole_turn_not_one_file() {
-        let dir = std::env::temp_dir().join("koda-undo-test");
+    fn undo_reverts_a_whole_turn_not_one_file() {        let dir = std::env::temp_dir().join("koda-undo-test");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         // Pre-existing files with original content.
@@ -2757,5 +2889,71 @@ mod tests {
         assert!(agent.undo_last().contains("nothing to undo"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_agent() -> Agent {
+        let dir = std::env::temp_dir().join(format!("koda-agent-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let cfg = Arc::new(crate::config::Config::default());
+        Agent::new(
+            cfg,
+            dir,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+        )
+        .unwrap()
+    }
+
+    /// Balanced-object extraction ignores braces inside strings and returns
+    /// each top-level object, so a tool call buried in prose can be recovered.
+    #[test]
+    fn balanced_json_objects_ignores_string_braces() {
+        let objs = balanced_json_objects(r#"before {"a": "has } brace", "b": {"c": 1}} after"#);
+        assert_eq!(objs.len(), 1);
+        assert_eq!(objs[0], r#"{"a": "has } brace", "b": {"c": 1}}"#);
+
+        let two = balanced_json_objects("x {\"one\":1} y {\"two\":2} z");
+        assert_eq!(two, vec!["{\"one\":1}", "{\"two\":2}"]);
+
+        assert!(balanced_json_objects("no objects here").is_empty());
+    }
+
+    /// A model that drops a bare tool-call object into prose (no code fences)
+    /// should still be understood, but sample JSON that names no real tool must
+    /// not be hijacked.
+    #[test]
+    fn parse_fenced_call_recovers_prose_wrapped_call() {
+        let mut agent = test_agent();
+        let text = "Sure, I'll read it. {\"name\": \"read_file\", \
+                    \"arguments\": {\"path\": \"a.rs\"}} and that's the plan.";
+        let call = agent.parse_fenced_call(text).expect("should recover call");
+        assert_eq!(call.function.name, "read_file");
+        assert_eq!(call.args().get("path").and_then(|p| p.as_str()), Some("a.rs"));
+
+        // JSON that isn't a known tool must be ignored.
+        assert!(agent
+            .parse_fenced_call("example: {\"name\": \"not_a_tool\", \"arguments\": {}}")
+            .is_none());
+    }
+
+    /// A ```json fenced tool call is still recognised.
+    #[test]
+    fn parse_fenced_call_handles_json_fence() {
+        let mut agent = test_agent();
+        let text = "Here you go:\n```json\n{\"name\": \"list_dir\", \"arguments\": {\"path\": \".\"}}\n```";
+        let call = agent.parse_fenced_call(text).expect("should recover fenced call");
+        assert_eq!(call.function.name, "list_dir");
+    }
+
+    /// The malformed-argument hint names the tool and its required parameters
+    /// so a small model can re-issue the call instead of hitting a hard error.
+    #[test]
+    fn required_params_hint_names_required_params() {
+        let hint = required_params_hint("read_file");
+        assert!(hint.contains("read_file"), "{hint}");
+        assert!(hint.contains("path"), "{hint}");
+
+        // Unknown tools are reported plainly rather than panicking.
+        assert!(required_params_hint("bogus_tool").contains("not a known tool"));
     }
 }

@@ -8,7 +8,7 @@
 use crate::config::Config;
 use crate::editor::Editor;
 use crate::theme::{Glyphs, Theme};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -91,6 +91,23 @@ impl Setup {
         }
     }
 
+    fn editor_ref(&self, f: Field) -> &Editor {
+        match f {
+            Field::Url => &self.url,
+            Field::Model => &self.model,
+            Field::Key => &self.key,
+        }
+    }
+
+    /// The caret's display column within a field's value (0-based), used by
+    /// `draw` to place the terminal cursor and scroll the visible slice.
+    fn caret_col(&self, f: Field) -> usize {
+        // A width wide enough that the single-line value never soft-wraps, so
+        // `visual` reports the caret as (row 0, column = display width so far).
+        let (_, _, col) = self.editor_ref(f).visual(u16::MAX as usize);
+        col
+    }
+
     pub fn value(&self, f: Field) -> &str {
         match f {
             Field::Url => &self.url.buf,
@@ -161,11 +178,18 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
         height: h,
     };
     let inner_w = rect.width.saturating_sub(4) as usize;
+    // The value is drawn after a 3-column indent ("   "), so the usable width
+    // for the value text is a little narrower than the inner width.
+    let field_w = inner_w.saturating_sub(3).max(1);
 
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
         " Point koda at a model server.",
         t.dim(),
     ))];
+
+    // Where to place the real terminal caret for the focused field, filled in
+    // as we lay out its value line below.
+    let mut caret_screen: Option<(u16, u16)> = None;
 
     for field in Field::ALL {
         let focused = s.focus == field;
@@ -175,10 +199,20 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
         } else {
             raw.to_string()
         };
-        let display: String = if shown.chars().count() > inner_w {
-            shown.chars().skip(shown.chars().count() - inner_w).collect()
+        let shown_len = shown.chars().count();
+
+        // Horizontally scroll so the caret stays in view when the value is
+        // wider than the field. Only the focused field has a live caret; other
+        // fields simply show their head.
+        let (display, caret_in_view): (String, Option<usize>) = if focused {
+            let caret = s.caret_col(field).min(shown_len);
+            let scroll = caret.saturating_sub(field_w.saturating_sub(1));
+            let vis: String = shown.chars().skip(scroll).take(field_w).collect();
+            (vis, Some(caret - scroll))
+        } else if shown_len > field_w {
+            (shown.chars().take(field_w).collect(), None)
         } else {
-            shown
+            (shown, None)
         };
 
         lines.push(Line::default());
@@ -201,18 +235,27 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
         } else {
             t.body()
         };
-        let text = if display.is_empty() {
+        // Show the hint only when the field is empty and unfocused; once
+        // focused we show the (possibly empty) real value so the caret sits on
+        // the text the user is editing.
+        let text = if display.is_empty() && !focused {
             field.hint().to_string()
         } else {
             display
         };
+
+        // The value line renders as: "   " (3 cols) + text. Record the caret's
+        // screen position for the focused field. Content is inset by the left
+        // border (1) plus the 3-space indent.
+        if let Some(col) = caret_in_view {
+            let x = rect.x + 1 + 3 + col as u16;
+            let y = rect.y + 1 + lines.len() as u16; // this value line's row
+            caret_screen = Some((x, y));
+        }
+
         lines.push(Line::from(vec![
             Span::raw("   ".to_string()),
             Span::styled(text, value_style),
-            Span::styled(
-                if focused { "▌" } else { "" },
-                t.fg(t.accent),
-            ),
         ]));
     }
 
@@ -245,6 +288,17 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
 
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(block), rect);
+
+    // Place the real terminal caret at the focused field so it blinks where the
+    // user is typing and moves with left/right. Guard against the (unlikely)
+    // case where the computed position lands outside the box.
+    if let Some((x, y)) = caret_screen {
+        let max_x = rect.x + rect.width.saturating_sub(2);
+        let max_y = rect.y + rect.height.saturating_sub(2);
+        if x <= max_x && y <= max_y {
+            f.set_cursor_position(Position::new(x, y));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -15,6 +15,15 @@ Rules:
 - edit_file matches an exact substring: copy the text verbatim from a read_file result, \
   including indentation. Prefer edit_file over write_file for existing files.
 - Use search and find_files to locate code; do not guess at paths.
+- To find where a symbol is defined or used, call `codegraph` first (query \"symbol\" \
+  for a name, \"file\" for a path, \"overview\" to map the project) — it is faster and \
+  more precise than grep. If codegraph returns nothing useful or the symbol is not in \
+  the graph, fall back to `search` and `find_files`.
+- For anything outside the codebase — library docs, an unfamiliar error, an API or \
+  version question you cannot answer from the repo — use `web_search` to find pages, \
+  then `web_fetch` to read the most relevant one. If web search is unavailable or \
+  returns nothing, say what you could not verify rather than guessing. (These are off \
+  unless enabled; if a call reports the tool is disabled, do not retry it.)
 - Make the smallest change that solves the task. Match the project's existing style.
 - After changing code, verify it: run the project's build, tests or linter with run_command.
 - Never run destructive commands (rm -rf, git reset --hard, force push) unless the user \

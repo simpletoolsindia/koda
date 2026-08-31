@@ -62,6 +62,13 @@ struct Block {
 pub struct Transcript {
     blocks: Vec<Block>,
     pub show_reasoning: bool,
+    /// Sticky global preference: expand every tool block's output. Toggled with
+    /// ctrl+r. Unlike a per-block toggle, this persists across new responses so
+    /// the user doesn't have to re-expand after every turn.
+    pub expand_tools: bool,
+    /// Sticky global preference: expand every reasoning block's body. Toggled
+    /// with ctrl+t. Persists across responses (bug fix: it used to reset).
+    pub expand_reasoning: bool,
     pub theme: Theme,
     pub glyphs: Glyphs,
     /// Index of a tool block that is currently animating, if any.
@@ -93,6 +100,8 @@ impl Transcript {
         Self {
             blocks: Vec::new(),
             show_reasoning: true,
+            expand_tools: false,
+            expand_reasoning: false,
             theme,
             glyphs,
             animating: None,
@@ -364,7 +373,9 @@ impl Transcript {
         }
     }
 
-    /// Expand or collapse the most recent tool block.
+    /// Expand or collapse the most recent tool block. Superseded in the UI by
+    /// the sticky `toggle_tools_pref`, but retained for tests and completeness.
+    #[allow(dead_code)]
     pub fn toggle_last_tool(&mut self) -> bool {
         for (i, b) in self.blocks.iter_mut().enumerate().rev() {
             if let Item::Tool { expanded, .. } = &mut b.item {
@@ -377,7 +388,9 @@ impl Transcript {
         false
     }
 
-    /// Expand or collapse the most recent reasoning block.
+    /// Expand or collapse the most recent reasoning block. Superseded in the UI
+    /// by the sticky `toggle_reasoning_pref`, but retained for tests.
+    #[allow(dead_code)]
     pub fn toggle_last_reasoning(&mut self) -> bool {
         for (i, b) in self.blocks.iter_mut().enumerate().rev() {
             if let Item::Reasoning { expanded, .. } = &mut b.item {
@@ -388,6 +401,22 @@ impl Transcript {
             }
         }
         false
+    }
+
+    /// Flip the sticky global tool-expand preference (ctrl+r). Applies to every
+    /// tool block and persists across new responses, so the user sets it once.
+    pub fn toggle_tools_pref(&mut self) -> bool {
+        self.expand_tools = !self.expand_tools;
+        self.invalidate();
+        true
+    }
+
+    /// Flip the sticky global reasoning-expand preference (ctrl+t). Applies to
+    /// every reasoning block and persists across responses.
+    pub fn toggle_reasoning_pref(&mut self) -> bool {
+        self.expand_reasoning = !self.expand_reasoning;
+        self.invalidate();
+        true
     }
 
     /// Rebuild a readable transcript from a saved conversation. Tool calls come
@@ -471,6 +500,8 @@ impl Transcript {
         // transcript animate without a full relayout.
         let tick = (self.now.elapsed().as_millis() / 100) as usize;
         let show = self.show_reasoning;
+        let expand_tools = self.expand_tools;
+        let expand_reasoning = self.expand_reasoning;
         let theme = self.theme;
         let glyphs = self.glyphs;
 
@@ -510,6 +541,10 @@ impl Transcript {
                 None
             };
             let mut sig = signature(&b.item, show, tick);
+            // Folding the global tool-expand preference into the cache key means
+            // flipping it (ctrl+r) re-renders every tool block, not just the last.
+            sig ^= u64::from(expand_tools) << 5;
+            sig ^= u64::from(expand_reasoning) << 6;
             // The reveal position is part of what is on screen, so it has to be
             // part of the cache key or the block renders once and freezes.
             if let Some(c) = cut {
@@ -521,7 +556,7 @@ impl Transcript {
             };
             if stale {
                 let lines =
-                    render_item(&b.item, width as usize, show, &theme, &glyphs, tick, cut);
+                    render_item(&b.item, width as usize, show, expand_tools, expand_reasoning, &theme, &glyphs, tick, cut);
                 b.cache = Some((width, sig, lines));
             }
             if animating.is_none() && is_running(&b.item) {
@@ -685,6 +720,8 @@ fn render_item(
     item: &Item,
     width: usize,
     show_reasoning: bool,
+    expand_tools: bool,
+    expand_reasoning: bool,
     t: &Theme,
     g: &Glyphs,
     tick: usize,
@@ -736,6 +773,7 @@ fn render_item(
             if !show_reasoning {
                 return Vec::new();
             }
+            let open = *expanded || expand_reasoning;
             let label = match elapsed {
                 Some(d) => format!("thought for {}", human_ms(*d)),
                 None => format!("thinking {}", human_ms(started.elapsed())),
@@ -744,11 +782,11 @@ fn render_item(
                 Span::styled(format!("{} ", g.pending), t.dim()),
                 Span::styled(label, t.dim().add_modifier(Modifier::ITALIC)),
                 Span::styled(
-                    if *expanded { "  ctrl+t hide" } else { "  ctrl+t expand" },
+                    if open { "  ctrl+t hide" } else { "  ctrl+t expand" },
                     t.dim(),
                 ),
             ])];
-            if *expanded {
+            if open {
                 for para in text.split('\n') {
                     for l in md::wrap_spans(
                         vec![Span::styled(para.to_string(), t.dim())],
@@ -870,7 +908,7 @@ fn render_item(
             grouped,
             ..
         } => render_tool(
-            name, label, ok, summary, detail, view, *expanded, started, elapsed, *depth, *grouped,
+            name, label, ok, summary, detail, view, *expanded || expand_tools, started, elapsed, *depth, *grouped,
             width, t, g, tick,
         ),
     }
@@ -1287,6 +1325,22 @@ fn render_tool(
             out
         }
     };
+    // Running tool: show an indeterminate progress bar under the header so a
+    // long call (a build, a test run) visibly pulses rather than looking hung.
+    // The band position is derived from elapsed time, so it moves smoothly as
+    // the animation clock ticks.
+    let mut lines = lines;
+    if ok.is_none() && started.elapsed().as_millis() > 300 {
+        let bar_w = avail.saturating_sub(6).clamp(8, 40);
+        let bar = crate::anim::shimmer(bar_w, started.elapsed(), Duration::from_millis(1100));
+        let mut spans = vec![Span::styled(" ".to_string(), t.dim())];
+        for b in bar {
+            let ch = if b > 0.5 { '█' } else if b > 0.15 { '▓' } else { '░' };
+            let colour = crate::theme::mix(t.muted, t.accent, b);
+            spans.push(Span::styled(ch.to_string(), t.fg(colour)));
+        }
+        lines.push(Line::from(spans));
+    }
     indent_all(lines, indent_w, t, g, depth)
 }
 
@@ -1592,9 +1646,29 @@ mod tests {
         let text = flat(&t.window(0, 20));
         assert!(text.contains("read a.rs (12 lines)"), "{text}");
         assert!(!text.contains("1| x"), "detail should stay collapsed: {text}");
-        assert!(t.toggle_last_tool());
+        assert!(t.toggle_tools_pref());
         t.relayout(60);
         assert!(flat(&t.window(0, 20)).contains("1| x"));
+    }
+
+    #[test]
+    fn sticky_expand_persists_across_a_new_tool_block() {
+        // The reported bug: after ctrl+r expands output, the NEXT tool call's
+        // output would come back collapsed. With the global preference it stays
+        // expanded for every block, old and new, until toggled off.
+        let mut t = tr();
+        t.expand_tools = true; // as if the user pressed ctrl+r
+        t.tool_start("1".into(), "read_file".into(), "read a.rs".into(), 0);
+        t.tool_end("1", true, "read a.rs".into(), "AAA-body".into(), crate::tools::ToolView::Plain);
+        t.relayout(60);
+        assert!(flat(&t.window(0, 40)).contains("AAA-body"), "first block expanded");
+        // A brand-new tool arrives in a later response.
+        t.tool_start("2".into(), "read_file".into(), "read b.rs".into(), 0);
+        t.tool_end("2", true, "read b.rs".into(), "BBB-body".into(), crate::tools::ToolView::Plain);
+        t.relayout(60);
+        let text = flat(&t.window(0, 40));
+        assert!(text.contains("AAA-body"), "old block still expanded: {text}");
+        assert!(text.contains("BBB-body"), "NEW block also expanded (no reset): {text}");
     }
 
     #[test]
@@ -1609,6 +1683,7 @@ mod tests {
             !text.contains("carefully"),
             "reasoning body should be hidden: {text}"
         );
+        // Expanding the most-recent reasoning block reveals its body.
         assert!(t.toggle_last_reasoning());
         t.relayout(60);
         assert!(flat(&t.window(0, 20)).contains("carefully"));
