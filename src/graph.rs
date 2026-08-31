@@ -46,22 +46,34 @@ pub struct Graph {
 }
 
 fn language_of(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?;
-    Some(match ext {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
         "rs" => "rust",
-        "py" => "python",
+        "py" | "pyi" => "python",
         "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "ts" | "tsx" => "typescript",
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
         "go" => "go",
         "java" => "java",
-        "kt" => "kotlin",
+        "kt" | "kts" => "kotlin",
         "swift" => "swift",
         "rb" => "ruby",
         "c" | "h" => "c",
-        "cc" | "cpp" | "hpp" | "cxx" => "cpp",
+        "cc" | "cpp" | "hpp" | "cxx" | "hxx" | "hh" => "cpp",
+        "cs" => "csharp",
+        "scala" | "sc" => "scala",
+        "dart" => "dart",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        "hs" => "haskell",
+        "zig" => "zig",
+        "jl" => "julia",
+        "r" => "r",
+        "pl" | "pm" => "perl",
+        "m" | "mm" => "objc",
         "sh" | "bash" | "zsh" => "shell",
         "lua" => "lua",
         "php" => "php",
+        "vue" | "svelte" => "javascript",
         _ => return None,
     })
 }
@@ -104,6 +116,33 @@ fn definitions(lang: &str, line: &str) -> Option<(&'static str, String)> {
             ("struct ", "struct"), ("enum ", "enum"),
             ("func ", "fn"), ("fun ", "fn"),
         ],
+        "csharp" => &[
+            ("public class ", "class"), ("internal class ", "class"), ("class ", "class"),
+            ("public interface ", "interface"), ("interface ", "interface"),
+            ("public struct ", "struct"), ("struct ", "struct"),
+            ("public enum ", "enum"), ("enum ", "enum"),
+            ("public record ", "record"), ("record ", "record"),
+            ("namespace ", "module"),
+        ],
+        "scala" => &[
+            ("def ", "fn"), ("class ", "class"), ("object ", "object"),
+            ("trait ", "trait"), ("case class ", "class"), ("type ", "type"),
+        ],
+        "dart" => &[
+            ("class ", "class"), ("mixin ", "mixin"), ("enum ", "enum"),
+            ("abstract class ", "class"),
+        ],
+        "elixir" => &[
+            ("def ", "fn"), ("defp ", "fn"), ("defmodule ", "module"),
+            ("defmacro ", "macro"), ("defstruct ", "struct"),
+        ],
+        "erlang" => &[("-module(", "module"), ("-record(", "record")],
+        "haskell" => &[("data ", "type"), ("newtype ", "type"), ("type ", "type"), ("class ", "class")],
+        "zig" => &[("pub fn ", "fn"), ("fn ", "fn"), ("const ", "const")],
+        "julia" => &[("function ", "fn"), ("struct ", "struct"), ("module ", "module"), ("abstract type ", "type")],
+        "r" => &[],
+        "perl" => &[("sub ", "fn"), ("package ", "module")],
+        "objc" => &[("@interface ", "class"), ("@implementation ", "class"), ("@protocol ", "interface")],
         "ruby" => &[("def ", "fn"), ("class ", "class"), ("module ", "module")],
         "c" | "cpp" => &[
             ("class ", "class"), ("struct ", "struct"),
@@ -111,7 +150,7 @@ fn definitions(lang: &str, line: &str) -> Option<(&'static str, String)> {
         ],
         "shell" => &[("function ", "fn")],
         "lua" => &[("local function ", "fn"), ("function ", "fn")],
-        "php" => &[("function ", "fn"), ("class ", "class")],
+        "php" => &[("function ", "fn"), ("class ", "class"), ("interface ", "interface"), ("trait ", "trait")],
         _ => &[],
     };
     for (prefix, kind) in table {
@@ -190,12 +229,89 @@ fn identifiers(line: &str, out: &mut BTreeSet<String>) {
     }
 }
 
+/// The per-file result of a parse, so files can be parsed in parallel and then
+/// merged into the graph on one thread (merging is cheap; parsing is the cost).
+struct FileParse {
+    rel: String,
+    lang: &'static str,
+    defs: Vec<(String, &'static str, usize)>, // (name, kind, line)
+    imports: Vec<String>,
+    ids: BTreeSet<String>,
+}
+
+/// Parse one file's bytes into definitions, imports and mentioned identifiers.
+/// Pure and self-contained, so it is safe to run on a worker thread.
+fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
+    let mut defs = Vec::new();
+    let mut imports = Vec::new();
+    let mut ids = BTreeSet::new();
+    for (i, line) in text.lines().enumerate() {
+        if let Some((kind, name)) = definitions(lang, line) {
+            defs.push((name, kind, i + 1));
+        }
+        if let Some(imp) = import_of(lang, line) {
+            imports.push(imp);
+        }
+        identifiers(line, &mut ids);
+    }
+    FileParse { rel, lang, defs, imports, ids }
+}
+
+/// Parse many files across worker threads and return the results. Uses scoped
+/// threads (no dependency) sized to the machine's parallelism; small inputs run
+/// inline to avoid thread-spawn overhead.
+fn parse_in_parallel(inputs: Vec<(String, &'static str, String)>) -> Vec<FileParse> {
+    let n = inputs.len();
+    let workers = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .min(8);
+    if n < 32 || workers <= 1 {
+        // Not worth the threads: parse inline.
+        return inputs
+            .into_iter()
+            .map(|(rel, lang, text)| parse_file(rel, lang, &text))
+            .collect();
+    }
+    // Split into `workers` contiguous chunks, parse each on its own thread.
+    let chunk = n.div_ceil(workers);
+    let chunks: Vec<Vec<(String, &'static str, String)>> = {
+        let mut v = Vec::new();
+        let mut it = inputs.into_iter();
+        for _ in 0..workers {
+            let c: Vec<_> = it.by_ref().take(chunk).collect();
+            if c.is_empty() {
+                break;
+            }
+            v.push(c);
+        }
+        v
+    };
+    let mut out = Vec::with_capacity(n);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|c| {
+                s.spawn(move || {
+                    c.into_iter()
+                        .map(|(rel, lang, text)| parse_file(rel, lang, &text))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for h in handles {
+            if let Ok(part) = h.join() {
+                out.extend(part);
+            }
+        }
+    });
+    out
+}
+
 /// Walk the project and build the graph. Blocking: callers run it off-thread.
 pub fn scan(root: &Path) -> Graph {
     let started = Instant::now();
     let mut g = Graph::default();
-    // file -> identifier set, kept for the second pass
-    let mut mentions: Vec<(String, BTreeSet<String>)> = Vec::new();
 
     let walk = ignore::WalkBuilder::new(root)
         .hidden(true)
@@ -205,6 +321,8 @@ pub fn scan(root: &Path) -> Graph {
         .filter_entry(|e| e.file_name() != ".git" && e.file_name() != "target")
         .build();
 
+    // Phase 1 (I/O, single thread): walk the tree and read eligible files.
+    let mut inputs: Vec<(String, &'static str, String)> = Vec::new();
     for entry in walk.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
@@ -212,7 +330,7 @@ pub fn scan(root: &Path) -> Graph {
         let Some(lang) = language_of(entry.path()) else {
             continue;
         };
-        if g.files >= MAX_FILES {
+        if inputs.len() >= MAX_FILES {
             g.truncated = true;
             break;
         }
@@ -222,34 +340,39 @@ pub fn scan(root: &Path) -> Graph {
         if bytes.len() > MAX_FILE_BYTES || bytes.iter().take(4000).any(|b| *b == 0) {
             continue;
         }
-        let text = String::from_utf8_lossy(&bytes);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         let rel = entry
             .path()
             .strip_prefix(root)
             .unwrap_or(entry.path())
             .to_string_lossy()
             .to_string();
+        inputs.push((rel, lang, text));
+    }
 
+    // Phase 2 (CPU, parallel): parse files across worker threads. Parsing is the
+    // hot cost; splitting it over the cores turns a large repo scan from serial
+    // into ~linear-speedup. Merging (phase 3) is cheap and stays single-threaded.
+    let parsed: Vec<FileParse> = parse_in_parallel(inputs);
+
+    // Phase 3 (merge): fold the per-file results into the graph in a stable order.
+    let mut mentions: Vec<(String, BTreeSet<String>)> = Vec::with_capacity(parsed.len());
+    for fp in parsed {
         g.files += 1;
-        *g.languages.entry(lang.to_string()).or_insert(0) += 1;
-
-        let mut ids = BTreeSet::new();
-        for (i, line) in text.lines().enumerate() {
-            if let Some((kind, name)) = definitions(lang, line) {
-                g.defs.entry(name.clone()).or_default().push(Def {
-                    name: name.clone(),
-                    kind,
-                    file: rel.clone(),
-                    line: i + 1,
-                });
-                g.by_file.entry(rel.clone()).or_default().push(name);
-            }
-            if let Some(imp) = import_of(lang, line) {
-                g.imports.entry(rel.clone()).or_default().push(imp);
-            }
-            identifiers(line, &mut ids);
+        *g.languages.entry(fp.lang.to_string()).or_insert(0) += 1;
+        for (name, kind, line) in fp.defs {
+            g.defs.entry(name.clone()).or_default().push(Def {
+                name: name.clone(),
+                kind,
+                file: fp.rel.clone(),
+                line,
+            });
+            g.by_file.entry(fp.rel.clone()).or_default().push(name);
         }
-        mentions.push((rel, ids));
+        if !fp.imports.is_empty() {
+            g.imports.entry(fp.rel.clone()).or_default().extend(fp.imports);
+        }
+        mentions.push((fp.rel, fp.ids));
     }
 
     // Second pass: join mentions against known definitions.
@@ -281,6 +404,80 @@ pub fn scan(root: &Path) -> Graph {
 }
 
 impl Graph {
+    /// Drop everything the graph knows about one file — its definitions, its
+    /// by-file and imports entries, and its contribution to the reference sets.
+    /// The inverse of folding a `FileParse` in, used before re-adding an edited
+    /// file so the graph stays consistent without a full rescan.
+    pub fn remove_file(&mut self, rel: &str) {
+        // Definitions defined in this file.
+        if let Some(names) = self.by_file.remove(rel) {
+            for name in names {
+                if let Some(defs) = self.defs.get_mut(&name) {
+                    defs.retain(|d| d.file != rel);
+                    if defs.is_empty() {
+                        self.defs.remove(&name);
+                    }
+                }
+            }
+        }
+        self.imports.remove(rel);
+        // This file's mentions of other symbols.
+        for files in self.refs.values_mut() {
+            files.remove(rel);
+        }
+        self.refs.retain(|_, files| !files.is_empty());
+    }
+
+    /// Re-index a single file after it changed on disk (koda's own edit, say),
+    /// so `codegraph` answers stay current between full scans. Cheap: it removes
+    /// the old entries and folds the freshly parsed ones back in. A deleted or
+    /// unreadable file is just removed. Language must be recognised.
+    pub fn update_file(&mut self, root: &Path, abs_path: &Path) {
+        let rel = abs_path
+            .strip_prefix(root)
+            .unwrap_or(abs_path)
+            .to_string_lossy()
+            .to_string();
+        self.remove_file(&rel);
+        let Some(lang) = language_of(abs_path) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(abs_path) else {
+            return; // deleted/unreadable: leave it removed
+        };
+        if bytes.len() > MAX_FILE_BYTES || bytes.iter().take(4000).any(|b| *b == 0) {
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let fp = parse_file(rel.clone(), lang, &text);
+
+        for (name, kind, line) in fp.defs {
+            self.defs.entry(name.clone()).or_default().push(Def {
+                name: name.clone(),
+                kind,
+                file: rel.clone(),
+                line,
+            });
+            self.by_file.entry(rel.clone()).or_default().push(name);
+        }
+        if !fp.imports.is_empty() {
+            self.imports.entry(rel.clone()).or_default().extend(fp.imports);
+        }
+        // Rebuild this file's references against the (updated) definition set.
+        for id in &fp.ids {
+            if self.defs.contains_key(id) {
+                let defined_here = self
+                    .defs
+                    .get(id)
+                    .map(|ds| ds.iter().any(|d| d.file == rel))
+                    .unwrap_or(false);
+                if !defined_here {
+                    self.refs.entry(id.clone()).or_default().insert(rel.clone());
+                }
+            }
+        }
+    }
+
     /// A short map of the project for the model to orient itself.
     pub fn overview(&self) -> String {
         if self.files == 0 {
@@ -448,6 +645,40 @@ mod tests {
         std::fs::create_dir_all(dir.join("vendor")).unwrap();
         std::fs::write(dir.join("vendor/skip.rs"), "pub fn hidden() {}\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn incremental_update_reindexes_one_file() {
+        let dir = fixture("incremental");
+        let mut g = scan(&dir);
+        assert!(g.defs.contains_key("build_widget"));
+        // Rewrite lib.rs: rename the function; the graph must forget the old
+        // symbol and know the new one after a single-file update.
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "use std::io;\npub struct Widget;\npub fn make_widget() -> Widget { Widget }\n",
+        )
+        .unwrap();
+        g.update_file(&dir, &dir.join("src/lib.rs"));
+        assert!(!g.defs.contains_key("build_widget"), "old symbol should be gone");
+        assert!(g.defs.contains_key("make_widget"), "new symbol should be indexed");
+        assert!(g.defs.contains_key("Widget"), "unchanged symbol kept");
+        // Deleting a file removes its symbols.
+        std::fs::remove_file(dir.join("src/lib.rs")).unwrap();
+        g.update_file(&dir, &dir.join("src/lib.rs"));
+        assert!(!g.defs.contains_key("make_widget"), "deleted file's symbols gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detects_definitions_in_more_languages() {
+        assert_eq!(definitions("csharp", "public record User(int Id)"), Some(("record", "User".into())));
+        assert_eq!(definitions("scala", "object Main {"), Some(("object", "Main".into())));
+        assert_eq!(definitions("elixir", "defmodule App do"), Some(("module", "App".into())));
+        assert_eq!(definitions("dart", "class Widget {"), Some(("class", "Widget".into())));
+        assert_eq!(definitions("zig", "pub fn main() void {"), Some(("fn", "main".into())));
+        assert_eq!(definitions("perl", "sub run {"), Some(("fn", "run".into())));
+        assert_eq!(definitions("php", "trait Loggable {"), Some(("trait", "Loggable".into())));
     }
 
     #[test]

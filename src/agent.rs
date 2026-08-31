@@ -1213,6 +1213,23 @@ impl Agent {
                 let _ = self.memory.save(&self.ctx.root);
             }
         }
+        // Keep the code graph current without a full rescan: re-index just the
+        // file koda changed. Cheap (one file), so codegraph answers stay fresh
+        // as the agent works.
+        if matches!(name.as_str(), "write_file" | "edit_file") && outcome.ok && self.cfg.codegraph {
+            if let Some(p) = args_for_memory.get("path").and_then(|c| c.as_str()) {
+                let abs = if std::path::Path::new(p).is_absolute() {
+                    std::path::PathBuf::from(p)
+                } else {
+                    self.ctx.root.join(p)
+                };
+                if let Ok(mut guard) = self.graph.write() {
+                    if let Some(g) = guard.as_mut() {
+                        g.update_file(&self.ctx.root, &abs);
+                    }
+                }
+            }
+        }
         crate::log::push(
             if outcome.ok {
                 crate::log::Level::Info
