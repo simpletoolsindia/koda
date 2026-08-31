@@ -255,6 +255,10 @@ pub struct App {
     root: PathBuf,
     branch: Option<String>,
     queued: VecDeque<String>,
+    /// Files the user asked to watch via `/watch @file`, drained by the run
+    /// loop into the Watcher. `watch_clear` signals `/unwatch` (drop all).
+    watch_add: Vec<PathBuf>,
+    watch_clear: bool,
     /// Large pasted blocks, shown in the composer as @paste1, @paste2… and
     /// expanded back to full text on submit. Keeps the input readable.
     pastes: Vec<String>,
@@ -1341,16 +1345,45 @@ impl App {
                 self.follow = true;
             }
             "watch" => {
-                self.cfg.watch = !self.cfg.watch;
-                let on = self.cfg.watch;
-                if on {
-                    self.note(
-                        "watch on — end a comment with AI! to implement it, or AI? to ask. \
-                         koda acts when idle.",
-                    );
+                // `/watch` toggles whole-workspace watch; `/watch @file …` (or
+                // `/watch path …`) scopes watching to specific files.
+                let paths: Vec<String> = arg
+                    .split_whitespace()
+                    .map(|p| p.trim_start_matches('@').to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+                if !paths.is_empty() {
+                    for p in &paths {
+                        let abs = if std::path::Path::new(p).is_absolute() {
+                            PathBuf::from(p)
+                        } else {
+                            self.root.join(p)
+                        };
+                        self.watch_add.push(abs);
+                    }
+                    self.cfg.watch = true;
+                    self.note(format!(
+                        "watching {} file(s) — add an AI! / AI? comment and koda acts when idle (/unwatch to stop)",
+                        paths.len()
+                    ));
                 } else {
-                    self.note("watch off");
+                    self.cfg.watch = !self.cfg.watch;
+                    let on = self.cfg.watch;
+                    if on {
+                        self.note(
+                            "watch on (whole workspace) — end a comment with AI! to implement it, \
+                             or AI? to ask. Or /watch @file to scope it. koda acts when idle.",
+                        );
+                    } else {
+                        self.watch_clear = true;
+                        self.note("watch off");
+                    }
                 }
+            }
+            "unwatch" => {
+                self.cfg.watch = false;
+                self.watch_clear = true;
+                self.note("watch off — cleared all watched files");
             }
             "reason" | "reasoning" => {
                 // /reason [off|low|medium|high] — cycle if no arg given.
@@ -2889,6 +2922,8 @@ pub async fn run(
         branch: git_branch(&root),
         root: root.clone(),
         queued: VecDeque::new(),
+        watch_add: Vec::new(),
+        watch_clear: false,
         pastes: Vec::new(),
         quit: false,
         last_ctrl_c: None,
@@ -3004,6 +3039,17 @@ pub async fn run(
                 }
             }
             _ = watch_tick.tick() => {
+                // Apply any /watch @file additions or /unwatch clears queued by
+                // the command handler before scanning.
+                if app.watch_clear {
+                    watcher.clear_paths();
+                    app.watch_clear = false;
+                }
+                if !app.watch_add.is_empty() {
+                    for p in app.watch_add.drain(..) {
+                        watcher.watch_path(p);
+                    }
+                }
                 // Only act when watch is on, the agent is idle, and nothing is
                 // queued or awaiting the user — so triggers don't stack up on a
                 // busy turn or interrupt an approval prompt.

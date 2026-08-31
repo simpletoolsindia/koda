@@ -46,11 +46,35 @@ pub struct Trigger {
 #[derive(Default)]
 pub struct Watcher {
     seen: HashSet<String>,
+    /// When non-empty, only these files are watched (set via `/watch @file`).
+    /// Empty means watch the whole workspace (the original behaviour).
+    watched: Vec<PathBuf>,
 }
 
 impl Watcher {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Add a specific file to the watch list. Returns false if already present.
+    pub fn watch_path(&mut self, path: PathBuf) -> bool {
+        if self.watched.contains(&path) {
+            return false;
+        }
+        self.watched.push(path);
+        true
+    }
+
+    /// Clear the scoped watch list (`/unwatch`). After this, scanning falls back
+    /// to the whole workspace (until the caller also disables watch mode).
+    pub fn clear_paths(&mut self) {
+        self.watched.clear();
+    }
+
+    /// How many specific files are being watched.
+    #[allow(dead_code)]
+    pub fn watched_count(&self) -> usize {
+        self.watched.len()
     }
 
     /// Mark a trigger dispatched so the next scan skips it.
@@ -62,10 +86,19 @@ impl Watcher {
         format!("{}::{}", t.path.display(), t.raw.trim())
     }
 
-    /// Scan the workspace and return the first not-yet-dispatched trigger, if
-    /// any. One at a time keeps turns ordered and the transcript readable.
+    /// Scan and return the first not-yet-dispatched trigger. When a scoped watch
+    /// list is set, only those files are checked; otherwise the whole workspace.
     pub fn scan(&self, root: &Path) -> Option<Trigger> {
-        for t in scan_all(root) {
+        let triggers = if self.watched.is_empty() {
+            scan_all(root)
+        } else {
+            let mut out = Vec::new();
+            for p in &self.watched {
+                out.extend(scan_file(p));
+            }
+            out
+        };
+        for t in triggers {
             if !self.seen.contains(&Self::key(&t)) {
                 return Some(t);
             }
@@ -162,6 +195,29 @@ fn scan_all(root: &Path) -> Vec<Trigger> {
     out
 }
 
+/// Scan a single file for triggers (used by scoped `/watch @file`).
+fn scan_file(path: &Path) -> Vec<Trigger> {
+    let mut out = Vec::new();
+    if !path.is_file() || !is_texty(path) {
+        return out;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    for (i, line) in text.lines().enumerate() {
+        if let Some((kind, instruction)) = detect(line) {
+            out.push(Trigger {
+                path: path.to_path_buf(),
+                kind,
+                instruction,
+                line: i + 1,
+                raw: line.to_string(),
+            });
+        }
+    }
+    out
+}
+
 /// A conservative allowlist of source/text extensions worth scanning. Skips
 /// binaries and lockfiles so a big repo scan stays cheap.
 fn is_texty(path: &Path) -> bool {
@@ -248,5 +304,31 @@ mod tests {
         assert!(!w.seen.contains(&Watcher::key(&t)));
         w.mark(&t);
         assert!(w.seen.contains(&Watcher::key(&t)));
+    }
+
+    #[test]
+    fn scoped_watch_only_scans_listed_files() {
+        let dir = std::env::temp_dir().join("koda-watch-scoped");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("watched.py"), "# implement foo  AI!\n").unwrap();
+        std::fs::write(dir.join("other.py"), "# implement bar  AI!\n").unwrap();
+
+        let mut w = Watcher::new();
+        // No scope: whole-workspace scan finds a trigger.
+        assert!(w.scan(&dir).is_some());
+
+        // Scope to just watched.py: only its trigger is seen.
+        assert!(w.watch_path(dir.join("watched.py")));
+        assert!(!w.watch_path(dir.join("watched.py")), "dedup");
+        assert_eq!(w.watched_count(), 1);
+        let hit = w.scan(&dir).expect("scoped scan finds the watched file");
+        assert!(hit.path.ends_with("watched.py"), "{:?}", hit.path);
+
+        // Clearing the scope returns to whole-workspace behaviour.
+        w.clear_paths();
+        assert_eq!(w.watched_count(), 0);
+        assert!(w.scan(&dir).is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
