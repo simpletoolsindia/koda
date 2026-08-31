@@ -32,10 +32,51 @@ function Resolve-Src {
     }
 }
 
-function Build-And-Install {
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Die "Rust/cargo not found. Install from https://rustup.rs then re-run."
+function Ensure-Rust {
+    if (Get-Command cargo -ErrorAction SilentlyContinue) { return }
+    # cargo may be installed but not yet on this session's PATH.
+    $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+    if (Test-Path (Join-Path $cargoBin "cargo.exe")) {
+        $env:Path = "$cargoBin;$env:Path"
+        if (Get-Command cargo -ErrorAction SilentlyContinue) { return }
     }
+    Warn "Rust/cargo not found - koda is built from source and needs it."
+    if (-not [Environment]::UserInteractive) {
+        Die "Install Rust from https://rustup.rs then re-run."
+    }
+    $ans = Read-Host "  Install Rust now? [Y/n]"
+    if ($ans -match '^[Nn]') { Die "Install Rust from https://rustup.rs then re-run." }
+    # Prefer winget when available; fall back to the official rustup-init.exe.
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Info "installing Rust via winget..."
+        winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
+    } else {
+        Info "downloading rustup-init.exe..."
+        $init = Join-Path ([System.IO.Path]::GetTempPath()) "rustup-init.exe"
+        Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $init
+        & $init -y | Out-Null
+    }
+    $env:Path = "$cargoBin;$env:Path"
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        Die "cargo still not found after installing Rust; open a new terminal and re-run."
+    }
+    Ok "Rust installed"
+}
+
+function Add-ToUserPath($dir) {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -and ($userPath.Split(';') -contains $dir)) {
+        Ok "$dir is on your PATH"
+        return
+    }
+    $newPath = if ([string]::IsNullOrEmpty($userPath)) { $dir } else { "$userPath;$dir" }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    $env:Path = "$env:Path;$dir"
+    Ok "added $dir to your user PATH (open a new terminal to pick it up)"
+}
+
+function Build-And-Install {
+    Ensure-Rust
     $Src = Resolve-Src
     Set-Location $Src
     Info "building the release binary (a minute or two the first time)..."
@@ -48,11 +89,7 @@ function Build-And-Install {
     Copy-Item $Built (Join-Path $BinDir "koda.exe") -Force
     Ok "installed to $BinDir\koda.exe"
 
-    if ($env:Path -notlike "*$BinDir*") {
-        Warn "add $BinDir to your PATH (User environment variables)"
-    } else {
-        Ok "$BinDir is on your PATH"
-    }
+    Add-ToUserPath $BinDir
     Ok "done - run 'koda' to start, or 'koda --help'"
 }
 

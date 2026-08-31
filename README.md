@@ -40,23 +40,48 @@ Fixed. `apply_discount` subtracted the percent instead of applying it.
 
 ## Install
 
-Requires Rust 1.82+ (`brew install rust` or [rustup](https://rustup.rs)).
+koda builds from source (one static binary, no runtime deps). The installers
+build and install it, and will offer to install Rust for you if it's missing.
+
+**macOS / Linux** — interactive menu (install / system-wide / update / uninstall):
 
 ```sh
 git clone https://github.com/simpletoolsindia/koda.git && cd koda
 ./install.sh
 ```
 
-`install.sh` builds the release binary and drops it in `~/.local/bin` (no sudo).
-Install elsewhere with `PREFIX=/usr/local ./install.sh`. If that directory is
-not on your `PATH`, the script tells you the one line to add.
+Or the one-liner (clones for you):
 
-Or do it by hand:
+```sh
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
+```
+
+It installs to `~/.local/bin` (no sudo). Install system-wide with
+`PREFIX=/usr/local ./install.sh`. On macOS it re-signs the copied binary so
+Gatekeeper doesn't kill it. If the bin dir isn't on your `PATH`, it tells you the
+one line to add.
+
+**Windows** — PowerShell (interactive menu; adds koda to your user `PATH`):
+
+```powershell
+git clone https://github.com/simpletoolsindia/koda.git; cd koda
+.\install.ps1
+```
+
+Or the one-liner:
+
+```powershell
+irm https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.ps1 | iex
+```
+
+It installs to `%LOCALAPPDATA%\koda\bin`; override with `-Prefix`.
+
+**By hand** (any platform with Rust 1.82+):
 
 ```sh
 git clone https://github.com/simpletoolsindia/koda.git && cd koda
 cargo build --release
-cp target/release/koda ~/.local/bin/     # or /usr/local/bin
+cp target/release/koda ~/.local/bin/     # or /usr/local/bin, or %LOCALAPPDATA%\koda\bin
 ```
 
 ## Point it at a model

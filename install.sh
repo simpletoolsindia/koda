@@ -35,11 +35,41 @@ resolve_src() {
     fi
 }
 
+# --- ensure Rust/cargo is available, offering to install it when it isn't -----
+ensure_rust() {
+    if command -v cargo >/dev/null 2>&1; then
+        return 0
+    fi
+    # cargo may be installed but not on PATH yet (fresh rustup in this shell).
+    if [ -f "$HOME/.cargo/env" ]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+        command -v cargo >/dev/null 2>&1 && return 0
+    fi
+    warn "Rust/cargo not found — koda is built from source and needs it."
+    # Non-interactive (piped) installs shouldn't silently run a network installer.
+    if [ ! -t 0 ]; then
+        die "install Rust from https://rustup.rs, then re-run this installer."
+    fi
+    printf '  Install Rust now with rustup? [Y/n]: '
+    read -r ans
+    case "${ans:-y}" in
+        [Nn]*) die "install Rust from https://rustup.rs, then re-run." ;;
+    esac
+    command -v curl >/dev/null 2>&1 || die "curl not found — needed to fetch rustup."
+    info "installing Rust via rustup…"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null \
+        || die "rustup install failed"
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+    command -v cargo >/dev/null 2>&1 || die "cargo still not found after installing Rust."
+    ok "Rust installed"
+}
+
 # --- build + copy into $BIN_DIR ----------------------------------------------
 build_and_install() {
     local prefix="$1"; local bin_dir="$prefix/bin"
-    command -v cargo >/dev/null 2>&1 || \
-        die "Rust/cargo not found. Install from https://rustup.rs then re-run."
+    ensure_rust
     resolve_src
     cd "$SRC"
     info "building the release binary (a minute or two the first time)…"
@@ -74,8 +104,11 @@ uninstall() {
 }
 
 banner() {
-    printf '\n%s%s  koda installer%s  %smacOS · Linux%s\n\n' \
-        "$C_BOLD" "$C_CYAN" "$C_OFF" "$C_DIM" "$C_OFF"
+    local os arch
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    arch="$(uname -m 2>/dev/null || echo unknown)"
+    printf '\n%s%s  koda installer%s  %s%s %s%s\n\n' \
+        "$C_BOLD" "$C_CYAN" "$C_OFF" "$C_DIM" "$os" "$arch" "$C_OFF"
 }
 
 # --- entrypoint --------------------------------------------------------------
