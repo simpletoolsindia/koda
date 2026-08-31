@@ -211,6 +211,8 @@ pub struct ChatRequest {
     pub top_p: f64,
     pub max_tokens: u32,
     pub tools: Option<Vec<Value>>,
+    /// "off" | "low" | "medium" | "high". "off" omits the field.
+    pub reasoning_effort: String,
 }
 
 impl ChatRequest {
@@ -250,6 +252,12 @@ impl ChatRequest {
         });
         if self.max_tokens > 0 {
             body["max_tokens"] = self.max_tokens.into();
+        }
+        // Thinking-model effort hint. "off" (the default) omits it so servers
+        // that don't understand the field see an unchanged request.
+        let effort = self.reasoning_effort.trim().to_ascii_lowercase();
+        if matches!(effort.as_str(), "low" | "medium" | "high") {
+            body["reasoning_effort"] = Value::String(effort);
         }
         if let Some(tools) = &self.tools {
             if !tools.is_empty() {
@@ -544,9 +552,13 @@ impl Client {
     }
 
     async fn stream_once(&self, req: &ChatRequest, tx: &UnboundedSender<StreamEvent>) -> Result<()> {
+        let body = req.to_json();
+        // Developer debug: record the exact request body and, below, the raw
+        // response bytes. `None` (and zero cost) unless debug mode is on.
+        let capture = crate::debug::Capture::start(&self.endpoint, &body);
         let resp = self
             .req(reqwest::Method::POST, "/chat/completions")
-            .json(&req.to_json())
+            .json(&body)
             .send()
             .await
             .map_err(|e| classify_transport(&self.endpoint, &e))?;
@@ -554,6 +566,9 @@ impl Client {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            if let Some(cap) = &capture {
+                cap.write_chunk(format!("HTTP {status}\n{body}").as_bytes());
+            }
             return Err(classify_status(status, &body, &req.model).into());
         }
 
@@ -563,6 +578,9 @@ impl Client {
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.context("reading stream chunk")?;
+            if let Some(cap) = &capture {
+                cap.write_chunk(&bytes);
+            }
             buf.push_str(&String::from_utf8_lossy(&bytes));
 
             // SSE frames are newline-delimited; process complete lines only.
@@ -722,6 +740,7 @@ mod tests {
             top_p: 0.95,
             max_tokens: 0,
             tools: None,
+            reasoning_effort: "off".into(),
         };
         let body = req.to_json();
         let msgs = body["messages"].as_array().unwrap();
@@ -733,5 +752,24 @@ mod tests {
         assert_eq!(parts[0]["text"], "what is this?");
         assert_eq!(parts[1]["type"], "image_url");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn reasoning_effort_is_emitted_only_when_set() {
+        let mk = |effort: &str| ChatRequest {
+            model: "m".into(),
+            messages: vec![Message::user("hi")],
+            temperature: 0.2,
+            top_p: 0.95,
+            max_tokens: 0,
+            tools: None,
+            reasoning_effort: effort.into(),
+        };
+        // "off" (and anything unrecognised) omits the field entirely.
+        assert!(mk("off").to_json().get("reasoning_effort").is_none());
+        assert!(mk("").to_json().get("reasoning_effort").is_none());
+        // A real level is passed through, lowercased.
+        assert_eq!(mk("HIGH").to_json()["reasoning_effort"], "high");
+        assert_eq!(mk("low").to_json()["reasoning_effort"], "low");
     }
 }

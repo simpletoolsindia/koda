@@ -227,6 +227,10 @@ pub struct Config {
 
     /// Allow the `web_search` tool. Off unless a SearXNG URL is set.
     pub web_search: bool,
+    /// Which backend web search uses: "duckduckgo" (no setup) or "searxng"
+    /// (uses `searx_url`). Change live in the settings page.
+    #[serde(default = "default_backend")]
+    pub search_backend: String,
     /// Base URL of a SearXNG instance with the JSON format enabled.
     pub searx_url: String,
     /// Results per search.
@@ -263,6 +267,72 @@ pub struct Config {
     /// `[[tools]]` tables; the agent can call them like any built-in.
     #[serde(default, rename = "tools")]
     pub custom_tools: Vec<CustomTool>,
+
+    /// Reasoning effort hint for thinking models: "off" | "low" | "medium" |
+    /// "high". Sent as `reasoning_effort` in the request (servers that ignore it
+    /// are unaffected). "off" omits the field. Change live with `/reason`.
+    #[serde(default = "default_reasoning")]
+    pub reasoning_effort: String,
+
+    /// Developer debug mode. When on, koda dumps each raw LLM request body and
+    /// the raw streamed response to <state>/koda/debug/rr-session-N.{json,res.log}
+    /// for inspection, and surfaces a `/debug` report. `KODA_DEBUG=1` also
+    /// enables it. Off by default. Toggle live with `/debug`.
+    #[serde(default)]
+    pub debug: bool,
+
+    /// Override the built-in main system prompt entirely. Empty = use the
+    /// built-in. Edit it in the settings page (`/settings`). `instructions` is
+    /// still appended either way.
+    #[serde(default)]
+    pub system_prompt: String,
+
+    /// Per-tool system-prompt overrides, keyed by tool name. Empty/absent means
+    /// use the built-in guidance for that tool. Edit in the settings page.
+    #[serde(default)]
+    pub tool_prompts: std::collections::BTreeMap<String, String>,
+
+    /// Serve a local web UI (React) for live logs and debugging. Off by
+    /// default. Enable in `/settings`. Binds to 127.0.0.1 only.
+    #[serde(default)]
+    pub web_ui: bool,
+    /// Port for the web UI server.
+    #[serde(default = "default_web_ui_port")]
+    pub web_ui_port: u16,
+    /// Detail level surfaced to the web UI log stream: "simple" | "medium" |
+    /// "high". simple = info+, medium = adds tool/timing debug, high = everything.
+    #[serde(default = "default_detail")]
+    pub ui_detail: String,
+
+    /// Watch mode (aider-style): scan the workspace for `AI!`/`AI?` comment
+    /// triggers and act on them automatically. `AI!` implements the request in
+    /// that file; `AI?` answers the question. Off by default; toggle with
+    /// `/watch`. Only fires when the agent is idle.
+    #[serde(default)]
+    pub watch: bool,
+    /// How often (ms) watch mode rescans for triggers.
+    #[serde(default = "default_watch_ms")]
+    pub watch_interval_ms: u64,
+}
+
+fn default_watch_ms() -> u64 {
+    1500
+}
+
+fn default_web_ui_port() -> u16 {
+    7717
+}
+
+fn default_detail() -> String {
+    "medium".into()
+}
+
+fn default_reasoning() -> String {
+    "off".into()
+}
+
+fn default_backend() -> String {
+    "duckduckgo".into()
 }
 
 /// A user-defined tool: a named, described shell command the agent may call.
@@ -319,6 +389,7 @@ impl Default for Config {
             memory: true,
             codegraph: true,
             web_search: false,
+            search_backend: default_backend(),
             searx_url: String::new(),
             search_results: 6,
             max_retries: 3,
@@ -332,6 +403,15 @@ impl Default for Config {
             subagent_review_rounds: 1,
             max_subagent_depth: 1,
             custom_tools: Vec::new(),
+            reasoning_effort: default_reasoning(),
+            debug: false,
+            system_prompt: String::new(),
+            tool_prompts: std::collections::BTreeMap::new(),
+            web_ui: false,
+            web_ui_port: default_web_ui_port(),
+            ui_detail: default_detail(),
+            watch: false,
+            watch_interval_ms: default_watch_ms(),
         }
     }
 }
@@ -560,6 +640,10 @@ codegraph = true
 # self-hosted); otherwise it falls back to DuckDuckGo, which needs no setup.
 web_search = false
 searx_url = ""          # optional, e.g. "http://localhost:8888"
+# Backend: "duckduckgo" (keyless, no setup) or "searxng" (uses searx_url).
+# Pick it interactively in /settings: enable web search, choose the backend,
+# then esc to confirm.
+search_backend = "duckduckgo"
 search_results = 6
 
 # Transient failures (connection reset, 429, 5xx, empty stream) are retried
@@ -588,6 +672,37 @@ subagent_max_steps = 12
 # send it back for another pass this many times.
 subagent_review_rounds = 1
 max_subagent_depth = 1
+
+# Reasoning effort for thinking models: off | low | medium | high.
+# Sent as `reasoning_effort`; servers that don't support it ignore it.
+# "off" omits the field. Change live with /reason.
+reasoning_effort = "off"
+
+# Developer debug mode. On, koda writes each raw request body and the raw
+# streamed response to <state>/koda/debug/rr-session-N.{json,res.log} and adds a
+# /debug report. KODA_DEBUG=1 also turns it on. Toggle live with /debug.
+debug = false
+
+# Override the built-in main system prompt entirely (empty = built-in). The
+# `instructions` value above is still appended. Easiest to edit via /settings.
+system_prompt = ""
+
+# Per-tool prompt overrides, e.g.:
+# [tool_prompts]
+# run_command = "Prefer ripgrep over grep. Never run destructive commands."
+
+# Local web UI (React) for live logs and debugging. On, koda serves it on
+# 127.0.0.1:<web_ui_port>. Enable in /settings. ui_detail sets how much the log
+# stream shows: simple (info+), medium, or high (everything).
+web_ui = false
+web_ui_port = 7717
+ui_detail = "medium"
+
+# Watch mode (aider-style). On, koda scans the workspace when idle for comment
+# lines ending in `AI!` (implement it here) or `AI?` (answer the question) and
+# acts on them, removing the trigger. Toggle with /watch.
+watch = false
+watch_interval_ms = 1500
 
 # Your own tools. Each [[tools]] entry adds a command the agent can call like a
 # built-in; {arg} placeholders are filled from the call and shell-quoted. Runs

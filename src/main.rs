@@ -3,6 +3,7 @@
 mod agent;
 mod anim;
 mod config;
+mod debug;
 mod editor;
 mod fuzzy;
 mod graph;
@@ -19,7 +20,9 @@ mod setup;
 mod skills;
 mod tools;
 mod tui;
+mod watch;
 mod web;
+mod webui;
 mod view;
 
 use agent::{Agent, Approval, Command, Event};
@@ -203,6 +206,15 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     log::init(&cfg.log_level, cfg.log_to_file);
+    debug::set_enabled(cfg.debug);
+    // Optional local web UI for live logs and debugging (127.0.0.1 only).
+    if cfg.web_ui && !cli.print {
+        if let Some(addr) =
+            webui::start(root.clone(), cfg.web_ui_port, cfg.ui_detail.clone()).await
+        {
+            eprintln!("koda: web UI at http://{addr}");
+        }
+    }
     tel_info!(
         "agent",
         "session start",

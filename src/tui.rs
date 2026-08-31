@@ -71,6 +71,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/models", "list models on the server"),
     ("/mode", "plan, execute or vibe"),
     ("/logs", "what the agent has been doing"),
+    ("/debug", "toggle raw request/response capture"),
+    ("/watch", "watch files for AI! / AI? triggers"),
+    ("/reason", "reasoning effort: off/low/medium/high"),
     ("/websearch", "turn web search on or off"),
     ("/skills", "list skills, or reload them from disk"),
     ("/orc", "orchestrate: split a task across role agents"),
@@ -815,6 +818,20 @@ impl App {
 
     fn settings_key(&mut self, key: KeyEvent) {
         let Some(s) = self.settings.as_mut() else { return };
+        // Inline text editor open (SearXNG URL, system prompt): capture typing.
+        if s.editing.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    s.edit_commit();
+                    self.apply_settings();
+                }
+                KeyCode::Esc => s.edit_cancel(),
+                KeyCode::Backspace => s.edit_backspace(),
+                KeyCode::Char(c) => s.edit_char(c),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => s.up(),
             KeyCode::Down | KeyCode::Char('j') => s.down(),
@@ -867,6 +884,18 @@ impl App {
         if cfg.auto_tier != self.auto_tier {
             self.auto_tier = cfg.auto_tier;
             self.send(Command::SetAutoTier(cfg.auto_tier));
+        }
+        // Debug capture: flip the global switch as soon as it's toggled.
+        crate::debug::set_enabled(cfg.debug);
+        // Web search + backend: mirror to the agent so the tool availability and
+        // backend choice take effect this turn.
+        if cfg.web_search != self.cfg.web_search
+            || cfg.search_backend != self.cfg.search_backend
+            || cfg.searx_url != self.cfg.searx_url
+            || cfg.reasoning_effort != self.cfg.reasoning_effort
+            || cfg.system_prompt != self.cfg.system_prompt
+        {
+            self.send(Command::UpdateConfig(Box::new(cfg.clone())));
         }
         self.cfg = cfg;
     }
@@ -1173,6 +1202,54 @@ impl App {
                 if let Some(p) = log::file_path() {
                     crate::tel_debug!("ui", "opened log view", "file" => p.display());
                 }
+            }
+            "debug" => {
+                // Toggle developer request/response capture, then show where the
+                // artifacts land so the user can go read them.
+                let on = !crate::debug::enabled();
+                crate::debug::set_enabled(on);
+                self.cfg.debug = on;
+                let mut lines = vec![Line::from(Span::styled(
+                    format!("debug capture {}", if on { "on" } else { "off" }),
+                    self.theme.emphasis(if on { self.theme.success } else { self.theme.warning }),
+                ))];
+                for l in crate::debug::report().lines() {
+                    lines.push(Line::from(Span::styled(l.to_string(), self.theme.dim())));
+                }
+                self.transcript.raw(lines);
+                self.follow = true;
+            }
+            "watch" => {
+                self.cfg.watch = !self.cfg.watch;
+                let on = self.cfg.watch;
+                if on {
+                    self.note(
+                        "watch on — end a comment with AI! to implement it, or AI? to ask. \
+                         koda acts when idle.",
+                    );
+                } else {
+                    self.note("watch off");
+                }
+            }
+            "reason" | "reasoning" => {
+                // /reason [off|low|medium|high] — cycle if no arg given.
+                let next = match arg.trim().to_ascii_lowercase().as_str() {
+                    "" => match self.cfg.reasoning_effort.as_str() {
+                        "off" => "low",
+                        "low" => "medium",
+                        "medium" => "high",
+                        _ => "off",
+                    }
+                    .to_string(),
+                    other @ ("off" | "low" | "medium" | "high") => other.to_string(),
+                    _ => {
+                        self.note("usage: /reason [off|low|medium|high]");
+                        return;
+                    }
+                };
+                self.cfg.reasoning_effort = next.clone();
+                self.send(Command::UpdateConfig(Box::new(self.cfg.clone())));
+                self.note(format!("reasoning effort → {next}"));
             }
             "theme" => self.theme_cmd(&arg),
             "url" | "endpoint" => {
@@ -2599,6 +2676,14 @@ pub async fn run(
     app.transcript.animate_reveal = motion.animates() && app.reveal_pref;
     let mut dirty = true;
 
+    // Watch mode (aider-style AI! triggers). The interval always ticks; the
+    // handler is a no-op unless watch is enabled and the agent is idle.
+    let mut watcher = crate::watch::Watcher::new();
+    let mut watch_tick = tokio::time::interval(std::time::Duration::from_millis(
+        cfg.watch_interval_ms.clamp(300, 60_000),
+    ));
+    watch_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     let result = loop {
         if dirty {
             // One atomic presentation per frame: without this the terminal can
@@ -2655,6 +2740,28 @@ pub async fn run(
                     crate::tel_debug!("ui", "file index ready", "files" => app.files.len());
                     app.files_ready = indexed;
                     dirty = true;
+                }
+            }
+            _ = watch_tick.tick() => {
+                // Only act when watch is on, the agent is idle, and nothing is
+                // queued or awaiting the user — so triggers don't stack up on a
+                // busy turn or interrupt an approval prompt.
+                if app.cfg.watch
+                    && !app.busy
+                    && app.pending.is_none()
+                    && app.asking.is_none()
+                    && app.queued.is_empty()
+                {
+                    if let Some(t) = watcher.scan(&app.root) {
+                        watcher.mark(&t);
+                        let text = crate::watch::turn_text(&t, &app.root);
+                        let rel = t.path.strip_prefix(&app.root).unwrap_or(&t.path).display();
+                        let tok = match t.kind { crate::watch::Kind::Do => "AI!", _ => "AI?" };
+                        app.note(format!("watch: {tok} in {rel}:{} → {}", t.line, t.instruction));
+                        app.transcript.user(text.clone());
+                        app.send(Command::User(text));
+                        dirty = true;
+                    }
                 }
             }
         }

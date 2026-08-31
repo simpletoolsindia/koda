@@ -159,6 +159,11 @@ pub fn catalogue(skills: &[Skill]) -> String {
             let _ = writeln!(out, "- {role}: {when}");
         }
     }
+    out.push_str(
+        "\nWhen a request implies repeated, distinct kinds of work (e.g. implement + test + \
+         review), you may create a focused role agent with `manage_agent`, then delegate to \
+         it — rather than doing every specialised subtask yourself.\n",
+    );
     out
 }
 

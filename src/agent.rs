@@ -94,6 +94,10 @@ pub enum Command {
     SetAutoTier(crate::config::AutoTier),
     SetMode(Mode),
     SetWebSearch(bool),
+    /// Push a full updated config from the settings page so live-editable
+    /// fields (web search + backend, reasoning effort, system prompt, debug)
+    /// take effect without a restart.
+    UpdateConfig(Box<crate::config::Config>),
     Quit,
 }
 
@@ -549,6 +553,14 @@ impl Agent {
                 self.auto_approve = tier == crate::config::AutoTier::Full;
                 let _ = tx.send(Event::Notice(format!("autonomy: {}", tier.label())));
             }
+            Command::UpdateConfig(cfg) => {
+                // Adopt the settings-edited config for the live-editable fields.
+                crate::debug::set_enabled(cfg.debug);
+                self.cfg = Arc::new(*cfg);
+                self.ctx.cfg = self.cfg.clone();
+                // System prompt / web-search availability may have changed.
+                self.rebuild_system();
+            }
             Command::Quit => {}
         }
     }
@@ -795,6 +807,14 @@ impl Agent {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("codegraph")
             });
         }
+        // `manage_agent` creates delegatable role agents, so it only makes sense
+        // for the top-level agent when delegation is on. A subagent must not
+        // spawn more agents.
+        if self.depth != 0 || !self.cfg.subagents {
+            list.retain(|t| {
+                t.pointer("/function/name").and_then(|n| n.as_str()) != Some("manage_agent")
+            });
+        }
         // User-defined tools (config `[[tools]]`). Only for the top-level agent
         // and never in plan mode, since they run shell commands.
         if self.depth == 0 && !self.mode.read_only() {
@@ -861,6 +881,7 @@ impl Agent {
             } else {
                 Some(self.advertised_tools())
             },
+            reasoning_effort: self.cfg.reasoning_effort.clone(),
         };
 
         if self.depth == 0 {
@@ -1159,6 +1180,7 @@ impl Agent {
             "remember" => self.remember(&args),
             "codegraph" => self.query_graph(&args).await,
             "skill" => self.read_skill(&args),
+            "manage_agent" => self.manage_agent(&args),
             "web_search" => self.web_search(&args).await,
             "todo" => {
                 let items = tools::parse_todos(&args);
@@ -1592,6 +1614,106 @@ impl Agent {
         }
     }
 
+    /// Create, update, or remove a *role agent* on the fly. A role agent is a
+    /// skill file with a `role:` line; once written it can be delegated to with
+    /// `delegate(role=...)` or orchestrated via `/orc`. This is how the main
+    /// agent grows a specialised helper for the task at hand instead of the user
+    /// having to hand-author a skill file.
+    fn manage_agent(&mut self, args: &Value) -> tools::Outcome {
+        let err = |msg: String, sum: String| tools::Outcome {
+            ok: false,
+            content: format!("ERROR: {msg}"),
+            summary: sum,
+            view: tools::ToolView::Plain,
+        };
+
+        let action = args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("create")
+            .trim()
+            .to_ascii_lowercase();
+        let role = args
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if role.is_empty() || !role.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return err(
+                "`role` is required and must be a short slug (letters, digits, - or _), e.g. \"qa\".".into(),
+                "manage_agent: bad role".into(),
+            );
+        }
+
+        let dir = self.ctx.root.join(".koda").join("skills");
+        let path = dir.join(format!("{role}-agent.md"));
+
+        if action == "delete" || action == "remove" {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    let n = self.reload_skills();
+                    return tools::Outcome {
+                        ok: true,
+                        content: format!("Removed role agent `{role}`. {n} skills now loaded."),
+                        summary: format!("agent {role}: removed"),
+                        view: tools::ToolView::Plain,
+                    };
+                }
+                Err(e) => return err(format!("could not remove `{role}`: {e}"), "manage_agent: remove failed".into()),
+            }
+        }
+
+        // create / update
+        let when = args
+            .get("when")
+            .and_then(|w| w.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let instructions = args
+            .get("instructions")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if when.is_empty() || instructions.is_empty() {
+            return err(
+                "creating or updating an agent needs both `when` (one line: when to use it) and \
+                 `instructions` (the agent's operating brief).".into(),
+                "manage_agent: missing fields".into(),
+            );
+        }
+
+        let existing = path.exists();
+        // Compose a valid skill file: frontmatter (name/role/when) + body.
+        let doc = format!(
+            "---\nname: {role}-agent\nrole: {role}\nwhen: {when}\n---\n\n{instructions}\n"
+        );
+        // Validate before writing so we never persist a skill that won't parse.
+        if crate::skills::parse(&doc).is_none() {
+            return err("the composed agent skill did not parse; check the fields.".into(), "manage_agent: parse failed".into());
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return err(format!("could not create {}: {e}", dir.display()), "manage_agent: mkdir failed".into());
+        }
+        if let Err(e) = std::fs::write(&path, doc) {
+            return err(format!("could not write {}: {e}", path.display()), "manage_agent: write failed".into());
+        }
+        let n = self.reload_skills();
+        let verb = if existing { "Updated" } else { "Created" };
+        tools::Outcome {
+            ok: true,
+            content: format!(
+                "{verb} role agent `{role}` at {}. Delegate to it with `delegate` (role=\"{role}\") \
+                 or use it via /orc. {n} skills loaded.",
+                path.display()
+            ),
+            summary: format!("agent {role}: {}", verb.to_lowercase()),
+            view: tools::ToolView::Plain,
+        }
+    }
+
     fn read_skill(&self, args: &Value) -> tools::Outcome {
         let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("").trim();
         if self.skills.is_empty() {
@@ -1643,7 +1765,14 @@ impl Agent {
             .unwrap_or(self.cfg.search_results)
             .clamp(1, 20);
 
-        match crate::web::search_web(&self.cfg.searx_url, query, limit).await {
+        // Honour the explicit backend choice: SearXNG only when selected AND a
+        // URL is set; otherwise DuckDuckGo (empty URL routes to DDG).
+        let searx = if self.cfg.search_backend.eq_ignore_ascii_case("searxng") {
+            self.cfg.searx_url.as_str()
+        } else {
+            ""
+        };
+        match crate::web::search_web(searx, query, limit).await {
             Ok(hits) => tools::Outcome {
                 ok: true,
                 content: crate::web::format_hits(query, &hits),
@@ -2008,6 +2137,7 @@ impl Agent {
             top_p: self.cfg.top_p,
             max_tokens: 0,
             tools: None,
+            reasoning_effort: "off".into(),
         };
         let (stx, mut srx) = mpsc::unbounded_channel();
         let res = self

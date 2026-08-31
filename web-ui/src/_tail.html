@@ -1,0 +1,13 @@
+
+    // ---- Mount ----
+    const rootEl = document.getElementById('root');
+    try {
+      const root = ReactDOM.createRoot(rootEl);
+      root.render(<App />);
+    } catch (err) {
+      rootEl.innerHTML = '<div id="boot-error" style="padding:20px;color:#f87171">Failed to start UI: ' + (err && err.message) + '</div>';
+      console.error(err);
+    }
+  </script>
+</body>
+</html>

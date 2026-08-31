@@ -302,6 +302,30 @@ pub fn specs() -> Vec<Spec> {
             mutating: false,
         },
         Spec {
+            name: "manage_agent",
+            desc: "Create, update, or remove a specialised *role agent* on the fly, when the \
+                   task would benefit from a dedicated helper you can delegate to (e.g. a \
+                   'qa' agent to write tests, a 'reviewer' agent, a 'docs' agent). The agent \
+                   is saved as a project skill and can then be used with `delegate` (pass its \
+                   role) or /orc. Prefer this over doing every specialised subtask yourself \
+                   when the user's request implies repeated, distinct kinds of work.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "update", "delete"],
+                        "description": "create (default), update an existing one, or delete."
+                    },
+                    "role": str_prop("Short role slug the agent is delegated by, e.g. \"qa\", \"reviewer\"."),
+                    "when": str_prop("One line: when this agent should be used."),
+                    "instructions": str_prop("The agent's operating brief — how it works, what it must do and check.")
+                },
+                "required": ["role"]
+            }),
+            mutating: true,
+        },
+        Spec {
             name: "web_search",
             desc: "Search the web for things outside the codebase: library docs, error \
                    messages, API changes, current versions. Returns titles, URLs and \

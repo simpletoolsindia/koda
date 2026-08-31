@@ -121,7 +121,14 @@ pub fn build_with_skills(
 
 pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> String {
     let mut p = String::with_capacity(2048);
-    p.push_str(BASE);
+    // A user-supplied system prompt (set in /settings) fully replaces the
+    // built-in base; everything else (mode notes, workspace, tools, skills,
+    // instructions) is still layered on so the agent stays functional.
+    if cfg.system_prompt.trim().is_empty() {
+        p.push_str(BASE);
+    } else {
+        p.push_str(cfg.system_prompt.trim());
+    }
     match mode {
         Mode::Plan => {
             p.push_str("\n\n");
