@@ -135,6 +135,24 @@ fn as_rgb(c: Color) -> Option<(u8, u8, u8)> {
     }
 }
 
+/// Alert a user who may have tabbed away: ring the terminal bell (an audible
+/// beep in most terminals) and emit an OSC 9 desktop notification, which iTerm2,
+/// Kitty, WezTerm and Ghostty surface as a system notification and others
+/// silently ignore. Written straight to stdout so it works mid-frame.
+fn notify_user(title: &str, body: &str) {
+    use std::io::Write as _;
+    // Keep the notification text to one line and a sane length.
+    let msg: String = format!("{title}: {body}")
+        .replace(['\n', '\r'], " ")
+        .chars()
+        .take(120)
+        .collect();
+    let mut out = std::io::stdout();
+    // \x07 = BEL (sound); ESC ] 9 ; <text> BEL = OSC 9 notification.
+    let _ = write!(out, "\x07\x1b]9;{msg}\x07");
+    let _ = out.flush();
+}
+
 /// Width bands. Every layout decision reads these instead of raw numbers.
 #[derive(Clone, Copy)]
 struct Metrics {
@@ -308,8 +326,12 @@ impl App {
                 self.transcript.finish_reveal();
                 self.transcript
                     .assistant_delta(&format!("\n**{question}**\n"));
-                self.asking = Some((question, reply));
+                self.asking = Some((question.clone(), reply));
                 self.follow = true;
+                // Alert a user who has tabbed away: ring the terminal bell and
+                // post an OSC 9 desktop notification (honoured by iTerm2, Kitty,
+                // WezTerm, Ghostty…; ignored elsewhere).
+                notify_user("koda needs you", &question);
             }
             Event::Tokens(n) => self.tokens = n,
             Event::NeedsExecuteMode(_) => self.plan_blocked = true,
@@ -338,9 +360,26 @@ impl App {
                 self.cancelling = false;
                 self.turn_started = None;
                 self.tokens = history_tokens;
+                // Prompts the user queued while koda was working are picked up
+                // here, once the current task's tool calls have all finished.
+                // Frame them so the agent folds them into its plan rather than
+                // treating each as an unrelated cold start — matching "add to the
+                // end of the todo list and work on it after the current task."
                 if let Some(next) = self.queued.pop_front() {
                     self.transcript.user(next.clone());
-                    self.send(Command::User(next));
+                    let framed = if self.queued.is_empty() {
+                        format!(
+                            "While you were working, I added this task. Add it to your todo \
+                             list and do it now:\n\n{next}"
+                        )
+                    } else {
+                        // More still queued — tell it to enqueue them all in order.
+                        format!(
+                            "While you were working, I added this task (more follow). Append \
+                             it to your todo list and work through them in order:\n\n{next}"
+                        )
+                    };
+                    self.send(Command::User(framed));
                 }
             }
         }
@@ -1019,7 +1058,7 @@ impl App {
         self.plan_blocked = false;
         if self.busy {
             self.queued.push_back(trimmed);
-            self.note("queued until the current turn finishes");
+            self.note(format!("queued ({} waiting) — added to the plan after the current task", self.queued.len()));
         } else {
             self.send(Command::User(trimmed));
         }
@@ -1127,7 +1166,7 @@ impl App {
                 self.follow = true;
                 if self.busy {
                     self.queued.push_back(brief);
-                    self.note("queued until the current turn finishes");
+                    self.note(format!("queued ({} waiting) — added to the plan after the current task", self.queued.len()));
                 } else {
                     self.send(Command::User(brief));
                 }
@@ -1140,15 +1179,18 @@ impl App {
                 }
             }
             "websearch" | "web" => {
-                if !self.searx_configured {
-                    self.note(
-                        "set searx_url in ~/.config/koda/config.toml first (a SearXNG \
-                         instance with the json format enabled)",
-                    );
+                self.web = !self.web;
+                let v = self.web;
+                self.send(Command::SetWebSearch(v));
+                if v {
+                    let backend = if self.searx_configured {
+                        "your SearXNG instance"
+                    } else {
+                        "DuckDuckGo"
+                    };
+                    self.note(format!("web search on — using {backend}"));
                 } else {
-                    self.web = !self.web;
-                    let v = self.web;
-                    self.send(Command::SetWebSearch(v));
+                    self.note("web search off");
                 }
             }
             "logs" | "log" => {
@@ -2460,7 +2502,7 @@ pub async fn run(
         tokens: 0,
         context_budget: cfg.context_tokens,
         auto_tier: if cfg.auto_approve { AutoTier::Full } else { cfg.auto_tier },
-        web: cfg.web_search && !cfg.searx_url.trim().is_empty(),
+        web: cfg.web_search,
         searx_configured: !cfg.searx_url.trim().is_empty(),
         mode: cfg.mode,
         plan_blocked: false,

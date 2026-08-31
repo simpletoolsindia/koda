@@ -201,7 +201,7 @@ class Tui:
         except OSError:
             pass
         try:
-            return self.proc.wait(timeout=5)
+            return self.proc.wait(timeout=12)
         except subprocess.TimeoutExpired:
             self.proc.kill()
             return -1

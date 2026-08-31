@@ -492,8 +492,10 @@ codegraph = true
 
 # Web search through your own SearXNG instance. That instance needs `json` in
 # `search.formats` in its settings.yml. Toggle live with /websearch.
+# Web search. On, koda uses your SearXNG instance if searx_url is set (private,
+# self-hosted); otherwise it falls back to DuckDuckGo, which needs no setup.
 web_search = false
-searx_url = ""          # e.g. "http://localhost:8888"
+searx_url = ""          # optional, e.g. "http://localhost:8888"
 search_results = 6
 
 # Transient failures (connection reset, 429, 5xx, empty stream) are retried

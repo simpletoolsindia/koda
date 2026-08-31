@@ -662,7 +662,7 @@ impl Agent {
     /// tempted by a tool that will refuse it.
     fn advertised_tools(&self) -> Vec<serde_json::Value> {
         let mut list = tools::openai_schema_for(self.effective_allow());
-        if !self.cfg.web_search || self.cfg.searx_url.trim().is_empty() {
+        if !self.cfg.web_search {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("web_search")
             });
@@ -1381,11 +1381,11 @@ impl Agent {
     }
 
     async fn web_search(&self, args: &Value) -> tools::Outcome {
-        if !self.cfg.web_search || self.cfg.searx_url.trim().is_empty() {
+        if !self.cfg.web_search {
             return tools::Outcome {
                 ok: false,
-                content: "ERROR: web search is off. The user can enable it with /websearch \
-                          once searx_url is set. Answer from the repository instead."
+                content: "ERROR: web search is off. The user can enable it with /websearch. \
+                          Answer from the repository instead."
                     .into(),
                 summary: "web_search: disabled".into(),
     view: tools::ToolView::Plain,
@@ -1399,7 +1399,7 @@ impl Agent {
             .unwrap_or(self.cfg.search_results)
             .clamp(1, 20);
 
-        match crate::web::search(&self.cfg.searx_url, query, limit).await {
+        match crate::web::search_web(&self.cfg.searx_url, query, limit).await {
             Ok(hits) => tools::Outcome {
                 ok: true,
                 content: crate::web::format_hits(query, &hits),
