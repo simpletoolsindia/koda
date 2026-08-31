@@ -131,6 +131,9 @@ contents.
 | `/orc` | orchestrate: split a task across role agents |
 | `/models` `/model` `/url` | what the server has, and what you are using |
 | `/auto` | cycle autonomy: ask → auto-write → full-auto |
+| `/reason` | reasoning effort: off, low, medium, high |
+| `/watch` | watch files for `AI!` / `AI?` comment triggers |
+| `/debug` | capture raw LLM requests & responses for inspection |
 | `/settings` | interactive settings page for everything below |
 | `/think` | show or hide model reasoning |
 | `/motion` `/reveal` | animation on/off · progressive text reveal on/off |
@@ -189,6 +192,7 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `todo` | — | the plan you see in the transcript |
 | `remember` | — | durable facts, kept for next session |
 | `delegate` | — | hand a read-only investigation to a subagent |
+| `manage_agent` | asks | create/update a specialised role agent on the fly |
 | `web_search` | — | SearXNG or DuckDuckGo, off by default |
 | `ask_user` | — | asks *you* a question mid-task; your reply is the answer |
 | `write_file` `edit_file` | asks | shows a diff first |
@@ -282,6 +286,127 @@ searx_url = "http://localhost:8888"   # optional; omit to use DuckDuckGo
 ```
 
 Toggle per session with `/websearch` — koda tells you which backend is active.
+Pick the backend explicitly in `/settings`: enable web search, choose DuckDuckGo
+or SearXNG (entering your instance's address inline), then close to confirm.
+
+## Reasoning effort
+
+Thinking models can be told how hard to think. `/reason` cycles
+`off → low → medium → high` (or set `reasoning_effort` in config, or pass a level:
+`/reason high`). koda sends it as `reasoning_effort` on the request; servers that
+do not support the field simply ignore it, and `off` omits it entirely.
+
+## Watch mode
+
+Aider-style inline triggers. Turn it on with `/watch` (or `watch = true`), then
+end a comment with a trigger token and koda acts on it the moment it is idle:
+
+```python
+# implement binary search over `items`, return the index or -1  AI!
+```
+
+- `AI!` — implement the request in that file. koda reads it, makes the change,
+  and removes the trigger comment so it does not fire again.
+- `AI?` — answer the question (read-only; no edits).
+
+koda scans the workspace (gitignore-aware) every `watch_interval_ms` and only
+acts when no turn is running, nothing is queued, and no prompt is open.
+
+## Debug capture
+
+`/debug` (or `debug = true`, or `KODA_DEBUG=1`) records the exact request body
+koda sends to the model and the raw streamed response — the same idea as
+oh-my-pi's request-debug. Files land in `~/.local/state/koda/debug/` as
+`rr-session-N.json` (the request) and `rr-session-N.res.log` (the raw SSE),
+which is enough to reproduce a bad turn. `/debug` prints where they are.
+
+## Web UI
+
+An optional local web UI for live observability and debugging, served on
+`127.0.0.1` (localhost only). Open the URL koda prints at startup to get, in a
+modern React interface:
+
+- **Live logs** — auto-tailing, filterable by level and area, with a
+  simple/medium/high detail control (`ui_detail`).
+- **LLM debug** — for each captured turn, our request (model, messages, tools)
+  and the reconstructed response: assistant text, reasoning, and the tools it
+  called with their arguments.
+- **Code graph** — the project's symbol graph as an interactive force-directed
+  diagram (zoom, pan, search, hover for a symbol's file and reference count).
+- **Agents & skills** — browse, create and edit skills and role agents from the
+  browser.
+
+### How to run it
+
+1. **Turn it on.** Either open `/settings` in koda and toggle **web ui** on (and
+   optionally set **ui detail** to simple/medium/high), or set it in config:
+
+   ```toml
+   web_ui = true
+   web_ui_port = 7717     # optional; the default
+   ui_detail = "medium"   # simple | medium | high
+   ```
+
+   The settings toggle is remembered; koda starts the server on the next launch.
+
+2. **See the LLM debug data.** The LLM debug tab needs capture on, so also enable
+   debug — `/debug` in koda, `debug = true`, or launch with `KODA_DEBUG=1`. Logs
+   and the code graph work without it.
+
+3. **Start koda.** On launch it prints the address:
+
+   ```
+   koda: web UI at http://127.0.0.1:7717
+   ```
+
+4. **Open that URL** in your browser. The four tabs — Live Logs, LLM Debug, Code
+   Graph, Agents & Skills — update live while you work in the terminal. Run koda
+   from the repo root so it serves the full React app from `web-ui/dist/`; from
+   anywhere else it serves a built-in fallback log viewer with the same data.
+
+The server has no extra dependencies (it is built on the async runtime koda
+already uses) and binds to localhost only, so nothing is exposed off your
+machine.
+
+## Dynamic role agents
+
+Beyond hand-written role skills, the main agent can spin up a specialised agent
+for the task in front of it with the `manage_agent` tool — when a request implies
+repeated, distinct kinds of work (implement, then test, then review), it can
+create a `qa` or `reviewer` agent, then delegate to it. Dynamically created
+agents are ordinary skill files under `.koda/skills/`, so you can read, edit or
+delete them afterward. See [docs/extensions.md](docs/extensions.md).
+
+## Custom tools
+
+Teach koda a project-specific action without touching Rust. Declare it in config
+as a `[[tools]]` table; `{arg}` placeholders are filled from the call and
+shell-quoted, and it runs through the same approval + shell path as any command:
+
+```toml
+[[tools]]
+name = "typecheck"
+description = "Type-check the project and report errors."
+command = "npm run -s typecheck"
+mutating = false
+
+[[tools]]
+name = "grep_todos"
+description = "Find TODO comments matching a term."
+command = "rg -n 'TODO.*{term}' ."
+args = ["term"]
+```
+
+Custom tools are offered only to the top-level agent and never in plan mode. The
+full extension guide (custom tools, skills, role agents) is in
+[docs/extensions.md](docs/extensions.md).
+
+## Editing the system prompt
+
+The built-in system prompt is deliberately short, but you can replace it. Open
+`/settings`, select **system prompt**, and press enter to edit it inline (empty =
+the built-in). Your `instructions` are still appended either way, and per-tool
+prompt overrides can be set with a `[tool_prompts]` table in config.
 
 ## When things go wrong
 
@@ -367,7 +492,18 @@ sessions = true            # save conversations for /resume, /search, /fork
 memory = true
 web_search = false         # falls back to DuckDuckGo when searx_url is unset
 searx_url = ""
+search_backend = "duckduckgo"  # duckduckgo | searxng — pick in /settings
 search_results = 6
+
+reasoning_effort = "off"   # off | low | medium | high — /reason
+watch = false              # act on AI! / AI? comment triggers — /watch
+watch_interval_ms = 1500
+
+web_ui = false             # serve the React logs/debug UI on 127.0.0.1
+web_ui_port = 7717
+ui_detail = "medium"       # web UI log detail: simple | medium | high
+
+debug = false              # dump raw requests/responses — /debug, or KODA_DEBUG=1
 
 max_retries = 3
 log_level = "info"         # debug | info | warn | error
@@ -385,6 +521,7 @@ command_timeout_ms = 120000
 max_file_bytes = 262144
 max_tool_output_bytes = 24576
 
+system_prompt = ""         # override the built-in prompt; edit in /settings
 instructions = ""          # extra project rules for the prompt
 ```
 

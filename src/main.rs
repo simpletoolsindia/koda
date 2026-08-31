@@ -4,6 +4,7 @@ mod agent;
 mod anim;
 mod config;
 mod debug;
+mod detailhelp;
 mod editor;
 mod fuzzy;
 mod graph;

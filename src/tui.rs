@@ -66,6 +66,7 @@ const BANNER_ART: [&str; 6] = [
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "keys and commands"),
+    ("/detailhelp", "open the full feature guide in your browser"),
     ("/keys", "keyboard shortcuts"),
     ("/model", "show or switch model"),
     ("/models", "list models on the server"),
@@ -1075,6 +1076,10 @@ impl App {
 
         match cmd.as_str() {
             "help" | "?" => self.show_help(),
+            "detailhelp" | "guide" => match crate::detailhelp::open(COMMANDS) {
+                Ok(path) => self.note(format!("opened the full guide in your browser ({})", path.display())),
+                Err(e) => self.transcript.error(format!("could not open the guide: {e}")),
+            },
             "keys" => self.show_help(),
             "model" => {
                 if arg.is_empty() {
@@ -1479,13 +1484,13 @@ impl App {
             ("/model qwen2.5-coder:14b", "switch to a specific model"),
             ("/mode plan", "read-only planning; also execute, vibe"),
             ("/auto", "cycle ask → auto-write → full-auto"),
-            ("/search discount bug", "find past chats mentioning that text"),
-            ("/fork", "branch this chat, keep the original"),
+            ("/reason high", "reasoning effort: off/low/medium/high"),
+            ("/watch", "act on AI! / AI? comment triggers"),
             ("/orc build a login page", "split the task across role agents"),
+            ("/settings", "edit everything (system prompt, web UI, …)"),
             ("/theme tokyo-night", "switch palette by name"),
-            ("/mouse", "off = select & copy text with the mouse"),
-            ("@src/main.rs", "attach a file (or an image) to your message"),
-            ("/undo", "revert the last turn's file changes"),
+            ("@src/main.rs", "attach a file (or image) to your message"),
+            ("/detailhelp", "open the full feature guide in your browser"),
         ];
         let mut ex = Panel::new("Examples", width).footer("type a command, or just talk");
         let cmd_w = EXAMPLES.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
@@ -1503,7 +1508,7 @@ impl App {
         lines.extend(ex.render(&self.theme, &self.glyphs));
         lines.push(Line::default());
 
-        let mut k = Panel::new("Keys", width).footer("type / for the full command list");
+        let mut k = Panel::new("Keys", width).footer("/detailhelp opens the full guide in your browser");
         for row in panel::key_value_rows(KEYS, k.inner(), &self.theme) {
             k.row(row);
         }

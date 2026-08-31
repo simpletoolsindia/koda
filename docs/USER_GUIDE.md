@@ -236,6 +236,9 @@ These are the exact command names koda recognizes. Type `/` to see them all;
 | `/models` | List models on the server. |
 | `/mode [plan\|execute\|vibe]` | Show or set the mode. |
 | `/logs` | What the agent has been doing this session. |
+| `/debug` | Toggle raw request/response capture (also `KODA_DEBUG=1`). |
+| `/reason [off\|low\|medium\|high]` | Cycle or set the model's reasoning effort. |
+| `/watch` | Toggle watch mode: act on `AI!` / `AI?` comment triggers when idle. |
 | `/websearch` (`/web`) | Turn web search on or off. |
 | `/skills [reload]` | List skills, or reload them from disk (`/skills reload`). |
 | `/orc <task>` | Orchestrate: decompose a task and delegate to role agents. |
@@ -269,6 +272,69 @@ Notes:
 - `/motion` and `/reveal` are distinct: `/motion` governs all animation
   (spinners, gauges, text reveal); `/reveal` controls only the progressive
   typing-in of streaming text and takes effect only when motion is on.
+
+---
+
+## Reasoning effort
+
+Thinking models can be told how hard to think. Cycle with `/reason`
+(`off → low → medium → high`), or set a level directly (`/reason high`), or set
+`reasoning_effort` in config, or use the **reasoning** row in `/settings`. koda
+sends it as `reasoning_effort` on the request; servers that do not support it
+ignore the field, and `off` omits it.
+
+## Watch mode
+
+Watch mode (aider-style) acts on inline comment triggers automatically. Enable it
+with `/watch`, the **watch mode** row in `/settings`, or `watch = true`.
+
+End a comment with a trigger token:
+
+- `AI!` — implement the request in that file. koda reads the file, makes the
+  change, and removes the trigger comment so it does not run again.
+- `AI?` — answer the question (read-only; no edits).
+
+```python
+# implement a retry wrapper around fetch(), 3 attempts with backoff  AI!
+```
+
+koda rescans the workspace (gitignore-aware) every `watch_interval_ms` and only
+acts when it is idle — no turn running, nothing queued, no prompt open.
+
+## Debug capture
+
+`/debug` toggles raw request/response capture (also `debug = true` or launching
+with `KODA_DEBUG=1`). While on, koda writes each turn's exact request body and
+raw streamed response to `~/.local/state/koda/debug/rr-session-N.json` and
+`rr-session-N.res.log`. `/debug` prints the directory. This is what the web UI's
+LLM Debug tab reads.
+
+## Web UI (live logs, LLM debug, code graph, agents)
+
+koda can serve a local React web UI on `127.0.0.1` for live observability. It has
+four tabs: **Live Logs**, **LLM Debug** (our request + the model's response,
+reasoning and tool calls), **Code Graph** (an interactive force-directed diagram
+of the project's symbols), and **Agents & Skills** (browse and edit skills/role
+agents).
+
+To run it:
+
+1. Enable it — the **web ui** toggle in `/settings`, or in config:
+
+   ```toml
+   web_ui = true
+   web_ui_port = 7717     # optional, the default
+   ui_detail = "medium"   # simple | medium | high — how much the log tab shows
+   ```
+
+2. For the LLM Debug tab, also enable capture: `/debug`, `debug = true`, or
+   `KODA_DEBUG=1`. (Logs and the code graph work without it.)
+
+3. Start koda. It prints the address, e.g. `koda: web UI at http://127.0.0.1:7717`.
+
+4. Open that URL. Run koda from the repo root to serve the full React app from
+   `web-ui/dist/`; from elsewhere koda serves a built-in fallback log viewer that
+   uses the same API. The server binds to localhost only.
 
 ---
 
@@ -317,6 +383,7 @@ autonomy tier. `/tools` lists them live.
 | `web_search` | no | Search the web for docs, errors, versions (returns titles/URLs/snippets). |
 | `todo` | no | Track a multi-step plan the user can watch progress on. |
 | `delegate` | no | Hand a read-only investigation to a subagent with fresh context. |
+| `manage_agent` | **yes** | Create, update or delete a specialised role agent on the fly (saved as a skill). |
 | `run_command` | **yes** | Run a shell command in the workspace root; returns exit code, stdout, stderr. |
 
 File tools run in-process, so they are fast and confined by the `sandbox`
