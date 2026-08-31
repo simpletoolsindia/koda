@@ -171,9 +171,20 @@ the edit the user makes *after* koda writes something. Shipped:
 - 5 unit tests; verified end-to-end (koda wrote `logging`, the user swapped it for
   `log.audit`, koda read it back twice, and induced the substitution rule).
 
-### Phase 3 — Project-idiom miner
-Use `graph.rs` to surface high-frequency internal symbols/decorators; combine with
-correction observations → `project-idioms.md`. The differentiated capability.
+### Phase 3 — Project-idiom miner  ✅ IMPLEMENTED
+The differentiated capability no competing tool builds: learn the project's own
+conventions from its code, not just from the user's edits. Shipped:
+- `graph.rs::idioms(min_files)` returns internal symbols DEFINED in the project
+  and referenced across at least `min_files` other files (load-bearing helpers,
+  internal APIs, decorators/macros), sorted by reach. `common_imports(min_files)`
+  returns modules imported across many files.
+- `learning.rs::induce_idioms` turns those into candidate rules — *"`log_audit`
+  is a load-bearing fn in this project (used across 4 files) — prefer it over
+  reinventing an equivalent"* and *"this project commonly imports `app.util`."*
+- `agent.rs` runs the miner once per session, at turn end, as soon as the code
+  graph is ready (subagents never mine).
+- Verified end-to-end: a helper used across four modules was surfaced as an idiom
+  candidate purely from the graph, with no prior observations.
 
 ### Phase 4 — Semantic example library
 `fastembed-rs` + `sqlite-vec` behind a Cargo feature; persist successful episodes;

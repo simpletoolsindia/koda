@@ -555,6 +555,13 @@ file under `<project>/.koda/learning/` you can read, edit, or delete.
   rule like *"prefer `log.audit` over `logging`."* This is the strongest signal
   for adapting to your style; koda only acts on changes it can attribute clearly
   (a single swapped token), never guesses.
+- **Learning your project's idioms** — koda reads the code graph and notices the
+  internal helpers, APIs and modules that are load-bearing here — a function
+  defined once and called across many files, a module imported everywhere. It
+  proposes rules like *"`log_audit` is a load-bearing function here — prefer it
+  over reinventing an equivalent,"* so koda reaches for your project's own tools
+  instead of generic ones. This runs once per session from the code graph, with
+  no model involved.
 - **Human-in-the-loop promotion** — candidates never touch the prompt on their
   own. Run `/learn` to review them, then `/learn accept <n>` (or `/learn all`) to
   accept, or `/learn reject <n>` to drop one. Accepted rules are written to
@@ -564,10 +571,9 @@ file under `<project>/.koda/learning/` you can read, edit, or delete.
   whole loop is gone with no residue. If you edit or delete a rule, that is
   authoritative.
 
-This is Phases 1–2 of a larger self-improvement design (see
-`docs/research-self-improvement.md`): later phases add a project-idiom miner for
-custom syntax/DSLs and a local semantic example library, all on the same
-all-local, fully-inspectable footing.
+This is Phases 1–3 of a larger self-improvement design (see
+`docs/research-self-improvement.md`): a later phase adds a local semantic example
+library, on the same all-local, fully-inspectable footing.
 
 ---
 

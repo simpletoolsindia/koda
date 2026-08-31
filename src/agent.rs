@@ -240,6 +240,10 @@ pub struct Agent {
     graph: Arc<std::sync::RwLock<Option<crate::graph::Graph>>>,
     memory: crate::memory::Memory,
     learning: crate::learning::Learning,
+    /// Whether the project-idiom miner (Phase 3) has run this session. It reads
+    /// the code graph once it's ready and turns load-bearing internal symbols
+    /// and common imports into candidate rules — done once, not every turn.
+    mined_idioms: bool,
     session: Option<crate::session::Store>,
     /// File contents captured before each write, newest last.
     undo: Vec<UndoEntry>,
@@ -333,6 +337,7 @@ impl Agent {
             graph: graph.clone(),
             memory,
             learning,
+            mined_idioms: false,
             // Created on first persist: an eagerly-created file would be left
             // orphaned by `resume`, and a session with no exchange is noise.
             session: None,
@@ -408,6 +413,7 @@ impl Agent {
             graph: self.graph.clone(),
             memory: self.memory.clone(),
             learning: crate::learning::Learning::default(),
+            mined_idioms: true,
             session: None,
             undo: Vec::new(),
             turn_seq: 0,
@@ -862,6 +868,22 @@ impl Agent {
             // and cheap; candidates stay dormant until the user runs /learn.
             if self.cfg.learning {
                 self.learning.induce();
+                // Project-idiom mining (Phase 3): once per session, when the
+                // code graph is ready, surface load-bearing internal symbols and
+                // common imports as candidate rules.
+                if !self.mined_idioms {
+                    if let Ok(guard) = self.graph.read() {
+                        if let Some(g) = guard.as_ref() {
+                            // A symbol used across 3+ files is a real idiom here;
+                            // a module imported by 3+ files is a convention.
+                            let idioms = g.idioms(3);
+                            let imports = g.common_imports(3);
+                            drop(guard);
+                            self.learning.induce_idioms(&idioms, &imports);
+                            self.mined_idioms = true;
+                        }
+                    }
+                }
                 let _ = self.learning.save();
             }
             let _ = tx.send(Event::TurnEnd {

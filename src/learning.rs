@@ -182,6 +182,46 @@ impl Learning {
     pub fn induce(&mut self) -> usize {
         let obs = self.observations();
         let mined = induce_rules(&obs);
+        self.merge_candidates(mined)
+    }
+
+    /// Turn project idioms (from the code graph) into candidate rules: internal
+    /// symbols that are load-bearing here, and modules imported across the
+    /// project. Deterministic; the graph is the evidence. `idioms` is
+    /// `(name, kind, cross_file_uses)`, `imports` is `(module, times_imported)`.
+    pub fn induce_idioms(
+        &mut self,
+        idioms: &[(String, &'static str, usize)],
+        imports: &[(String, usize)],
+    ) -> usize {
+        let mut mined = Vec::new();
+        for (name, kind, reach) in idioms.iter().take(12) {
+            mined.push(Rule {
+                key: format!("idiom.symbol.{}", slug(name)),
+                text: format!(
+                    "`{name}` is a load-bearing {kind} in this project (used across {reach} files) \
+                     — prefer it over reinventing an equivalent."
+                ),
+                support: *reach as u32,
+                accepted: false,
+            });
+        }
+        for (module, n) in imports.iter().take(8) {
+            mined.push(Rule {
+                key: format!("idiom.import.{}", slug(module)),
+                text: format!(
+                    "This project commonly imports `{module}` ({n} files) — use it rather than an alternative."
+                ),
+                support: *n as u32,
+                accepted: false,
+            });
+        }
+        self.merge_candidates(mined)
+    }
+
+    /// Fold freshly-mined candidates into the rule set: refresh known ones,
+    /// add new ones. Accepted rules keep their acceptance. Returns new count.
+    fn merge_candidates(&mut self, mined: Vec<Rule>) -> usize {
         let mut added = 0;
         for m in mined {
             match self.rules.iter_mut().find(|r| r.key == m.key) {
@@ -874,6 +914,22 @@ mod tests {
     fn empty_learning_contributes_nothing_to_the_prompt() {
         let d = tmp("empty");
         assert!(Learning::load(&d).brief().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn induce_idioms_creates_symbol_and_import_candidates() {
+        let d = tmp("idioms");
+        let mut l = Learning::load(&d);
+        let idioms = vec![("log_audit".to_string(), "fn", 7usize)];
+        let imports = vec![("internal_kit".to_string(), 5usize)];
+        let n = l.induce_idioms(&idioms, &imports);
+        assert_eq!(n, 2);
+        let cands: Vec<String> = l.candidates().iter().map(|r| r.text.clone()).collect();
+        assert!(cands.iter().any(|t| t.contains("log_audit") && t.contains("load-bearing")), "{cands:?}");
+        assert!(cands.iter().any(|t| t.contains("internal_kit")), "{cands:?}");
+        // Idempotent: re-mining the same idioms adds nothing new.
+        assert_eq!(l.induce_idioms(&idioms, &imports), 0);
         std::fs::remove_dir_all(&d).ok();
     }
 

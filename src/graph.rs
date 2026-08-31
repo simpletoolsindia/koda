@@ -903,6 +903,55 @@ impl Graph {
         }
         out
     }
+
+    /// Project idioms: internal symbols and modules that are load-bearing here,
+    /// so the agent prefers them over reinventing generic equivalents. Returns
+    /// `(name, kind, cross_file_uses)` for symbols DEFINED in this project and
+    /// referenced across at least `min_files` other files. Sorted by reach.
+    ///
+    /// This is the raw material for Phase 3 idiom rules — deterministic, drawn
+    /// straight from the graph, no model involved.
+    pub fn idioms(&self, min_files: usize) -> Vec<(String, &'static str, usize)> {
+        let mut out: Vec<(String, &'static str, usize)> = Vec::new();
+        for (name, files) in &self.refs {
+            let reach = files.len();
+            if reach < min_files {
+                continue;
+            }
+            // Must be defined in THIS project (not a stdlib/third-party name we
+            // merely saw referenced), and have a single clear definition kind.
+            let Some(defs) = self.defs.get(name) else { continue };
+            let Some(first) = defs.first() else { continue };
+            // Skip trivially short names — too generic to be a useful idiom.
+            if name.len() < 3 {
+                continue;
+            }
+            out.push((name.clone(), first.kind, reach));
+        }
+        out.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        out
+    }
+
+    /// Internal modules imported across many files — a project convention worth
+    /// following. Returns `(module, times_imported)` sorted by frequency.
+    pub fn common_imports(&self, min_files: usize) -> Vec<(String, usize)> {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for imps in self.imports.values() {
+            // Dedup within a file so one file counts once per module.
+            let mut seen: BTreeSet<&String> = BTreeSet::new();
+            for m in imps {
+                if seen.insert(m) {
+                    *counts.entry(m.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut out: Vec<(String, usize)> = counts
+            .into_iter()
+            .filter(|(m, n)| *n >= min_files && m.len() >= 3)
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -1134,5 +1183,52 @@ mod tests {
         );
         assert_eq!(definitions("rust", "pub fn go() {}"), Some(("fn", "go".into())));
         assert_eq!(definitions("rust", "    let x = 1;"), None);
+    }
+
+    #[test]
+    fn idioms_surface_internal_symbols_used_across_files() {
+        // A helper defined once and referenced from several files is an idiom.
+        let dir = fixture("idioms");
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn build_widget() {}\n",
+        )
+        .unwrap();
+        // Three files that all call build_widget -> reach = 3.
+        for f in ["a", "b", "c"] {
+            std::fs::write(
+                dir.join(format!("src/{f}.rs")),
+                "fn use_it() { build_widget(); }\n",
+            )
+            .unwrap();
+        }
+        let g = scan(&dir);
+        let idioms = g.idioms(3);
+        assert!(
+            idioms.iter().any(|(n, _, reach)| n == "build_widget" && *reach >= 3),
+            "expected build_widget as an idiom, got {idioms:?}"
+        );
+        // A high threshold excludes it.
+        assert!(g.idioms(99).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn common_imports_counts_modules_across_files() {
+        let dir = fixture("common-imports-idiom");
+        for f in ["a", "b", "c"] {
+            std::fs::write(
+                dir.join(format!("{f}.py")),
+                "from internal_kit import helper\n",
+            )
+            .unwrap();
+        }
+        let g = scan(&dir);
+        let common = g.common_imports(3);
+        assert!(
+            common.iter().any(|(m, n)| m.contains("internal_kit") && *n >= 3),
+            "expected internal_kit imported across files, got {common:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
