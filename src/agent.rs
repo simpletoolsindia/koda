@@ -38,9 +38,11 @@ pub enum Event {
     },
     /// The agent is asking the user a question and waiting for a typed answer.
     /// The TUI routes the user's next message into `reply` instead of starting
-    /// a new turn.
+    /// a new turn. When `options` is non-empty, the TUI shows a dropdown to pick
+    /// from (plus a custom-answer entry).
     AskUser {
         question: String,
+        options: Vec<String>,
         reply: oneshot::Sender<String>,
     },
     ToolStart {
@@ -1771,8 +1773,20 @@ impl Agent {
             };
         }
         let (reply, rx) = oneshot::channel();
+        let options: Vec<String> = args
+            .get("options")
+            .and_then(|o| o.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
         let _ = tx.send(Event::AskUser {
             question: question.clone(),
+            options,
             reply,
         });
         match rx.await {

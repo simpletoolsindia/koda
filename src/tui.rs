@@ -190,6 +190,19 @@ enum ChoiceKind {
     Model,
 }
 
+/// State for an in-flight `ask_user` question. When `options` is non-empty the
+/// UI shows a dropdown (the last entry is always "type a custom answer…");
+/// picking it sets `custom` so the next typed message is the answer.
+struct Asking {
+    question: String,
+    options: Vec<String>,
+    sel: usize,
+    /// True once the user chose the custom-answer entry: the input becomes the
+    /// answer field and the dropdown is dismissed.
+    custom: bool,
+    reply: oneshot::Sender<String>,
+}
+
 pub struct App {
     cmd_tx: mpsc::UnboundedSender<Command>,
     transcript: Transcript,
@@ -216,7 +229,7 @@ pub struct App {
     pending: Option<Pending>,
     /// A question the agent asked via `ask_user`, awaiting the user's next
     /// message. `(question, reply-channel)`.
-    asking: Option<(String, oneshot::Sender<String>)>,
+    asking: Option<Asking>,
     model: String,
     endpoint: String,
     tokens: usize,
@@ -368,13 +381,21 @@ impl App {
                     scroll: 0,
                 });
             }
-            Event::AskUser { question, reply } => {
-                // Show the question as a distinct prose block, and route the
-                // user's next message into the reply channel.
+            Event::AskUser { question, options, reply } => {
+                // Show the question as a distinct prose block. With options, the
+                // user picks from a dropdown (a custom-answer entry is added);
+                // otherwise their next typed message is the answer.
                 self.transcript.finish_reveal();
                 self.transcript
                     .assistant_delta(&format!("\n**{question}**\n"));
-                self.asking = Some((question.clone(), reply));
+                let custom = options.is_empty();
+                self.asking = Some(Asking {
+                    question: question.clone(),
+                    options,
+                    sel: 0,
+                    custom,
+                    reply,
+                });
                 self.follow = true;
                 // Alert a user who has tabbed away: ring the terminal bell and
                 // post an OSC 9 desktop notification (honoured by iTerm2, Kitty,
@@ -648,6 +669,12 @@ impl App {
             self.choices_key(key);
             return;
         }
+        // Ask-user dropdown: navigate/select options until the user picks the
+        // custom-answer entry, after which typing flows to the input as normal.
+        if self.asking.as_ref().map(|a| !a.custom && !a.options.is_empty()).unwrap_or(false) {
+            self.asking_key(key);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -688,7 +715,7 @@ impl App {
             // "/model" and "/models" also match), Enter should RUN it, not
             // complete to a longer neighbour. Tab still completes.
             let typed = self.editor.buf.trim();
-            let exact = cmds.iter().any(|c| *c == typed);
+            let exact = cmds.contains(&typed);
             match key.code {
                 KeyCode::Up => {
                     self.cmd_sel = self.cmd_sel.saturating_sub(1);
@@ -833,6 +860,38 @@ impl App {
             Err(e) => self
                 .transcript
                 .error(format!("could not open that session: {e}")),
+        }
+    }
+
+    /// Key handling for the ask_user dropdown (options + custom-answer entry).
+    fn asking_key(&mut self, key: KeyEvent) {
+        let Some(a) = self.asking.as_mut() else { return };
+        // The last row is always the custom-answer entry.
+        let total = a.options.len() + 1;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => a.sel = a.sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => a.sel = (a.sel + 1).min(total - 1),
+            KeyCode::Esc => {
+                // Cancel: fall back to a custom free-text answer.
+                a.custom = true;
+                a.sel = a.options.len();
+                self.note("type your answer and press enter");
+            }
+            KeyCode::Enter => {
+                if a.sel < a.options.len() {
+                    // Chose a concrete option — answer immediately.
+                    let answer = a.options[a.sel].clone();
+                    let asking = self.asking.take().unwrap();
+                    self.transcript.user(answer.clone());
+                    let _ = asking.reply.send(answer);
+                    self.follow = true;
+                } else {
+                    // Chose "custom answer" — switch to free-text input.
+                    a.custom = true;
+                    self.note("type your answer and press enter");
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1225,10 +1284,10 @@ impl App {
         }
         // If the agent asked a question, this message is the answer, not a new
         // turn. Echo it and hand it to the waiting tool.
-        if let Some((_, reply)) = self.asking.take() {
+        if let Some(asking) = self.asking.take() {
             self.transcript.user(trimmed.clone());
             self.follow = true;
-            let _ = reply.send(trimmed);
+            let _ = asking.reply.send(trimmed);
             return;
         }
         self.transcript.user(trimmed.clone());
@@ -2897,7 +2956,7 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
 /// question prominently and points at the input — a one-shot, unmissable prompt
 /// rather than a line of text lost in the transcript.
 fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let Some((question, _)) = &app.asking else { return };
+    let Some(a) = &app.asking else { return };
     let t = &app.theme;
     let g = &app.glyphs;
 
@@ -2910,14 +2969,47 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         t.emphasis(t.info),
     )));
     lines.push(Line::default());
-    for l in md::hard_wrap(question, body_w) {
+    for l in md::hard_wrap(&a.question, body_w) {
         lines.push(Line::from(Span::styled(l, t.emphasis(t.text))));
     }
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "↓ type your answer in the input and press enter".to_string(),
-        t.dim(),
-    )));
+
+    // Dropdown of options (plus a custom-answer entry) when the model offered
+    // choices and the user hasn't switched to typing a custom answer.
+    if !a.options.is_empty() && !a.custom {
+        let custom_idx = a.options.len();
+        for (i, opt) in a.options.iter().enumerate() {
+            let selected = i == a.sel;
+            let marker = if selected { g.pick } else { " " };
+            let style = if selected {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else {
+                t.body()
+            };
+            let shown: String = opt.chars().take(body_w.saturating_sub(6)).collect();
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {marker} {}. ", i + 1), t.fg(t.accent)),
+                Span::styled(shown, style),
+            ]));
+        }
+        // Custom-answer row.
+        let selected = a.sel == custom_idx;
+        let marker = if selected { g.pick } else { " " };
+        let style = if selected {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else {
+            t.dim()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} {}. ", custom_idx + 1), t.fg(t.accent)),
+            Span::styled("✎ type a custom answer…".to_string(), style),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "↓ type your answer in the input and press enter".to_string(),
+            t.dim(),
+        )));
+    }
 
     let content_w = lines
         .iter()
@@ -2926,7 +3018,6 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .unwrap_or(0) as u16;
     let w = (content_w + 4).clamp(40, max_w);
     let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(6).max(6));
-    // Sit it in the upper-middle so it doesn't cover the input the user answers in.
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
         y: (area.height.saturating_sub(h)) / 3,
@@ -2934,6 +3025,11 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         height: h,
     };
 
+    let footer = if !a.options.is_empty() && !a.custom {
+        " ↑↓ choose · enter select · esc = custom "
+    } else {
+        " type your answer below · enter to send "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -2941,7 +3037,8 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .title(Span::styled(
             format!(" {} question ", g.pending),
             Style::default().fg(t.info).add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ));
+        ))
+        .title_bottom(Span::styled(footer.to_string(), t.dim()));
 
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(block), rect);

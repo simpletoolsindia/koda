@@ -361,7 +361,7 @@ async fn headless(
                 }
                 let _ = reply.send(decision);
             }
-            Event::AskUser { question, reply } => {
+            Event::AskUser { question, options: _, reply } => {
                 // Headless has nobody to ask; dropping the sender makes the tool
                 // return its "no answer, proceed" result.
                 eprintln!("· agent asked: {question} (no user in headless mode)");

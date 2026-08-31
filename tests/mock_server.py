@@ -88,6 +88,14 @@ def script(step, is_subagent=False):
             return tool_call_frames("l2", "remember",
                 {"note": "the build command here is echo built"})
         return text_frames("Noted the build command.")
+    if MODE == "askopts":
+        # Ask the user with a dropdown of options.
+        if step == 0:
+            return tool_call_frames("a1", "ask_user", {
+                "question": "Which database should I use?",
+                "options": ["PostgreSQL", "SQLite", "MySQL"],
+            })
+        return text_frames("Got it.")
     if MODE == "correct_write":
         # koda WRITES svc.py using `logging` (populates its last_writes record).
         if step == 0:
@@ -141,6 +149,14 @@ def script(step, is_subagent=False):
             return tool_call_frames("call_d", "delegate",
                                     {"task": "find where the greeting lives"})
         return text_frames("The greeting is in demo.txt line 1, per the subagent.")
+
+    if MODE == "docread":
+        # Read a document fixture (path from DOC_PATH), then echo a short reply.
+        # Used by the doc-parsing e2e to prove read_file extracts DOCX/XLSX/PDF.
+        if step == 0:
+            return tool_call_frames("d1", "read_file",
+                {"path": os.environ.get("DOC_PATH", "tiny.csv")})
+        return text_frames("Read the document.")
 
     if MODE == "empty":
         return []
@@ -219,6 +235,19 @@ class Handler(BaseHTTPRequestHandler):
             m.get("role") == "system" and "research subagent" in str(m.get("content", ""))
             for m in messages
         )
+
+        # In docread mode, dump any tool-result content we receive so the e2e
+        # can assert on the exact text read_file extracted from the document.
+        if MODE == "docread":
+            cap = os.environ.get("DOC_CAPTURE")
+            if cap:
+                with open(cap, "a") as fh:
+                    for m in messages:
+                        if m.get("role") == "tool" or (
+                            m.get("role") == "user"
+                            and str(m.get("content", "")).startswith("Tool result")
+                        ):
+                            fh.write(str(m.get("content", "")) + "\n")
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")

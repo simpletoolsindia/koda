@@ -241,11 +241,21 @@ pub fn specs() -> Vec<Spec> {
                    decision genuinely needs the user — an ambiguous requirement, a choice \
                    between real alternatives, a missing detail you cannot infer. Do not use \
                    it for things you can determine yourself by reading the code. Keep the \
-                   question short and specific; the user's reply comes back as the result.",
+                   question short and specific. When there are a few clear alternatives, pass \
+                   them as `options` — the user picks one from a dropdown (a 'custom answer' \
+                   entry is always added so they can type something else). The user's reply \
+                   comes back as the result.",
             params: json!({
                 "type": "object",
                 "properties": {
-                    "question": str_prop("The question to put to the user, one or two sentences.")
+                    "question": str_prop("The question to put to the user, one or two sentences."),
+                    "options": {
+                        "type": "array",
+                        "description": "Optional list of concise choices to offer as a \
+                                        dropdown. A 'custom answer' entry is added \
+                                        automatically. Omit for a free-text question.",
+                        "items": { "type": "string" }
+                    }
                 },
                 "required": ["question"]
             }),
