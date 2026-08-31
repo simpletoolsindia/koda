@@ -72,6 +72,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/tools", "list available tools"),
     ("/think", "show or hide model reasoning"),
     ("/motion", "turn animation on or off"),
+    ("/mouse", "toggle mouse capture (off = select & copy text)"),
     ("/reveal", "toggle progressive text reveal"),
     ("/copy", "copy last reply to the clipboard"),
     ("/cwd", "show the workspace root"),
@@ -84,6 +85,32 @@ struct Pending {
     preview: Option<String>,
     reply: Option<oneshot::Sender<Approval>>,
     scroll: u16,
+}
+
+/// One-line feature hints, surfaced on the welcome and rotated in the bottom
+/// bar so a user discovers what koda can do without reading the whole /help.
+const TIPS: &[&str] = &[
+    "type / to see every command · ↑↓ to pick",
+    "@file mentions a file · @image.png attaches an image to a vision model",
+    "/auto cycles ask → auto-write → full-auto autonomous mode",
+    "/orc <task> splits work across role agents (dev, qa, tester…)",
+    "/mouse off lets you select and copy text with the mouse",
+    "/settings opens an interactive control page for everything",
+    "/search <text> finds past conversations · /fork branches one",
+    "ctrl+p cycles plan → execute → vibe mode",
+    "paste a big block and it becomes @paste1, expanded when you send",
+    "/theme neon · tokyo-night · dracula … switch palette live",
+    "the agent can ask you a question mid-task — just answer it",
+    "/undo reverts the whole last turn's file changes",
+];
+
+/// A tip chosen from wall-clock time, so it rotates without any state.
+fn random_tip() -> &'static str {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as usize;
+    TIPS[n % TIPS.len()]
 }
 
 /// Width bands. Every layout decision reads these instead of raw numbers.
@@ -142,6 +169,8 @@ pub struct App {
     log_version: u64,
     /// Emit DEC 2026 markers around each frame.
     sync_output: bool,
+    /// Whether the mouse is currently captured (wheel scroll vs native select).
+    mouse_capture: bool,
     /// Last size we drew at, to drop the duplicate resize events emulators send.
     last_size: (u16, u16),
     /// Set after a destructive key so a second press confirms.
@@ -165,6 +194,9 @@ pub struct App {
     root: PathBuf,
     branch: Option<String>,
     queued: VecDeque<String>,
+    /// Large pasted blocks, shown in the composer as @paste1, @paste2… and
+    /// expanded back to full text on submit. Keeps the input readable.
+    pastes: Vec<String>,
     quit: bool,
     last_ctrl_c: Option<Instant>,
     cancel: Arc<AtomicBool>,
@@ -355,83 +387,41 @@ impl App {
             return;
         }
 
-        let mut p = Panel::new(format!("koda {}", env!("CARGO_PKG_VERSION")), width)
-            .footer("ctrl+p mode · @ file · /help");
-
-        // Eyebrow tagline: one dim line under the heading for hierarchy, then a
-        // blank, so the card breathes instead of opening on a dense block.
-        p.row(vec![Span::styled(
-            "terminal coding agent for local models".to_string(),
-            t.dim(),
-        )]);
-        p.blank();
-
-        let mut facts: Vec<(String, String)> = Vec::new();
-
-        let markers: [(&str, &str); 8] = [
-            ("Cargo.toml", "Rust"),
-            ("package.json", "Node"),
-            ("pyproject.toml", "Python"),
-            ("requirements.txt", "Python"),
-            ("go.mod", "Go"),
-            ("pom.xml", "Maven"),
-            ("Gemfile", "Ruby"),
-            ("Makefile", "Make"),
+        // KODA as block-letter ANSI art, in the accent colour. The banner is
+        // the welcome — project, model and branch already live in the bottom
+        // bar, so they are not repeated here.
+        const ART: [&str; 5] = [
+            "██  ██  ██████  ██████   █████ ",
+            "██ ██  ██    ██ ██   ██ ██   ██",
+            "████   ██    ██ ██   ██ ███████",
+            "██ ██  ██    ██ ██   ██ ██   ██",
+            "██  ██  ██████  ██████  ██   ██",
         ];
-        let mut kinds: Vec<&str> = Vec::new();
-        for (f, k) in markers {
-            if self.root.join(f).exists() && !kinds.contains(&k) {
-                kinds.push(k);
-            }
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::default());
+        for (i, row) in ART.iter().enumerate() {
+            // A subtle two-tone gradient down the letters so the banner has depth.
+            let colour = if i < 2 { t.accent } else { t.accent_alt };
+            lines.push(Line::from(vec![
+                Span::raw("  ".to_string()),
+                Span::styled((*row).to_string(), t.emphasis(colour)),
+            ]));
         }
-        let project = match (kinds.is_empty(), &self.branch) {
-            (false, Some(b)) => format!("{} on {b}", kinds.join(" + ")),
-            (false, None) => kinds.join(" + "),
-            (true, Some(b)) => format!("on {b}"),
-            (true, None) => self.root.display().to_string(),
-        };
-        facts.push(("project".into(), project));
-        facts.push(("model".into(), cfg.model.clone()));
+        lines.push(Line::from(vec![
+            Span::raw("  ".to_string()),
+            Span::styled(
+                format!("terminal coding agent for local models · v{}", env!("CARGO_PKG_VERSION")),
+                t.dim(),
+            ),
+        ]));
+        lines.push(Line::default());
+        // One rotating tip so the first thing on screen also teaches a feature.
+        lines.push(Line::from(vec![
+            Span::styled("  tip  ".to_string(), t.emphasis(t.accent)),
+            Span::styled(random_tip().to_string(), t.body()),
+        ]));
+        lines.push(Line::default());
 
-        let recent = session::list(&self.root);
-        if let Some(last) = recent.first() {
-            facts.push((
-                "last".into(),
-                format!("{} {} {}", session::ago(last.modified), g.sep, last.title),
-            ));
-        }
-
-        let key_w = facts.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-        for (k, v) in &facts {
-            let room = p.inner().saturating_sub(key_w + 2);
-            let v: String = v.chars().take(room).collect();
-            p.row(vec![
-                Span::styled(format!("{k:<key_w$}  "), t.dim()),
-                Span::styled(v, t.body()),
-            ]);
-        }
-
-        p.blank();
-        for example in [
-            "what does this project do?",
-            "run the tests and fix what fails",
-            "add a --json flag to the CLI",
-        ] {
-            p.row(vec![
-                Span::styled(format!("{} ", g.bullet), t.fg(t.accent)),
-                Span::styled(example.to_string(), t.dim()),
-            ]);
-        }
-        if !recent.is_empty() {
-            p.blank();
-            p.row(vec![
-                Span::styled(format!("{} ", g.arrow), t.fg(t.accent)),
-                Span::styled("/resume".to_string(), t.fg(t.accent)),
-                Span::styled(" to pick up where you left off".to_string(), t.dim()),
-            ]);
-        }
-
-        let lines = p.render(&t, &g);
         self.transcript.raw(lines);
         self.follow = true;
     }
@@ -943,9 +933,21 @@ impl App {
 
     fn submit(&mut self) {
         let line = self.editor.take();
-        let trimmed = line.trim().to_string();
+        let mut trimmed = line.trim().to_string();
         if trimmed.is_empty() {
             return;
+        }
+        // Expand any @pasteN placeholders back to the full pasted text before
+        // this goes anywhere. Slash commands are expanded too (harmless — they
+        // rarely contain one), then the buffer is cleared for the next turn.
+        if !self.pastes.is_empty() {
+            for (i, body) in self.pastes.iter().enumerate() {
+                let token = format!("@paste{}", i + 1);
+                if trimmed.contains(&token) {
+                    trimmed = trimmed.replace(&token, body);
+                }
+            }
+            self.pastes.clear();
         }
         if let Some(rest) = trimmed.strip_prefix('/') {
             self.slash(rest);
@@ -1175,6 +1177,19 @@ impl App {
                 self.transcript.raw(lines);
                 self.follow = true;
             }
+            "mouse" | "select" => {
+                // Toggling capture off hands click-drag back to the terminal so
+                // the user can select and copy text; on restores wheel-scroll.
+                self.mouse_capture = !self.mouse_capture;
+                let mut out = std::io::stdout();
+                if self.mouse_capture {
+                    let _ = execute!(out, EnableMouseCapture);
+                    self.note("mouse capture on — wheel scrolls; text selection is the terminal's");
+                } else {
+                    let _ = execute!(out, DisableMouseCapture);
+                    self.note("mouse capture off — select & copy text with the mouse; scroll with pgup/pgdn");
+                }
+            }
             "motion" => {
                 // Motion is a preference, so it is toggleable at runtime rather
                 // than only through config.
@@ -1303,14 +1318,37 @@ impl App {
         let width = self.panel_width();
         let mut lines = Vec::new();
 
-        let mut p = Panel::new("Commands", width).footer("type / to filter");
-        for row in panel::key_value_rows(COMMANDS, p.inner(), &self.theme) {
-            p.row(row);
+        // Detailed examples first — the most useful part, and it teaches by
+        // showing real usage rather than just listing names.
+        const EXAMPLES: &[(&str, &str)] = &[
+            ("/model qwen2.5-coder:14b", "switch to a specific model"),
+            ("/mode plan", "read-only planning; also execute, vibe"),
+            ("/auto", "cycle ask → auto-write → full-auto"),
+            ("/search discount bug", "find past chats mentioning that text"),
+            ("/fork", "branch this chat, keep the original"),
+            ("/orc build a login page", "split the task across role agents"),
+            ("/theme tokyo-night", "switch palette by name"),
+            ("/mouse", "off = select & copy text with the mouse"),
+            ("@src/main.rs", "attach a file (or an image) to your message"),
+            ("/undo", "revert the last turn's file changes"),
+        ];
+        let mut ex = Panel::new("Examples", width).footer("type a command, or just talk");
+        let cmd_w = EXAMPLES.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+        for (cmd, what) in EXAMPLES {
+            let room = ex.inner().saturating_sub(cmd_w + 3);
+            let what: String = what.chars().take(room).collect();
+            ex.row(vec![
+                Span::styled(
+                    format!("{cmd:<cmd_w$}   "),
+                    self.theme.fg(self.theme.accent),
+                ),
+                Span::styled(what, self.theme.dim()),
+            ]);
         }
-        lines.extend(p.render(&self.theme, &self.glyphs));
+        lines.extend(ex.render(&self.theme, &self.glyphs));
         lines.push(Line::default());
 
-        let mut k = Panel::new("Keys", width).footer("y once · a always · n deny at a prompt");
+        let mut k = Panel::new("Keys", width).footer("type / for the full command list");
         for row in panel::key_value_rows(KEYS, k.inner(), &self.theme) {
             k.row(row);
         }
@@ -1735,6 +1773,12 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
         (false, _) => {
             left.push(Span::styled(format!(" {} ", g.ready), t.emphasis(t.success)));
             left.push(Span::styled("ready".to_string(), t.dim()));
+            // When idle with an empty composer, rotate a feature tip so the bar
+            // teaches the app instead of sitting blank. Kept short and dim.
+            if app.editor.is_empty() && !m.tiny {
+                left.push(Span::styled(format!("  {} ", g.sep), t.dim()));
+                left.push(Span::styled(random_tip().to_string(), t.dim()));
+            }
         }
     }
 
@@ -1949,34 +1993,37 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
         return;
     }
 
-    // Otherwise lay the names out across as many rows as it takes, so a growing
-    // command list never silently clips entries off the right edge (which would
-    // hide real commands and, worse, hide them non-deterministically as the
-    // terminal width changes). The selected command (arrow-navigable) is shown
-    // in the accent colour and bold.
+    // Vertical list: one command per row with its description, selected row
+    // reversed. Grows upward from the input like the file-mention popup, capped
+    // to a sensible height with the selection kept in view.
     let sel = app.cmd_sel.min(hits.len().saturating_sub(1));
-    let avail = input.width.max(8) as usize;
+    let name_w = hits.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    let max_rows = 10usize;
+    // Window the list around the selection so a long list stays navigable.
+    let start = if sel >= max_rows { sel + 1 - max_rows } else { 0 };
+    let shown: Vec<&&(&str, &str)> = hits.iter().skip(start).take(max_rows).collect();
+    let inner_w = input.width.max(10) as usize;
+
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut row: Vec<Span<'static>> = Vec::new();
-    let mut used = 0usize;
-    for (i, (name, _)) in hits.iter().enumerate() {
-        let w = name.len() + 1; // name plus a separating space
-        if used + w > avail && !row.is_empty() {
-            lines.push(Line::from(std::mem::take(&mut row)));
-            used = 0;
-        }
-        let style = if i == sel {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    for (i, (name, desc)) in shown.iter().map(|h| **h).enumerate() {
+        let idx = start + i;
+        let selected = idx == sel;
+        let marker = if selected { "›" } else { " " };
+        let desc: String = desc.chars().take(inner_w.saturating_sub(name_w + 6)).collect();
+        let name_style = if selected {
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
-            t.dim()
+            t.fg(t.accent)
         };
-        row.push(Span::styled(format!("{name} "), style));
-        used += w;
+        let line = Line::from(vec![
+            Span::styled(format!(" {marker} "), t.fg(t.accent)),
+            Span::styled(format!("{name:<name_w$}  "), name_style),
+            Span::styled(desc, t.dim()),
+        ]);
+        lines.push(line);
     }
-    if !row.is_empty() {
-        lines.push(Line::from(row));
-    }
-    let h = (lines.len() as u16).min(4);
+
+    let h = (lines.len() as u16).min(max_rows as u16);
     if input.y < h {
         return;
     }
@@ -2225,15 +2272,13 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
 
 type Term = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
 
-fn setup() -> Result<Term> {
+fn setup(mouse: bool) -> Result<Term> {
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(
-        out,
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
-    )?;
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    if mouse {
+        execute!(out, EnableMouseCapture)?;
+    }
     let backend = ratatui::backend::CrosstermBackend::new(out);
     let mut term = Terminal::new(backend)?;
     term.clear()?;
@@ -2316,6 +2361,7 @@ pub async fn run(
         // nor the markers, or it tears *worse*. Both the draw wrapper below and
         // the frame budget derive from this one capability-aware flag.
         sync_output: cfg.sync_output && anim::sync_trustworthy(),
+        mouse_capture: cfg.mouse_capture,
         last_size: (0, 0),
         confirm: None,
         files: FileIndex::new(),
@@ -2329,6 +2375,7 @@ pub async fn run(
         branch: git_branch(&root),
         root: root.clone(),
         queued: VecDeque::new(),
+        pastes: Vec::new(),
         quit: false,
         last_ctrl_c: None,
         cancel: cancel.clone(),
@@ -2341,7 +2388,7 @@ pub async fn run(
     // instead of after a scan-thread round trip.
     app.files.ensure(&root);
 
-    let mut term = setup()?;
+    let mut term = setup(cfg.mouse_capture)?;
     // The welcome card is laid out to a fixed width, so it needs the real
     // terminal size — which the first draw has not happened to report yet.
     if let Ok(size) = term.size() {
@@ -2466,12 +2513,23 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
             true
         }
         event::Event::Paste(text) => {
-            // Buffer the paste into the composer even while an approval prompt
-            // is up. Keystrokes during a prompt are y/a/n decisions, but pasted
-            // clipboard text is clearly intended as input — dropping it loses
-            // the user's content. It sits in the input box, unsent (submit is
-            // gated while pending), ready for when the prompt resolves.
-            app.editor.insert(text.trim_end_matches('\n'));
+            // A large paste (long or multi-line) is stashed and shown as a short
+            // @pasteN token so the composer stays readable; it is expanded back
+            // to the full text on submit. Small pastes insert inline as before.
+            let trimmed = text.trim_end_matches('\n');
+            let big = trimmed.len() > 200 || trimmed.contains('\n');
+            if big {
+                app.pastes.push(trimmed.to_string());
+                let token = format!("@paste{}", app.pastes.len());
+                let lines = trimmed.lines().count().max(1);
+                app.editor.insert(&token);
+                app.note(format!(
+                    "pasted {} lines as {token} — it expands when you send",
+                    lines
+                ));
+            } else {
+                app.editor.insert(trimmed);
+            }
             true
         }
         // Emulators send two or three resize events for one drag; only the ones

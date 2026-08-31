@@ -329,6 +329,42 @@ pub const DRACULA: Theme = Theme {
     colored: true,
 };
 
+/// A vibrant, high-saturation dark palette — electric cyan, hot magenta, and
+/// lime on a deep indigo, in the synthwave/neon vein. The most colourful theme
+/// koda ships; good for a terminal that can do true colour and a user who wants
+/// the UI to pop.
+pub const NEON: Theme = Theme {
+    name: "neon",
+    text: rgb(233, 236, 255),
+    muted: rgb(122, 130, 180),
+    accent: rgb(0, 245, 212),      // electric cyan-green
+    accent_alt: rgb(255, 71, 205), // hot magenta
+    success: rgb(88, 255, 156),    // lime
+    warning: rgb(255, 199, 64),    // amber
+    error: rgb(255, 74, 110),      // neon red-pink
+    info: rgb(84, 173, 255),       // bright blue
+    border: rgb(58, 62, 110),
+    border_focus: rgb(0, 245, 212),
+    surface: rgb(26, 27, 54),
+    bg_user: Some(rgb(38, 26, 54)),      // faint magenta tint
+    bg_tool: Some(rgb(20, 24, 52)),      // deep indigo
+    bg_tool_err: Some(rgb(48, 22, 40)),  // faint red tint
+    bg_panel: Some(rgb(24, 26, 58)),
+    bg_selected: Some(rgb(52, 40, 92)),
+    heading: rgb(0, 245, 212),
+    tool_title: rgb(255, 71, 205),
+    diff_add: rgb(88, 255, 156),
+    diff_del: rgb(255, 74, 110),
+    diff_hunk: rgb(178, 148, 255),
+    syn_keyword: rgb(255, 71, 205),
+    syn_string: rgb(88, 255, 156),
+    syn_number: rgb(255, 199, 64),
+    syn_comment: rgb(122, 130, 180),
+    syn_func: rgb(0, 245, 212),
+    syn_type: rgb(178, 148, 255),
+    colored: true,
+};
+
 pub const ROSE_PINE: Theme = Theme {
     name: "rose-pine",
     text: rgb(224, 222, 244),
@@ -395,6 +431,7 @@ pub const SOLARIZED_LIGHT: Theme = Theme {
 
 pub const THEMES: &[Theme] = &[
     DARK,
+    NEON,
     ANSI,
     CATPPUCCIN_MOCHA,
     TOKYO_NIGHT,
@@ -426,10 +463,11 @@ pub fn resolve(configured: &str) -> Theme {
         return MONO;
     }
     match configured.trim() {
-        // Default to a known dark palette: the block fills that give the
-        // transcript its shape need colours we can actually predict.
-        "" | "auto" => DARK,
-        other => by_name(other).unwrap_or(DARK),
+        // Default to the vibrant NEON palette: the block fills that give the
+        // transcript its shape need colours we can predict, and a colourful
+        // default is what most users want out of the box.
+        "" | "auto" => NEON,
+        other => by_name(other).unwrap_or(NEON),
     }
 }
 
@@ -635,9 +673,9 @@ mod tests {
 
     #[test]
     fn unknown_theme_falls_back_to_the_default() {
-        assert_eq!(resolve("nonexistent").name, "dark");
-        assert_eq!(resolve("").name, "dark");
-        assert_eq!(resolve("auto").name, "dark");
+        assert_eq!(resolve("nonexistent").name, "neon");
+        assert_eq!(resolve("").name, "neon");
+        assert_eq!(resolve("auto").name, "neon");
         assert_eq!(resolve("nord").name, "nord");
         assert_eq!(resolve("ansi").name, "ansi");
     }

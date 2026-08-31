@@ -44,6 +44,7 @@ impl Panel {
         self.rows.push(Line::from(spans));
     }
 
+    #[allow(dead_code)]
     pub fn blank(&mut self) {
         self.rows.push(Line::default());
     }

@@ -7,7 +7,7 @@
 //! own message) get exactly one accent each.
 
 use crate::md;
-use crate::panel::{self, Panel};
+use crate::panel::{self};
 use crate::theme::{Glyphs, Theme};
 use crate::tools::{Todo, TodoStatus};
 use ratatui::style::Modifier;
@@ -792,40 +792,66 @@ fn render_item(
         // the work, not a line in the log, so it gets a card with progress.
         Item::Todos(items) => {
             let done = items.iter().filter(|i| i.status == TodoStatus::Done).count();
-            let total = items.len().max(1);
-            let frac = done as f64 / total as f64;
-            let complete = done == items.len();
-            let card_w = width.clamp(30, 76);
-            // A determinate gauge keyed purely on done/total — no clock, so it is
-            // identical with motion on or off and costs nothing when idle.
-            let mut p = Panel::new("plan", card_w).footer(format!(
-                "{done}/{} {}{}",
-                items.len(),
-                panel::gauge(frac, 12, g),
-                if complete { "  done" } else { "" }
-            ));
-            for it in items {
-                let (icon, icon_style, text_style) = match it.status {
+            let total = items.len();
+            let any_active = items.iter().any(|i| i.status == TodoStatus::Active);
+            let complete = done == total && total > 0;
+            let avail = width.clamp(30, 100);
+
+            // Header: a status glyph, "Tasks", and the count. The glyph reflects
+            // the whole plan — done when finished, active while a step runs,
+            // pending otherwise.
+            let head_glyph = if complete {
+                g.ok
+            } else if any_active {
+                g.running
+            } else {
+                g.pending
+            };
+            let head_style = if complete {
+                t.emphasis(t.success)
+            } else if any_active {
+                t.emphasis(t.warning)
+            } else {
+                t.fg(t.accent)
+            };
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{head_glyph} "), head_style),
+                Span::styled("Tasks".to_string(), t.emphasis(t.heading)),
+                Span::styled(format!(" ({total})"), t.dim()),
+            ]));
+
+            // One tree row per task: ├── for all but the last, └── for the last.
+            for (i, it) in items.iter().enumerate() {
+                let last = i + 1 == items.len();
+                let branch = if last { g.last } else { g.branch };
+                let (glyph, glyph_style, text_style, tag) = match it.status {
                     TodoStatus::Done => (
                         g.ok,
                         t.emphasis(t.success),
                         t.dim().add_modifier(Modifier::CROSSED_OUT),
+                        " [done]",
                     ),
-                    // The step in flight is the only bold row, so the eye lands
-                    // on "what is happening now" without searching.
                     TodoStatus::Active => (
                         g.running,
                         t.emphasis(t.warning),
                         t.body().add_modifier(Modifier::BOLD),
+                        "",
                     ),
-                    TodoStatus::Pending => (g.pending, t.dim(), t.dim()),
+                    TodoStatus::Pending => (g.pending, t.dim(), t.dim(), ""),
                 };
-                p.row(vec![
-                    Span::styled(format!("{icon} "), icon_style),
-                    Span::styled(it.text.clone(), text_style),
-                ]);
+                let text: String = it.text.chars().take(avail.saturating_sub(14)).collect();
+                let mut row = vec![
+                    Span::styled(format!(" {branch} "), t.dim()),
+                    Span::styled(format!("{glyph} "), glyph_style),
+                    Span::styled(format!("{}. ", i + 1), t.dim()),
+                    Span::styled(text, text_style),
+                ];
+                if !tag.is_empty() {
+                    row.push(Span::styled(tag.to_string(), t.emphasis(t.success)));
+                }
+                lines.push(Line::from(row));
             }
-            let mut lines = p.render(t, g);
             lines.push(Line::default());
             lines
         }
