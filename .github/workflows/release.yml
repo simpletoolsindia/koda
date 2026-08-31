@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: "1.85" # min version that supports edition2024 deps in the tree
+  RUST_TOOLCHAIN: "stable" # deps track latest MSRV; stable always satisfies them
 
 jobs:
   # ---------------------------------------------------------------------------
