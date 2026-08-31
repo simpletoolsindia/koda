@@ -183,6 +183,13 @@ impl Metrics {
     }
 }
 
+/// Which action a `choices` overlay selection performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChoiceKind {
+    Mode,
+    Model,
+}
+
 pub struct App {
     cmd_tx: mpsc::UnboundedSender<Command>,
     transcript: Transcript,
@@ -246,6 +253,12 @@ pub struct App {
     files_ready: bool,
     /// Session picker: the list, and which row is selected.
     picker: Option<(Vec<Summary>, usize)>,
+    /// A generic selectable list overlay (mode / model pickers): the choices,
+    /// the selected index, and which kind so Enter applies the right action.
+    choices: Option<(Vec<String>, usize, ChoiceKind)>,
+    /// Set when the user ran `/model` with no argument: the next model list that
+    /// arrives opens a picker rather than being printed.
+    model_picker_pending: bool,
     /// Provider setup overlay.
     setup: Option<Setup>,
     /// Interactive settings overlay.
@@ -403,6 +416,14 @@ impl App {
                         format!("{} model(s) — ctrl+n to cycle", list.len())
                     });
                     s.available = list;
+                } else if self.model_picker_pending {
+                    self.model_picker_pending = false;
+                    if list.is_empty() {
+                        self.note("no models reported — check the endpoint (/url) and key (/setup)");
+                    } else {
+                        let cur = list.iter().position(|m| m == &self.model).unwrap_or(0);
+                        self.choices = Some((list, cur, ChoiceKind::Model));
+                    }
                 } else {
                     self.show_models(list);
                 }
@@ -623,6 +644,10 @@ impl App {
             self.picker_key(key);
             return;
         }
+        if self.choices.is_some() {
+            self.choices_key(key);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -659,6 +684,11 @@ impl App {
         // Interactive slash autocomplete: navigate and accept the command list.
         let cmds = self.command_matches();
         if cmds.len() > 1 && !ctrl && !alt {
+            // If what's typed is already an exact command (e.g. "/mode" while
+            // "/model" and "/models" also match), Enter should RUN it, not
+            // complete to a longer neighbour. Tab still completes.
+            let typed = self.editor.buf.trim();
+            let exact = cmds.iter().any(|c| *c == typed);
             match key.code {
                 KeyCode::Up => {
                     self.cmd_sel = self.cmd_sel.saturating_sub(1);
@@ -667,6 +697,9 @@ impl App {
                 KeyCode::Down => {
                     self.cmd_sel = (self.cmd_sel + 1).min(cmds.len() - 1);
                     return;
+                }
+                KeyCode::Enter if exact => {
+                    // Fall through to normal submit below.
                 }
                 KeyCode::Tab | KeyCode::Enter => {
                     let pick = cmds[self.cmd_sel.min(cmds.len() - 1)];
@@ -802,6 +835,38 @@ impl App {
                 .error(format!("could not open that session: {e}")),
         }
     }
+
+    /// Key handling for the generic mode/model picker overlay.
+    fn choices_key(&mut self, key: KeyEvent) {
+        let Some((list, sel, kind)) = &mut self.choices else { return };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.choices = None,
+            KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                *sel = (*sel + 1).min(list.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                let kind = *kind;
+                let chosen = list.get(*sel).cloned();
+                self.choices = None;
+                if let Some(val) = chosen {
+                    match kind {
+                        ChoiceKind::Mode => {
+                            if let Ok(m) = val.parse::<Mode>() {
+                                self.set_mode(m);
+                            }
+                        }
+                        ChoiceKind::Model => {
+                            self.model = val.clone();
+                            self.send(Command::SetModel(val));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
 
     fn setup_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1203,8 +1268,10 @@ impl App {
             "keys" => self.show_help(),
             "model" => {
                 if arg.is_empty() {
-                    let m = self.model.clone();
-                    self.note(format!("model: {m}"));
+                    // No argument: fetch the model list and open a picker.
+                    self.model_picker_pending = true;
+                    self.note("fetching models…");
+                    self.send(Command::ListModels);
                 } else {
                     self.model = arg.clone();
                     self.send(Command::SetModel(arg));
@@ -1213,8 +1280,11 @@ impl App {
             "models" => self.send(Command::ListModels),
             "mode" => match arg.as_str() {
                 "" => {
-                    let m = self.mode;
-                    self.note(format!("mode: {m} — ctrl+p to cycle"));
+                    // No argument: open a selectable list of the three modes,
+                    // pre-selecting the current one.
+                    let modes = vec!["plan".to_string(), "execute".to_string(), "vibe".to_string()];
+                    let cur = modes.iter().position(|m| m == &self.mode.to_string()).unwrap_or(0);
+                    self.choices = Some((modes, cur, ChoiceKind::Mode));
                 }
                 other => match other.parse::<Mode>() {
                     Ok(m) => self.set_mode(m),
@@ -1970,6 +2040,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     if app.picker.is_some() {
         session_picker(f, app, area);
     }
+    if app.choices.is_some() {
+        choices_popup(f, app, area);
+    }
     if let Some(s) = &app.setup {
         setup::draw(f, area, s, &app.theme, &app.glyphs);
     }
@@ -2658,6 +2731,67 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
+/// A generic centered picker for the /mode and /model overlays.
+fn choices_popup(f: &mut Frame, app: &App, area: Rect) {
+    let Some((list, sel, kind)) = &app.choices else { return };
+    let t = &app.theme;
+    let g = &app.glyphs;
+    let title = match kind {
+        ChoiceKind::Mode => "select mode",
+        ChoiceKind::Model => "select model",
+    };
+    let w = area.width.saturating_sub(6).clamp(30, 80).min(area.width);
+    let rows = (list.len() as u16).clamp(1, 14);
+    let h = (rows + 2).min(area.height.saturating_sub(2));
+    let rect = Rect {
+        x: (area.width.saturating_sub(w)) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    let inner_w = rect.width.saturating_sub(4) as usize;
+    let visible = h.saturating_sub(2) as usize;
+    let first = sel.saturating_sub(visible.saturating_sub(1));
+    let lines: Vec<Line> = list
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(i, s)| {
+            let selected = i == *sel;
+            let marker = if selected { g.pick } else { " " };
+            let shown: String = s.chars().take(inner_w).collect();
+            let style = if selected {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            } else {
+                t.body()
+            };
+            Line::from(vec![
+                Span::styled(format!(" {marker} "), t.fg(t.accent)),
+                Span::styled(shown, style),
+            ])
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(t.fg(t.border_focus))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(t.border_focus).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(vec![
+            Span::styled(" ↑↓", t.fg(t.accent)),
+            Span::styled(" choose  ", t.dim()),
+            Span::styled("enter", t.fg(t.accent)),
+            Span::styled(" select  ", t.dim()),
+            Span::styled("esc", t.fg(t.accent)),
+            Span::styled(" cancel ", t.dim()),
+        ]));
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
     let Some(p) = &app.pending else { return };
     let t = &app.theme;
@@ -2924,6 +3058,8 @@ pub async fn run(
         queued: VecDeque::new(),
         watch_add: Vec::new(),
         watch_clear: false,
+        choices: None,
+        model_picker_pending: false,
         pastes: Vec::new(),
         quit: false,
         last_ctrl_c: None,
