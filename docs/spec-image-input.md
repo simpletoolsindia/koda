@@ -38,3 +38,23 @@ End-to-end: `@image.png` mention → `data:` URL → OpenAI multimodal `content`
 6. Optional magic-byte MIME sniff (no dep).
 
 Dependency stance: reuse `tools::base64_encode`; Cargo.toml unchanged.
+
+## Implemented: vision detection + OCR fallback
+
+- `llm::model_is_vision(model) -> bool` (llm.rs): substring heuristic over the
+  model id (vl, vision, llava, qwen2-vl, minicpm-v, gemma-3, llama-3.2, pixtral,
+  gpt-4o, gemini, glm-4v, …). False negatives only downgrade to OCR, never a
+  wrong answer.
+- `Agent::user_message` now branches on capability:
+  - vision model → attach the image as a data URL (as before);
+  - non-vision + `ocr = true` → run `tools::ocr_image` (shells out to the
+    `tesseract` CLI, `tesseract <img> stdout`) and fold the recognized text into
+    the message as an `[OCR text of …]` block;
+  - non-vision + OCR off → skip the image with a notice pointing at `/settings`.
+- `ocr` config flag (default false) + a **image ocr** settings toggle. No new
+  Rust dependency; if tesseract isn't installed, `ocr_image` returns a clear,
+  actionable error and the image is skipped.
+
+Extensions were also broadened to png/jpg/jpeg/gif/webp/bmp/tiff/avif/svg.
+Still open (lower priority): bare-path (non-`@`) attach, magic-byte MIME sniff,
+and a separate `max_image_bytes`.

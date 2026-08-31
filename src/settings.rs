@@ -30,6 +30,7 @@ pub enum Row {
     SearchBackend,
     SearxUrl,
     WebFetch,
+    Ocr,
     Codegraph,
     Debug,
     WebUi,
@@ -41,7 +42,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 20] = [
+    pub const ALL: [Row; 21] = [
         Row::Mode,
         Row::Autonomy,
         Row::Reasoning,
@@ -55,6 +56,7 @@ impl Row {
         Row::SearchBackend,
         Row::SearxUrl,
         Row::WebFetch,
+        Row::Ocr,
         Row::Codegraph,
         Row::Debug,
         Row::WebUi,
@@ -79,6 +81,7 @@ impl Row {
             Row::SearchBackend => "search backend",
             Row::SearxUrl => "searxng url",
             Row::WebFetch => "web fetch",
+            Row::Ocr => "image ocr",
             Row::Codegraph => "code graph",
             Row::Debug => "debug capture",
             Row::WebUi => "web ui",
@@ -104,6 +107,7 @@ impl Row {
             Row::SearchBackend => "2) duckduckgo (no setup) or searxng",
             Row::SearxUrl => "3) enter to edit your SearXNG address",
             Row::WebFetch => "let the agent GET a URL and read it as text",
+            Row::Ocr => "OCR images (tesseract) when the model can't see them",
             Row::Codegraph => "scan the project into a symbol graph on open",
             Row::Debug => "dump raw requests/responses to the debug dir",
             Row::WebUi => "serve the React log/debug UI on 127.0.0.1 (restart to apply)",
@@ -220,6 +224,7 @@ impl Settings {
             }
             Row::SearxUrl | Row::SystemPrompt => {} // handled above
             Row::WebFetch => self.cfg.web_fetch = !self.cfg.web_fetch,
+            Row::Ocr => self.cfg.ocr = !self.cfg.ocr,
             Row::Codegraph => self.cfg.codegraph = !self.cfg.codegraph,
             Row::Debug => {
                 self.cfg.debug = !self.cfg.debug;
@@ -297,6 +302,7 @@ impl Settings {
                 }
             }
             Row::WebFetch => on(self.cfg.web_fetch),
+            Row::Ocr => on(self.cfg.ocr),
             Row::Codegraph => on(self.cfg.codegraph),
             Row::Debug => on(self.cfg.debug),
             Row::WebUi => {

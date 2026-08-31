@@ -1346,6 +1346,10 @@ impl Agent {
     /// a text-only model simply never sees the extra content parts.
     fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
         let mut images = Vec::new();
+        // OCR'd text blocks, appended to the message when the model can't see
+        // images (and OCR is enabled) so the content isn't simply lost.
+        let mut ocr_blocks: Vec<String> = Vec::new();
+        let vision = crate::llm::model_is_vision(&self.model);
         for tok in input.split_whitespace() {
             let Some(raw) = tok.strip_prefix('@') else {
                 continue;
@@ -1360,17 +1364,47 @@ impl Agent {
             } else {
                 self.ctx.root.join(path)
             };
-            // Cap attached images at the same ceiling as a file read, so a huge
-            // asset can't blow up the request.
-            match tools::image_data_url(&full, self.cfg.max_file_bytes) {
-                Ok(url) => {
-                    images.push(url);
-                    let _ = tx.send(Event::Notice(format!("attached image {raw}")));
+            // Path 1 — a vision model: attach the image as a data URL, capped at
+            // the file-read ceiling so a huge asset can't blow up the request.
+            if vision {
+                match tools::image_data_url(&full, self.cfg.max_file_bytes) {
+                    Ok(url) => {
+                        images.push(url);
+                        let _ = tx.send(Event::Notice(format!("attached image {raw}")));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::Notice(format!("could not attach {raw}: {e}")));
+                    }
                 }
-                Err(e) => {
-                    let _ = tx.send(Event::Notice(format!("could not attach {raw}: {e}")));
-                }
+                continue;
             }
+            // Path 2 — the model isn't vision-capable. If OCR is on, extract the
+            // image's text with tesseract and inject that instead; otherwise say
+            // why the image was skipped.
+            if self.cfg.ocr {
+                match tools::ocr_image(&full) {
+                    Ok(text) if !text.is_empty() => {
+                        let _ = tx.send(Event::Notice(format!("OCR'd image {raw}")));
+                        ocr_blocks.push(format!("[OCR text of {raw}]\n{text}"));
+                    }
+                    Ok(_) => {
+                        let _ = tx.send(Event::Notice(format!("OCR found no text in {raw}")));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::Notice(format!("could not OCR {raw}: {e}")));
+                    }
+                }
+            } else {
+                let _ = tx.send(Event::Notice(format!(
+                    "skipped image {raw}: model '{}' isn't vision-capable (enable OCR in /settings)",
+                    self.model
+                )));
+            }
+        }
+        if !ocr_blocks.is_empty() {
+            // Fold OCR'd text into the message so the model actually receives it.
+            let combined = format!("{input}\n\n{}", ocr_blocks.join("\n\n"));
+            return Message::user(combined);
         }
         if images.is_empty() {
             Message::user(input)

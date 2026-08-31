@@ -322,6 +322,14 @@ aligned table with a header rule, so the model reads columns reliably. Images
 Word and Excel is designed in [docs/spec-doc-parsing.md](docs/spec-doc-parsing.md)
 and gated behind a Cargo feature so the default binary stays small.
 
+**OCR fallback.** If you attach an image but your model isn't vision-capable,
+turn on `ocr` (in `/settings`, off by default) and koda extracts the image's
+text with the `tesseract` CLI and sends that instead — so a screenshot of an
+error still reaches a text-only model. Needs tesseract installed
+(`brew install tesseract`, `apt install tesseract-ocr`); if it's missing koda
+says so and skips the image. koda detects vision capability from the model name,
+so a vision model still gets the real image.
+
 ## Reasoning effort
 
 Thinking models can be told how hard to think. `/reason` cycles

@@ -203,6 +203,22 @@ impl Message {
     }
 }
 
+/// Heuristic: does this model id look vision-capable? Local model names are not
+/// standardized, so we match the substrings that reliably signal a multimodal
+/// checkpoint. False negatives are safe here — they only trigger the OCR
+/// fallback, which is a graceful downgrade, never a wrong answer.
+pub fn model_is_vision(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    const HINTS: &[&str] = &[
+        "vl", "vision", "llava", "bakllava", "moondream", "minicpm-v", "cogvlm",
+        "qwen2-vl", "qwen2.5-vl", "qwen-vl", "internvl", "pixtral", "gemma-3",
+        "gemma3", "llama-3.2", "llama3.2", "phi-3.5-vision", "phi-3-vision",
+        "gpt-4o", "gpt-4.1", "gpt-4-vision", "gpt-4-turbo", "claude-3", "gemini",
+        "smolvlm", "idefics", "florence", "janus", "glm-4v",
+    ];
+    HINTS.iter().any(|h| m.contains(h))
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub model: String,
@@ -752,6 +768,19 @@ mod tests {
         assert_eq!(parts[0]["text"], "what is this?");
         assert_eq!(parts[1]["type"], "image_url");
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn detects_vision_models_by_name() {
+        assert!(model_is_vision("qwen2.5-vl:7b"));
+        assert!(model_is_vision("llava:13b"));
+        assert!(model_is_vision("llama-3.2-vision"));
+        assert!(model_is_vision("gpt-4o"));
+        assert!(model_is_vision("minicpm-v"));
+        // Text-only coders are not vision.
+        assert!(!model_is_vision("qwen2.5-coder:14b"));
+        assert!(!model_is_vision("devstral-small"));
+        assert!(!model_is_vision("deepseek-coder"));
     }
 
     #[test]

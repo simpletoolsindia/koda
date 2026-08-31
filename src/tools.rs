@@ -1541,6 +1541,31 @@ pub fn image_data_url(path: &Path, max_bytes: usize) -> Result<String> {
     Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
 }
 
+/// Extract text from an image with the `tesseract` CLI (`tesseract <img> stdout`).
+/// This is the OCR fallback used when the model can't see images. It shells out
+/// rather than linking libtesseract, so it adds no build dependency and simply
+/// reports when tesseract isn't installed. Returns the recognized text.
+pub fn ocr_image(path: &Path) -> Result<String> {
+    let output = std::process::Command::new("tesseract")
+        .arg(path)
+        .arg("stdout")
+        .arg("--psm")
+        .arg("3")
+        .arg("quiet")
+        .output()
+        .map_err(|e| {
+            anyhow!(
+                "tesseract not available ({e}). Install it (`brew install tesseract`, \
+                 `apt install tesseract-ocr`) to OCR images for non-vision models."
+            )
+        })?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        bail!("tesseract failed: {}", err.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Standard base64 (RFC 4648), for image data URLs.
 pub fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1735,6 +1760,21 @@ mod tests {
         // A quoted field with an embedded comma stays one cell.
         assert!(out.contains("Lovelace, Ada"), "{out}");
         assert!(out.contains("name") && out.contains("role"), "{out}");
+    }
+
+    #[test]
+    fn ocr_image_errors_gracefully_without_tesseract() {
+        use std::path::Path;
+        // Whether or not tesseract exists, this must return a Result, never
+        // panic. When it's absent we get a clear, actionable error.
+        let r = ocr_image(Path::new("/nonexistent/image.png"));
+        if let Err(e) = r {
+            let msg = format!("{e:#}");
+            assert!(
+                msg.contains("tesseract") || msg.contains("failed"),
+                "unexpected error: {msg}"
+            );
+        }
     }
 
     #[test]

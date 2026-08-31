@@ -241,6 +241,12 @@ pub struct Config {
     #[serde(default)]
     pub web_fetch: bool,
 
+    /// When an image is attached but the model isn't vision-capable, extract its
+    /// text with the `tesseract` CLI and send that instead. Off by default;
+    /// requires tesseract to be installed. Toggle in `/settings`.
+    #[serde(default)]
+    pub ocr: bool,
+
     /// Attempts per request before giving up (1 = no retry).
     pub max_retries: u32,
     /// "debug" | "info" | "warn" | "error"
@@ -398,6 +404,7 @@ impl Default for Config {
             searx_url: String::new(),
             search_results: 6,
             web_fetch: false,
+            ocr: false,
             max_retries: 3,
             log_level: "info".into(),
             log_to_file: true,
@@ -656,6 +663,12 @@ search_results = 6
 # default — a model-supplied URL becomes a request from your machine. Toggle in
 # /settings.
 web_fetch = false
+
+# OCR fallback for images: when you attach an image (@shot.png) but the model
+# isn't vision-capable, extract the image's text with the `tesseract` CLI and
+# send that instead. Off by default; needs tesseract installed
+# (brew install tesseract / apt install tesseract-ocr). Toggle in /settings.
+ocr = false
 
 # Transient failures (connection reset, 429, 5xx, empty stream) are retried
 # with backoff before the agent gives up.
