@@ -248,6 +248,7 @@ These are the exact command names koda recognizes. Type `/` to see them all;
 | `/search <text>` (`/find`) | Search saved conversations by text. |
 | `/fork` (`/branch`) | Branch the current conversation into a copy. |
 | `/undo` | Put back the files the agent changed in the last turn. |
+| `/learn [accept <n>\|all\|reject <n>]` | Review rules koda learned from your usage; accept or reject them (needs `learning = true`). |
 | `/session` | Show which session is in play. |
 | `/theme [name]` | Show a palette swatch list, or switch to `name`. |
 | `/url [url]` (`/endpoint`) | Show or change the API base URL. |
@@ -529,6 +530,36 @@ hidden. It records three things:
 - **Files** — how many times each file has been edited, so koda learns which
   parts of the project you actually work in ("hot files") and can orient there
   first next session. This is observed fact, not inference about intent.
+
+### Learning from usage (`learning = true`, `/learn`)
+
+A step beyond memory: with `learning = true` (off by default), koda watches how
+you actually work and distils **explicit, inspectable rules** it can follow next
+time. It is fully local — no model, no network — and every artifact is a plain
+file under `<project>/.koda/learning/` you can read, edit, or delete.
+
+- **Observation log** — `.koda/learning/observations.jsonl` records the raw
+  signals koda sees each turn: the edits it made (the before/after of a write),
+  which commands succeeded or failed, and approvals you denied. Append-only and
+  greppable.
+- **Rule induction** — at the end of each turn koda mines those observations,
+  deterministically, into **candidate rules**: the command that actually works
+  here (and ones that only ever failed), the project's function-naming convention,
+  and library preferences. A rule needs repeated evidence before it is proposed,
+  so one-offs are ignored.
+- **Human-in-the-loop promotion** — candidates never touch the prompt on their
+  own. Run `/learn` to review them, then `/learn accept <n>` (or `/learn all`) to
+  accept, or `/learn reject <n>` to drop one. Accepted rules are written to
+  `.koda/learning/rules.md` and injected into the system prompt so koda follows
+  them automatically from then on.
+- **Kill switch** — set `learning = false`, or delete `.koda/learning/`, and the
+  whole loop is gone with no residue. If you edit or delete a rule, that is
+  authoritative.
+
+This is Phase 1 of a larger self-improvement design (see
+`docs/research-self-improvement.md`): later phases add a project-idiom miner for
+custom syntax/DSLs and a local semantic example library, all on the same
+all-local, fully-inspectable footing.
 
 ---
 

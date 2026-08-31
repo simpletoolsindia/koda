@@ -1308,6 +1308,30 @@ impl App {
                 self.send(Command::Clear);
             }
             "compact" => self.send(Command::Compact),
+            "learn" => {
+                use crate::agent::LearnAction;
+                let mut it = arg.split_whitespace();
+                let action = match it.next().unwrap_or("") {
+                    "" | "review" | "show" => LearnAction::Review,
+                    "all" => LearnAction::Accept(None),
+                    "accept" | "ok" | "yes" => match it.next().and_then(|n| n.parse::<usize>().ok()) {
+                        Some(n) => LearnAction::Accept(Some(n)),
+                        None => LearnAction::Accept(None),
+                    },
+                    "reject" | "no" | "drop" => match it.next().and_then(|n| n.parse::<usize>().ok()) {
+                        Some(n) => LearnAction::Reject(n),
+                        None => {
+                            self.note("usage: /learn reject <n>");
+                            return;
+                        }
+                    },
+                    _ => {
+                        self.note("usage: /learn [accept <n> | all | reject <n>]");
+                        return;
+                    }
+                };
+                self.send(Command::Learn(action));
+            }
             "auto" | "autonomy" => {
                 // `/auto` cycles ask → auto-write → full-auto; `/auto <tier>`
                 // sets it directly.

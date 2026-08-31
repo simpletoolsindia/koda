@@ -8,6 +8,7 @@ mod detailhelp;
 mod editor;
 mod fuzzy;
 mod graph;
+mod learning;
 mod llm;
 mod log;
 mod md;

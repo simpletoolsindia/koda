@@ -221,6 +221,14 @@ pub struct Config {
     /// <project>/.koda/memory.md.
     pub memory: bool,
 
+    /// Self-improvement (Phase 1): watch how you work — the edits you make to
+    /// koda's output, command outcomes — and distil deterministic, inspectable
+    /// rules into <project>/.koda/learning/rules.md. Candidates await `/learn`
+    /// before they enter the prompt. Off by default while it settles. No model,
+    /// no network.
+    #[serde(default)]
+    pub learning: bool,
+
     /// Scan the project into a symbol graph on open, so the model can ask where
     /// something lives instead of grepping for it.
     pub codegraph: bool,
@@ -398,6 +406,7 @@ impl Default for Config {
             icons: "auto".into(),
             sessions: true,
             memory: true,
+            learning: false,
             codegraph: true,
             web_search: false,
             search_backend: default_backend(),
@@ -642,6 +651,11 @@ sessions = true
 # Remember facts and command outcomes between sessions, in
 # <project>/.koda/memory.md. Plain markdown you can read, edit or delete.
 memory = true
+
+# Self-improvement: watch how you work (edits to koda's output, command
+# outcomes) and distil inspectable rules into .koda/learning/rules.md. Review
+# and accept candidates with /learn. Off by default. Fully local, no model.
+learning = false
 
 # Scan the project on open into a symbol graph (definitions, references,
 # imports) and expose it to the model via the `codegraph` tool.

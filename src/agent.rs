@@ -100,7 +100,20 @@ pub enum Command {
     /// fields (web search + backend, reasoning effort, system prompt, debug)
     /// take effect without a restart.
     UpdateConfig(Box<crate::config::Config>),
+    /// Self-improvement: review/accept/reject learned rule candidates (`/learn`).
+    Learn(LearnAction),
     Quit,
+}
+
+/// What `/learn` should do this invocation.
+#[derive(Debug, Clone)]
+pub enum LearnAction {
+    /// Show accepted rules + pending candidates.
+    Review,
+    /// Accept a candidate by 1-based index, or all of them.
+    Accept(Option<usize>),
+    /// Reject a candidate by 1-based index.
+    Reject(usize),
 }
 
 /// Incrementally strips `<tool_call>` blocks out of a streaming text response.
@@ -226,6 +239,7 @@ pub struct Agent {
     /// Shared with the background scanner; None until the first scan finishes.
     graph: Arc<std::sync::RwLock<Option<crate::graph::Graph>>>,
     memory: crate::memory::Memory,
+    learning: crate::learning::Learning,
     session: Option<crate::session::Store>,
     /// File contents captured before each write, newest last.
     undo: Vec<UndoEntry>,
@@ -267,6 +281,11 @@ impl Agent {
         } else {
             crate::memory::Memory::default()
         };
+        let learning = if cfg.learning {
+            crate::learning::Learning::load(&root)
+        } else {
+            crate::learning::Learning::default()
+        };
 
         // Scan off-thread: a large repo must not delay the first prompt.
         let graph: Arc<std::sync::RwLock<Option<crate::graph::Graph>>> =
@@ -282,7 +301,7 @@ impl Agent {
             });
         }
         let system =
-            prompt::build_with_skills(&cfg, &root, text_mode, mode, &skills, &memory);
+            prompt::build_with_skills(&cfg, &root, text_mode, mode, &skills, &memory, &learning.brief());
         let ctx = ToolCtx {
             root,
             cfg: cfg.clone(),
@@ -313,6 +332,7 @@ impl Agent {
             skills,
             graph: graph.clone(),
             memory,
+            learning,
             // Created on first persist: an eagerly-created file would be left
             // orphaned by `resume`, and a session with no exchange is noise.
             session: None,
@@ -387,6 +407,7 @@ impl Agent {
             skills: self.skills.clone(),
             graph: self.graph.clone(),
             memory: self.memory.clone(),
+            learning: crate::learning::Learning::default(),
             session: None,
             undo: Vec::new(),
             turn_seq: 0,
@@ -414,6 +435,7 @@ impl Agent {
             self.mode,
             &self.skills,
             &self.memory,
+            &self.learning.brief(),
         );
     }
 
@@ -583,6 +605,57 @@ impl Agent {
                 self.ctx.cfg = self.cfg.clone();
                 // System prompt / web-search availability may have changed.
                 self.rebuild_system();
+            }
+            Command::Learn(action) => {
+                if !self.cfg.learning {
+                    let _ = tx.send(Event::Notice(
+                        "self-improvement is off — set `learning = true` in config or /settings".into(),
+                    ));
+                    return;
+                }
+                // Make sure the latest observations are mined before showing.
+                self.learning.induce();
+                let msg = match action {
+                    LearnAction::Review => {
+                        let cands = self.learning.candidates();
+                        let accepted = self.learning.brief();
+                        let mut s = String::new();
+                        if cands.is_empty() {
+                            s.push_str("No new candidate rules. koda learns as you work — edit files, run commands, and check back.");
+                        } else {
+                            s.push_str(&format!(
+                                "koda learned {} candidate rule(s) — /learn accept <n>, /learn all, or /learn reject <n>:\n",
+                                cands.len()
+                            ));
+                            for (i, r) in cands.iter().enumerate() {
+                                s.push_str(&format!("  {}. {}\n", i + 1, r.text));
+                            }
+                        }
+                        if !accepted.trim().is_empty() {
+                            s.push_str("\nAlready accepted:");
+                            s.push_str(&accepted);
+                        }
+                        s
+                    }
+                    LearnAction::Accept(None) => {
+                        let n = self.learning.accept_all();
+                        self.rebuild_system();
+                        format!("accepted {n} rule(s) — koda will follow them from now on")
+                    }
+                    LearnAction::Accept(Some(n)) => match self.learning.accept(n.saturating_sub(1)) {
+                        Some(text) => {
+                            self.rebuild_system();
+                            format!("accepted: {text}")
+                        }
+                        None => format!("no candidate #{n}"),
+                    },
+                    LearnAction::Reject(n) => match self.learning.reject(n.saturating_sub(1)) {
+                        Some(text) => format!("rejected: {text}"),
+                        None => format!("no candidate #{n}"),
+                    },
+                };
+                let _ = self.learning.save();
+                let _ = tx.send(Event::Notice(msg));
             }
             Command::Quit => {}
         }
@@ -785,6 +858,12 @@ impl Agent {
 
         if self.depth == 0 {
             self.persist();
+            // Mine the turn's observations into candidate rules. Deterministic
+            // and cheap; candidates stay dormant until the user runs /learn.
+            if self.cfg.learning {
+                self.learning.induce();
+                let _ = self.learning.save();
+            }
             let _ = tx.send(Event::TurnEnd {
                 history_tokens: self.history_tokens(),
             });
@@ -1179,6 +1258,10 @@ impl Agent {
         }
 
         if !self.approve(&name, &args, tx).await {
+            if self.cfg.learning && self.depth == 0 {
+                self.learning
+                    .observe(&crate::learning::Observation::Denied { tool: name.clone() });
+            }
             return tools::Outcome {
                 ok: false,
                 content: "ERROR: the user denied this action. Ask what to do instead; do not retry."
@@ -1252,6 +1335,18 @@ impl Agent {
                 let _ = self.memory.save(&self.ctx.root);
             }
         }
+        // Self-improvement (Phase 1): log the raw signal. Deterministic rule
+        // induction runs later (at turn end / on /learn), never a model here.
+        if self.cfg.learning && self.depth == 0 {
+            if name == "run_command" {
+                if let Some(cmd) = args_for_memory.get("command").and_then(|c| c.as_str()) {
+                    self.learning.observe(&crate::learning::Observation::Command {
+                        command: cmd.to_string(),
+                        ok: outcome.ok,
+                    });
+                }
+            }
+        }
         // Which files the work happens in is also observed fact worth carrying
         // forward, so next session koda orients to the active areas first.
         if matches!(name.as_str(), "write_file" | "edit_file")
@@ -1262,6 +1357,37 @@ impl Agent {
             if let Some(p) = args_for_memory.get("path").and_then(|c| c.as_str()) {
                 self.memory.record_edit(p);
                 let _ = self.memory.save(&self.ctx.root);
+            }
+        }
+        // Self-improvement: record the (before, after) of an edit koda made, so
+        // rule induction can mine naming/imports and, later, compare koda's
+        // proposal against what the user keeps. `before` comes from the undo
+        // snapshot taken just before this write; `after` is read from disk.
+        if matches!(name.as_str(), "write_file" | "edit_file")
+            && outcome.ok
+            && self.cfg.learning
+            && self.depth == 0
+        {
+            if let Some(p) = args_for_memory.get("path").and_then(|c| c.as_str()) {
+                let abs = if std::path::Path::new(p).is_absolute() {
+                    PathBuf::from(p)
+                } else {
+                    self.ctx.root.join(p)
+                };
+                let before = self
+                    .undo
+                    .last()
+                    .filter(|e| e.path == abs)
+                    .and_then(|e| e.before.clone())
+                    .unwrap_or_default();
+                let after = std::fs::read_to_string(&abs).unwrap_or_default();
+                if !after.is_empty() {
+                    self.learning.observe(&crate::learning::Observation::Edit {
+                        path: p.to_string(),
+                        before,
+                        after,
+                    });
+                }
             }
         }
         // Keep the code graph current without a full rescan: re-index just the

@@ -105,6 +105,7 @@ pub fn build_with_skills(
     mode: Mode,
     skills: &[crate::skills::Skill],
     memory: &crate::memory::Memory,
+    learned: &str,
 ) -> String {
     let mut p = build(cfg, root, use_text_protocol, mode);
     p.push_str(&crate::skills::catalogue(skills));
@@ -115,6 +116,12 @@ pub fn build_with_skills(
                 "Use `remember` when you discover another durable fact about this project.\n",
             );
         }
+    }
+    // Learned, user-accepted conventions (Phase 1 self-improvement). Empty
+    // unless learning is on and rules have been accepted, so it costs nothing
+    // otherwise.
+    if cfg.learning {
+        p.push_str(learned);
     }
     p
 }
