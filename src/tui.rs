@@ -53,12 +53,15 @@ const WELCOME_ANIM: Duration = Duration::from_millis(1400);
 
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
-/// A condensed half-block ("▀▄█") face — sleeker and more modern than solid
-/// full-block letters, and only 3 rows tall so it stays compact.
-const BANNER_ART: [&str; 3] = [
-    "█ ▄  ▄▀▀▄  ▄▀▀▄  ▄▀▀█ ",
-    "█▀▄  █  █  █  █  █▄▄█ ",
-    "▀ ▀  ▀▄▄▀  ▀▄▄▀  ▀  ▀ ",
+/// A bold "ANSI Shadow" face with drop shadows — fancier and more striking than
+/// a flat block face, while still compact.
+const BANNER_ART: [&str; 6] = [
+    "██╗  ██╗  ██████╗  ██████╗   █████╗ ",
+    "██║ ██╔╝ ██╔═══██╗ ██╔══██╗ ██╔══██╗",
+    "█████╔╝  ██║   ██║ ██║  ██║ ███████║",
+    "██╔═██╗  ██║   ██║ ██║  ██║ ██╔══██║",
+    "██║  ██╗ ╚██████╔╝ ██████╔╝ ██║  ██║",
+    "╚═╝  ╚═╝  ╚═════╝  ╚═════╝  ╚═╝  ╚═╝",
 ];
 
 const COMMANDS: &[(&str, &str)] = &[
@@ -98,47 +101,6 @@ struct Pending {
     preview: Option<String>,
     reply: Option<oneshot::Sender<Approval>>,
     scroll: u16,
-}
-
-/// One-line feature hints, surfaced on the welcome and rotated in the bottom
-/// bar so a user discovers what koda can do without reading the whole /help.
-const TIPS: &[&str] = &[
-    "type / to see every command · ↑↓ to pick",
-    "@file mentions a file · @image.png attaches an image to a vision model",
-    "/auto cycles ask → auto-write → full-auto autonomous mode",
-    "/orc <task> splits work across role agents (dev, qa, tester…)",
-    "/mouse off lets you select and copy text with the mouse",
-    "/settings opens an interactive control page for everything",
-    "/search <text> finds past conversations · /fork branches one",
-    "/resume opens a picker of every past session — not just the last",
-    "ctrl+p cycles plan → execute → vibe mode",
-    "paste a big block and it becomes @paste1, expanded when you send",
-    "/theme neon · tokyo-night · dracula … switch palette live",
-    "the agent can ask you a question mid-task — just answer it",
-    "/undo reverts the whole last turn's file changes",
-];
-
-/// A tip chosen from wall-clock time, so it rotates without any state. It
-/// changes only once every few seconds (not every frame) so each tip stays on
-/// screen long enough to actually read.
-fn random_tip() -> &'static str {
-    const ROTATE_SECS: u64 = 8;
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / ROTATE_SECS)
-        .unwrap_or(0) as usize;
-    TIPS[n % TIPS.len()]
-}
-
-/// The tip after the current one, so two tip slots on screen never show the
-/// same line at once.
-fn next_tip() -> &'static str {
-    const ROTATE_SECS: u64 = 8;
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() / ROTATE_SECS)
-        .unwrap_or(0) as usize;
-    TIPS[(n + 1) % TIPS.len()]
 }
 
 /// RGB components of a truecolor, for gradient maths. `None` for ANSI/named
@@ -518,12 +480,6 @@ impl App {
             }
             lines.push(Line::from(spans));
         }
-        lines.push(Line::default());
-        // One rotating tip so the first thing on screen also teaches a feature.
-        lines.push(Line::from(vec![
-            Span::styled("  tip  ".to_string(), Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::REVERSED)),
-            Span::styled(format!(" {}", random_tip()), t.body()),
-        ]));
         lines.push(Line::default());
 
         self.transcript.raw(lines);
@@ -1603,19 +1559,21 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let input_w = area.width.saturating_sub(3).max(4) as usize;
     let (rows, crow, ccol) = app.editor.visual(input_w);
-    let max_input = if m.tiny { 4 } else { 8 };
-    let input_h = rows.len().clamp(1, max_input) as u16;
+    // A roomier composer: it grows well before it starts scrolling. When empty
+    // it stays a single line so it never steals space from the transcript, but
+    // once you start typing it can expand up to a tall field.
+    let max_input = if m.tiny { 5 } else { 12 };
+    let min_input = if app.editor.is_empty() { 1 } else { 2 };
+    let input_h = rows.len().clamp(min_input, max_input) as u16;
 
     let chunks = Layout::vertical([
         Constraint::Min(1),          // transcript
-        Constraint::Length(1),       // hint / state row (mode + status + keys)
-        Constraint::Length(if m.tiny { 0 } else { 1 }), // tip row (hidden on tiny)
+        Constraint::Length(1),       // hint / state row (status + keys)
         Constraint::Length(input_h), // input
-        Constraint::Length(1),       // powerline status bar
+        Constraint::Length(1),       // powerline status bar (mode + model)
     ])
     .split(area);
-    let (body, rule, tip_area, input, status) =
-        (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4]);
+    let (body, rule, input, status) = (chunks[0], chunks[1], chunks[2], chunks[3]);
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
     let total_before = app.transcript.total_lines();
@@ -1667,7 +1625,6 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let t = &app.theme;
     f.render_widget(Paragraph::new(hint_row(app, area.width, m)), rule);
-    f.render_widget(Paragraph::new(tip_row(app, area.width)), tip_area);
 
     // Input.
     let prompt_style = if app.busy {
@@ -1703,6 +1660,12 @@ fn draw(f: &mut Frame, app: &mut App) {
             })
             .collect()
     };
+    // Pad up to the full box height so the whole taller field is one solid
+    // tinted surface, not a single lit line with dead space beneath it.
+    let mut input_lines = input_lines;
+    while input_lines.len() < input_h as usize {
+        input_lines.push(Line::from(vec![Span::raw("  ".to_string())]));
+    }
     f.render_widget(
         Paragraph::new(panel::fill(
             input_lines,
@@ -1850,18 +1813,6 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     let g = &app.glyphs;
     let mut left: Vec<Span<'static>> = Vec::new();
 
-    let mode_colour = match app.mode {
-        Mode::Plan => t.warning,
-        Mode::Execute => t.success,
-        Mode::Vibe => t.accent_alt,
-    };
-    left.push(Span::styled(
-        format!(" {} ", app.mode.label()),
-        Style::default()
-            .fg(mode_colour)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-    ));
-
     match (app.busy, app.turn_started) {
         (true, _) if app.cancelling => {
             // The interrupt landed but the turn is still unwinding (a tool call
@@ -2004,25 +1955,6 @@ fn activity_label(name: &str, label: &str) -> String {
     }
 }
 
-/// A dedicated row for the rotating feature tip, below the hint row and above
-/// the input — so it has room and doesn't fight the mode/status/keys.
-fn tip_row(app: &App, width: u16) -> Line<'static> {
-    let t = &app.theme;
-    let tip = next_tip();
-    let mut spans = vec![
-        Span::styled(
-            " tip ".to_string(),
-            Style::default().fg(Color::Black).bg(t.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!(" {tip}"), t.dim()),
-    ];
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    if (width as usize) > used {
-        spans.push(Span::raw(" ".repeat(width as usize - used)));
-    }
-    truncate_line(spans, width)
-}
-
 /// The bottom bar: model, project, branch, context. Chevron-separated segments,
 /// each in its own colour, so the fields are distinguishable at a glance.
 fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
@@ -2030,7 +1962,7 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     let t = &app.theme;
     let g = &app.glyphs;
 
-    let mut segs = vec![Segment::new(short_model(&app.model, m), t.accent).bold()];
+    let mut segs = vec![];
 
     let dir = app
         .root
@@ -2049,6 +1981,14 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     }
 
     let mut right = Vec::new();
+    // Model name and the current mode both live in the bottom-right corner now.
+    right.push(Segment::new(short_model(&app.model, m), t.accent).bold());
+    let mode_colour = match app.mode {
+        Mode::Plan => t.warning,
+        Mode::Execute => t.success,
+        Mode::Vibe => t.accent_alt,
+    };
+    right.push(Segment::new(app.mode.label().to_string(), mode_colour).bold());
     if app.web {
         right.push(Segment::new("web", t.info));
     }
