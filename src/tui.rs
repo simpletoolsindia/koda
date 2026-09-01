@@ -110,6 +110,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/reason", "reasoning effort: off/low/medium/high"),
     ("/websearch", "turn web search on or off"),
     ("/skills", "list skills, or reload them from disk"),
+    ("/learn", "review & accept what koda learned about this project"),
     ("/orc", "orchestrate: split a task across role agents"),
     ("/setup", "set the endpoint, model and API key"),
     ("/settings", "interactive settings page"),
