@@ -702,6 +702,7 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
         // The file list steals navigation keys while it is open.
         if !self.mention_hits().is_empty() && !ctrl && !alt {
@@ -812,9 +813,12 @@ impl App {
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.start(),
             KeyCode::End => self.editor.finish(),
-            // Ctrl+Up / Ctrl+Down scroll the agent response window (transcript).
-            KeyCode::Up if ctrl => self.scroll_by(-1),
-            KeyCode::Down if ctrl => self.scroll_by(1),
+            // Scroll the transcript a line at a time. Ctrl+Up/Down works in many
+            // terminals, but macOS grabs Ctrl+Up/Down for Mission Control, so
+            // Shift+Up/Down is offered as a reliable alternative. The mouse wheel
+            // and PageUp/PageDown are the primary, always-working scroll paths.
+            KeyCode::Up if ctrl || shift => self.scroll_by(-1),
+            KeyCode::Down if ctrl || shift => self.scroll_by(1),
             // Plain Up / Down walk the user's typed-message history.
             KeyCode::Up => self.key_up(),
             KeyCode::Down => self.key_down(),
@@ -1798,8 +1802,8 @@ impl App {
             ("ctrl+p", "cycle mode"),
             ("ctrl+r", "expand last tool output"),
             ("ctrl+t", "expand last reasoning"),
-            ("pgup/pgdn", "scroll · wheel works"),
-            ("ctrl+↑/↓", "scroll the reply, line by line"),
+            ("wheel / pgup/pgdn", "scroll the reply"),
+            ("shift+↑/↓", "scroll a line (ctrl+↑/↓ too, where the OS allows)"),
             ("up/down", "previous / next message you typed"),
             ("tab", "complete · pick a file"),
             ("@", "mention a file"),

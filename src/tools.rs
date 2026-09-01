@@ -1160,15 +1160,27 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let limit = arg_usize(args, "limit").unwrap_or(usize::MAX);
     let all: Vec<&str> = text.lines().collect();
     let total = all.len();
-    let start = offset - 1;
-    if start >= total && total > 0 {
-        return Ok(Outcome::err(format!(
-            "offset {offset} is past end of file ({total} lines)"
-        )));
+    // A model often passes a large "read from here" offset (e.g. 9999) meaning
+    // "near/at the end". Rather than erroring — which wastes a turn and spams
+    // warnings — clamp it to the last page and note that we did. `offset` is
+    // 1-based; keep at least the final `limit` lines (or the last line) visible.
+    let requested = offset;
+    let mut start = offset - 1;
+    let clamped = start >= total && total > 0;
+    if clamped {
+        let page = if limit == usize::MAX { 1 } else { limit.max(1) };
+        start = total.saturating_sub(page);
     }
     let end = start.saturating_add(limit).min(total);
     let width = end.to_string().len().max(3);
     let mut out = String::new();
+    if clamped {
+        let _ = writeln!(
+            out,
+            "[offset {requested} is past end of file ({total} lines); showing the last {} line(s)]",
+            total - start
+        );
+    }
     for (i, line) in all[start..end].iter().enumerate() {
         let _ = writeln!(out, "{:>width$}| {line}", start + i + 1, width = width);
     }
@@ -2067,6 +2079,22 @@ mod tests {
 
         let missing = read_file(&json!({"path": "nope.rs"}), &c).unwrap();
         assert!(!missing.ok);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_offset_past_eof_clamps_gracefully() {
+        let dir = std::env::temp_dir().join("koda-read-clamp");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("small.txt"), "one\ntwo\nthree\n").unwrap();
+        let c = ctx(&dir);
+        // A model asking for offset 9999 on a 3-line file must NOT error — it
+        // should succeed, note the clamp, and show the tail.
+        let out = read_file(&json!({"path": "small.txt", "offset": 9999}), &c).unwrap();
+        assert!(out.ok, "past-EOF offset should not error: {}", out.content);
+        assert!(out.content.contains("past end of file"), "{}", out.content);
+        assert!(out.content.contains("three"), "should show the last line: {}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 

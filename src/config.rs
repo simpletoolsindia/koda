@@ -207,11 +207,10 @@ pub struct Config {
     /// want spinners and gauges but find the text reveal distracting. Requires
     /// `motion` to have any effect.
     pub reveal: bool,
-    /// Capture the mouse for wheel-scrolling. Off by default so the terminal's
-    /// own click-drag text selection and copy work normally — the thing most
-    /// people reach for. Turn it on (`/mouse`, or here) if you would rather the
-    /// wheel scroll the transcript; you then scroll with pgup/pgdn or the
-    /// keyboard when selecting.
+    /// Capture the mouse so the wheel scrolls the transcript — what most people
+    /// expect from a scrollable pane. On by default. Turn it off (`/mouse`, or
+    /// here) to hand click-drag back to the terminal for native text selection
+    /// and copy; you then scroll with the wheel-free keys (PageUp/PageDown).
     pub mouse_capture: bool,
 
     /// Palette name, or "auto"/"" for the terminal's own 16 colours.
@@ -413,7 +412,7 @@ impl Default for Config {
             sync_output: true,
             motion: true,
             reveal: true,
-            mouse_capture: false,
+            mouse_capture: true,
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,
