@@ -111,7 +111,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/websearch", "turn web search on or off"),
     ("/skills", "list skills, or reload them from disk"),
     ("/learn", "review & accept what koda learned about this project"),
-    ("/orc", "orchestrate: split a task across role agents"),
+    ("/orc", "run a task in vibe mode (spec, orchestrate, verify)"),
     ("/setup", "set the endpoint, model and API key"),
     ("/settings", "interactive settings page"),
     ("/resume", "reopen an earlier conversation"),
@@ -514,6 +514,11 @@ impl App {
                         )
                     };
                     self.send(Command::User(framed));
+                } else {
+                    // Truly done — no more queued work. Retire any lingering plan
+                    // so the sticky panel and step counter clear, even if the
+                    // model forgot to flip the last step to done.
+                    self.transcript.complete_current_plan();
                 }
             }
         }
@@ -1266,7 +1271,7 @@ impl App {
         let explain = match m {
             Mode::Plan => "plan — reads and thinks, changes nothing",
             Mode::Execute => "execute — edits and commands, with approval",
-            Mode::Vibe => "vibe — writes a spec, then verifies its own work",
+            Mode::Vibe => "vibe — spec-driven: plans, delegates, and verifies its own work",
         };
         self.note(explain);
     }
@@ -1495,32 +1500,25 @@ impl App {
             }
             "orc" | "orchestrate" => {
                 if arg.is_empty() {
-                    self.note("usage: /orc <task> — decompose and delegate to role agents");
+                    self.note("usage: /orc <task> — runs it in vibe mode (spec → orchestrate → verify)");
                     return;
                 }
-                // Frame the task as an orchestration brief. The main agent stays
-                // the orchestrator: it plans with `todo`, then delegates each
-                // subtask to the right role-agent via `delegate` with a role.
-                let brief = format!(
-                    "You are the ORCHESTRATOR. Break this task down and coordinate role \
-                     agents to do it — do not do the hands-on work yourself.\n\n\
-                     Task: {arg}\n\n\
-                     Do this:\n\
-                     1. Use the `todo` tool to lay out the subtasks.\n\
-                     2. For each subtask, write a crisp brief — goal, what to change, and how \
-                     to validate the result — and hand it to the right role with `delegate` \
-                     (pass a `role` such as dev, qa, tester, or manager, matching a role \
-                     skill file). If no role skills exist, delegate without a role.\n\
-                     3. Integrate the reports, verify each against its validation criteria, \
-                     and summarise what was done and what remains.",
-                );
-                self.transcript.user(format!("/orc {arg}"));
+                // Orc is now folded into vibe mode: vibe already writes a spec,
+                // plans with `todo`, delegates substantial subtasks to role
+                // agents, and verifies its own work. So switch to vibe and run
+                // the task there, rather than maintaining a separate orc concept.
+                if self.mode != Mode::Vibe {
+                    self.set_mode(Mode::Vibe);
+                    self.send(Command::SetMode(Mode::Vibe));
+                    self.note("switched to vibe mode");
+                }
+                self.transcript.user(arg.to_string());
                 self.follow = true;
-                if self.busy {
-                    self.queued.push_back(brief);
+                if self.busy || self.compacting.is_some() {
+                    self.queued.push_back(arg.to_string());
                     self.note(format!("queued ({})", self.queued.len()));
                 } else {
-                    self.send(Command::User(brief));
+                    self.send(Command::User(arg.to_string()));
                 }
             }
             "skills" | "skill" => {

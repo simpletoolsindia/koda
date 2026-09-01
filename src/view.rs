@@ -162,10 +162,17 @@ impl Transcript {
     /// (done, total) for the status bar.
     pub fn todo_progress(&self) -> Option<(usize, usize)> {
         self.blocks.iter().rev().find_map(|b| match &b.item {
-            Item::Todos(items) if !items.is_empty() => Some((
-                items.iter().filter(|i| i.status == TodoStatus::Done).count(),
-                items.len(),
-            )),
+            Item::Todos(items) if !items.is_empty() => {
+                let done = items.iter().filter(|i| i.status == TodoStatus::Done).count();
+                // Once every step is done the task is finished — drop the live
+                // counter so a stale "N/N steps" doesn't linger in the status row.
+                // The completed plan still shows in the transcript as a record.
+                if done == items.len() {
+                    None
+                } else {
+                    Some((done, items.len()))
+                }
+            }
             _ => None,
         })
     }
@@ -178,6 +185,30 @@ impl Transcript {
             Item::Todos(items) if !items.is_empty() => Some(items.clone()),
             _ => None,
         })
+    }
+
+    /// Mark every step of the current plan done. Called when a turn ends with no
+    /// further work queued: small models often finish the task but forget the
+    /// final `todo` update that flips the last step to done, which would leave
+    /// the sticky plan and step counter lingering forever. This retires the plan
+    /// cleanly once the agent has actually stopped working.
+    pub fn complete_current_plan(&mut self) {
+        for (i, b) in self.blocks.iter_mut().enumerate().rev() {
+            if let Item::Todos(items) = &mut b.item {
+                if items.is_empty() {
+                    continue;
+                }
+                let changed = items.iter().any(|it| it.status != TodoStatus::Done);
+                if changed {
+                    for it in items.iter_mut() {
+                        it.status = TodoStatus::Done;
+                    }
+                    b.cache = None;
+                    self.dirty_from = self.dirty_from.min(i);
+                }
+                return;
+            }
+        }
     }
 
     /// Append pre-rendered lines. The caller owns their width.

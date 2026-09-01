@@ -11,13 +11,13 @@ use std::path::PathBuf;
 /// Feature blurbs shown as cards. Kept here (not in the prompt) purely for docs.
 const FEATURES: &[(&str, &str)] = &[
     ("Local-first", "Talks to any OpenAI-compatible server — Ollama, LM Studio, llama.cpp, vLLM, MLX. One ~6 MB binary, no runtime deps."),
-    ("Modes", "plan (read-only), execute (edits with approval), and vibe (writes a spec, then checks its own work). Cycle with ctrl+p or /mode."),
+    ("Modes", "plan (read-only), execute (edits with approval), and vibe (spec-driven: plans, delegates, and verifies its own work). Cycle with ctrl+p or /mode."),
     ("Autonomy tiers", "ask → auto-write → full-auto, cycled live with /auto. Every write shows a diff first; commands ask before running."),
     ("Reasoning effort", "Tell thinking models how hard to think: /reason off | low | medium | high."),
     ("Code graph", "The project is scanned into a symbol graph so the model asks where a name lives instead of grepping. Ask overview / symbol / file."),
     ("Memory", "Durable facts and command outcomes are kept in .koda/memory.md, so the next session already knows your test runner."),
     ("Sessions", "Every conversation is saved. /resume reopens one, /search finds by text, /fork branches a copy."),
-    ("Subagents & /orc", "Delegate wide read-only investigations to a child agent with its own context; /orc splits a task across role agents."),
+    ("Subagents & /orc", "Delegate wide read-only investigations to a child agent with its own context. /orc <task> runs it in vibe mode, which plans, delegates to role agents, and verifies the result."),
     ("Dynamic agents", "The main agent can create specialised role agents (qa, reviewer, …) on the fly with manage_agent, then delegate to them."),
     ("Web search", "DuckDuckGo out of the box, or your own SearXNG. Toggle with /websearch; pick the backend in /settings."),
     ("Vision", "Attach an image with @screenshot.png for a vision-capable model."),

@@ -499,11 +499,19 @@ fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
     }
     let mut out = Vec::new();
     for ((removed, added), n) in subs {
-        if n >= MIN_SUPPORT {
+        // A user editing koda's code to swap one token for another is the
+        // strongest, most deliberate signal there is — learn it from a single
+        // occurrence rather than making the user repeat the same correction.
+        if n >= 1 {
+            let times = if n == 1 {
+                "changed it".to_string()
+            } else {
+                format!("changed it {n} times")
+            };
             out.push(Rule {
                 key: format!("correction.sub.{}.{}", slug(&removed), slug(&added)),
                 text: format!(
-                    "In this project, prefer `{added}` over `{removed}` — the user has changed that {n} time(s)."
+                    "In this project, prefer `{added}` over `{removed}` — the user {times}."
                 ),
                 support: n,
                 accepted: false,
@@ -957,17 +965,20 @@ mod tests {
     }
 
     #[test]
-    fn a_single_correction_is_not_enough() {
+    fn a_single_correction_is_learned() {
+        // A deliberate user correction is the strongest signal there is, so one
+        // occurrence is enough to propose a preference rule.
         let obs = vec![Observation::Correction {
             path: "a.py".into(),
             koda_wrote: "x = requests".into(),
             user_has: "x = httpx".into(),
         }];
         let rules = induce_rules(&obs);
-        assert!(
-            !rules.iter().any(|r| r.key.starts_with("correction.sub")),
-            "one-off correction must not become a rule: {rules:?}"
-        );
+        let rule = rules
+            .iter()
+            .find(|r| r.key.starts_with("correction.sub"))
+            .expect("a single correction should become a candidate rule");
+        assert!(rule.text.contains("httpx") && rule.text.contains("requests"), "{}", rule.text);
     }
 
     #[test]

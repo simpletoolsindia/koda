@@ -189,7 +189,7 @@ current mode is always in the status bar.
 | --- | --- | --- |
 | `plan` | `PLAN` | Reads and thinks only. The write and command tools are unavailable, so nothing on disk changes. Produces a plan. |
 | `execute` | `EXEC` | Normal operation: edits and commands, each gated by approval. |
-| `vibe` | `VIBE` | Writes an explicit spec first, does the work, then checks its own work — and its subagents' work — against the spec before finishing. |
+| `vibe` | `VIBE` | Autonomous, spec-driven delivery. Writes an explicit spec, plans the steps with the todo list, does the work — **orchestrating** large or many-part tasks by delegating self-contained subtasks to role agents — then verifies its own work (and its subagents') against the spec before finishing. This is the mode for "just get it done." |
 
 In plan mode the agent may only use read-only tools: `read_file`, `list_dir`,
 `find_files`, `search`, `delegate`, `todo`, `skill`, `web_search`, `codegraph`,
@@ -436,11 +436,11 @@ Two ways to use roles:
 - **`delegate`** — the main agent can hand a subtask to a role by passing
   `role` (e.g. `dev`, `qa`). The subagent runs read-only in its own context and
   returns a written report.
-- **`/orc <task>`** — turns koda into an orchestrator. It frames the task as an
-  orchestration brief: lay out subtasks with `todo`, write a
-  goal/change/validation brief for each, delegate each to the right role agent,
-  then integrate the reports and verify each against its validation criteria. If
-  no role skills exist, it delegates without a role.
+- **`/orc <task>`** — a shortcut that switches to **vibe** mode and runs the
+  task there. Vibe is the unified spec-driven mode: it lays out subtasks with
+  `todo`, delegates each to the right role agent, and verifies the integrated
+  result. (Orchestration used to be a separate concept; it is now just what vibe
+  mode does, so `/orc` and `ctrl+p → vibe` lead to the same place.)
 
 Subagents cannot modify files or run commands — they can only read, list, find,
 and search. In vibe mode, the parent checks each subagent report against the

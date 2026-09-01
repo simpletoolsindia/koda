@@ -2523,12 +2523,23 @@ impl Agent {
         self.cancel.store(false, Ordering::Relaxed);
 
         let mut messages = vec![Message::system(
-            "Summarize the conversation so far for your own future reference. Keep file paths, \
-             decisions, code changes made, and open problems. Be dense and factual. \
-             Under 400 words.",
+            "You are compacting a coding session's history because the context is nearly full. \
+             Write a dense hand-off note to YOUR FUTURE SELF so you can continue without \
+             re-reading everything. This is the ONLY memory you will keep, so losing a detail \
+             means forgetting it. Cover, with headings:\n\
+             - TASK: the user's original goal, in their words if possible.\n\
+             - DONE: what has already been accomplished (files created/edited, commands run, \
+             decisions made) — be specific with paths and names.\n\
+             - CURRENT STEP: exactly what you were doing right now and what you were about to \
+             do next. This is the most important part — do not lose it.\n\
+             - PLAN: any remaining steps / open problems, in order.\n\
+             - FACTS: build/test commands, conventions, and anything you had to discover.\n\
+             Be factual and specific. No fluff. Under 500 words.",
         )];
         messages.extend(self.history.iter().cloned());
-        messages.push(Message::user("Write the summary now."));
+        messages.push(Message::user(
+            "Write the hand-off note now, so you can seamlessly continue the task.",
+        ));
 
         let req = ChatRequest {
             model: self.model.clone(),
@@ -2559,10 +2570,44 @@ impl Agent {
         }
         match res {
             Ok(_) if !summary.trim().is_empty() => {
-                self.history = vec![
-                    Message::user(format!("Summary of earlier work:\n{}", summary.trim())),
-                    Message::assistant("Understood. Continuing from there."),
+                // Keep the recent tail of the conversation after the summary, so
+                // the agent retains its immediate working context (the last user
+                // request and the latest tool results) rather than resetting to a
+                // bare summary. Bounded by ~1/5 of the budget so we still free
+                // most of the space. Start the tail at a user turn to keep the
+                // request/response structure coherent.
+                let tail_budget = (self.cfg.context_tokens / 5).max(1024);
+                let mut tail: Vec<Message> = Vec::new();
+                let mut used = 0usize;
+                for m in self.history.iter().rev() {
+                    let cost = m.approx_tokens();
+                    if used + cost > tail_budget && !tail.is_empty() {
+                        break;
+                    }
+                    used += cost;
+                    tail.push(m.clone());
+                }
+                tail.reverse();
+                // Trim leading tool/assistant messages so the tail opens on a
+                // user turn (a dangling tool result with no matching call
+                // confuses some servers).
+                while matches!(tail.first().map(|m| m.role), Some(Role::Tool) | Some(Role::Assistant)) {
+                    tail.remove(0);
+                }
+
+                let mut new_history = vec![
+                    Message::user(format!(
+                        "[Context was compacted here to free space. Hand-off note from \
+                         earlier in this session:]\n\n{}",
+                        summary.trim()
+                    )),
+                    Message::assistant(
+                        "Understood — I have the hand-off note and will continue the task \
+                         from where I left off.",
+                    ),
                 ];
+                new_history.extend(tail);
+                self.history = new_history;
                 // History was replaced, not extended, so the file must be too.
                 if let Some(s) = self.session.as_mut() {
                     s.rewrite(&self.history);
