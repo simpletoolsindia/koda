@@ -629,6 +629,45 @@ impl App {
         }
         lines.push(Line::default());
 
+        // A tagline + a compact quick-start, so the empty state guides a new user
+        // instead of leaving a banner floating over dead space. Centered under the
+        // banner, styled entirely from the theme (no hard-coded colours) so it
+        // adapts to every palette and the ASCII glyph set.
+        let indent = "  ".to_string();
+        let model_short: String = cfg.model.chars().take(28).collect();
+        lines.push(Line::from(vec![
+            Span::raw(indent.clone()),
+            Span::styled(
+                "a fast terminal coding agent".to_string(),
+                t.emphasis(t.accent_alt),
+            ),
+            Span::styled(
+                format!("  {}  {}", g.sep, model_short),
+                t.dim(),
+            ),
+        ]));
+        lines.push(Line::default());
+        // Quick-start tips: the few things a new user most needs, one per line,
+        // key highlighted in the accent, description dimmed.
+        let tips: [(&str, &str); 4] = [
+            ("type a task", "and press enter — e.g. \"fix the failing test\""),
+            ("@", "attach a file to your message"),
+            ("/help", "see all commands"),
+            ("ctrl+p", "switch mode (plan · execute · vibe)"),
+        ];
+        for (key, desc) in tips {
+            lines.push(Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(format!("{} ", g.bullet), t.dim()),
+                Span::styled(
+                    format!("{key:<12}"),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" {desc}"), t.dim()),
+            ]));
+        }
+        lines.push(Line::default());
+
         self.transcript.raw(lines);
         self.follow = true;
         // Arm a brief entrance shimmer over the banner, but only when motion is
