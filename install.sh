@@ -90,7 +90,56 @@ build_and_install() {
         *":$bin_dir:"*) ok "$bin_dir is on your PATH" ;;
         *) warn "add $bin_dir to your PATH:  export PATH=\"$bin_dir:\$PATH\"" ;;
     esac
+    ensure_ripgrep
     ok "done — run '$BIN_NAME' to start, or '$BIN_NAME --help'"
+}
+
+# --- optional speedup: ripgrep -----------------------------------------------
+# koda's `search` uses ripgrep (rg) when present for speed, and falls back to a
+# built-in in-process search otherwise — so rg is never required. Offer to
+# install it as a one-time speedup; any failure is non-fatal (koda still works).
+ensure_ripgrep() {
+    if command -v rg >/dev/null 2>&1; then
+        ok "ripgrep found — koda will use it for fast search"
+        return 0
+    fi
+    info "ripgrep (rg) not found — koda will use its built-in search."
+    local installer=""
+    if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+        installer="brew install ripgrep"
+    elif command -v apt-get >/dev/null 2>&1; then
+        installer="sudo apt-get install -y ripgrep"
+    elif command -v dnf >/dev/null 2>&1; then
+        installer="sudo dnf install -y ripgrep"
+    elif command -v pacman >/dev/null 2>&1; then
+        installer="sudo pacman -S --noconfirm ripgrep"
+    elif command -v zypper >/dev/null 2>&1; then
+        installer="sudo zypper install -y ripgrep"
+    elif command -v apk >/dev/null 2>&1; then
+        installer="sudo apk add ripgrep"
+    elif command -v cargo >/dev/null 2>&1; then
+        installer="cargo install ripgrep"
+    fi
+    if [ -z "$installer" ]; then
+        warn "no known package manager — install ripgrep for faster search: https://github.com/BurntSushi/ripgrep#installation"
+        return 0
+    fi
+    # Non-interactive (piped) installs shouldn't run a package manager silently.
+    if [ ! -t 0 ]; then
+        warn "for faster search, install ripgrep:  $installer"
+        return 0
+    fi
+    printf '  Install ripgrep now for faster search? [Y/n]: '
+    read -r ans
+    case "${ans:-y}" in
+        [Nn]*) info "skipping ripgrep — koda's built-in search still works"; return 0 ;;
+    esac
+    info "installing ripgrep…"
+    if eval "$installer" >/dev/null 2>&1 && command -v rg >/dev/null 2>&1; then
+        ok "ripgrep installed"
+    else
+        warn "ripgrep install failed — koda will use its built-in search (no action needed)"
+    fi
 }
 
 uninstall() {

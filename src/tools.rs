@@ -1366,10 +1366,154 @@ fn find_files(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 
 fn search(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let pattern = arg_str(args, "pattern")?;
+    // Validate the regex once up front, so a bad pattern errors clearly whether
+    // we run ripgrep or the built-in engine.
+    let _ = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(false)
+        .build()
+        .with_context(|| format!("invalid regex `{pattern}`"))?;
+    // Fast path: shell out to ripgrep when it's on PATH — it's the fastest
+    // grep-class tool and shares this project's ignore semantics. If rg is
+    // missing or errors for any reason, fall back to the built-in in-process
+    // search (the `ignore` + `regex` crates — ripgrep's own libraries), which
+    // needs nothing installed and always works. So there is no hard dependency
+    // on rg (or grep) being present on the user's machine.
+    if let Some(rg) = ripgrep_path() {
+        if let Ok(outcome) = search_ripgrep(&rg, &pattern, args, ctx) {
+            return Ok(outcome);
+        }
+    }
+    search_builtin(&pattern, args, ctx)
+}
+
+/// Locate a usable `rg` (ripgrep) binary, or `None` to use the built-in search.
+/// Honours `KODA_NO_RIPGREP=1` to force the built-in path (used in tests).
+fn ripgrep_path() -> Option<std::path::PathBuf> {
+    if matches!(std::env::var("KODA_NO_RIPGREP").ok().as_deref(), Some("1") | Some("true")) {
+        return None;
+    }
+    which_in_path("rg")
+}
+
+/// Minimal `which`: find an executable by name on PATH. Avoids a dependency.
+fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                    return Some(candidate);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if meta.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// ripgrep fast path: run `rg` and parse its `path:line:text` output into the
+/// same MatchGroup shape the built-in search produces, so the transcript view
+/// is identical. Returns Err to let the caller fall back to the built-in search.
+fn search_ripgrep(rg: &Path, pattern: &str, args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let base = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     let root = resolve(ctx, base)?;
     let limit = arg_usize(args, "limit").unwrap_or(80).min(1000);
-    let re = regex::RegexBuilder::new(&pattern)
+
+    let mut cmd = std::process::Command::new(rg);
+    // Run from the workspace root and search a repo-relative target so rg emits
+    // clean relative paths (e.g. src/main.rs), matching the built-in output.
+    let target = root.strip_prefix(&ctx.root).unwrap_or(&root);
+    let target = if target.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        target
+    };
+    cmd.current_dir(&ctx.root)
+        .arg("--line-number")
+        .arg("--no-heading")
+        .arg("--color=never")
+        .arg("--max-columns=240")
+        // Respect .gitignore even when the directory is not a git repo, so
+        // node_modules / target stay out — matching koda's built-in walker
+        // (which sets require_git(false)). Without this rg only honours
+        // .gitignore inside a real repo and would leak ignored files.
+        .arg("--no-require-git")
+        // Match the built-in cap so huge files are skipped identically.
+        .arg("--max-filesize=4M");
+    if let Some(g) = args.get("glob").and_then(|g| g.as_str()) {
+        if !g.trim().is_empty() {
+            cmd.arg("--glob").arg(g);
+        }
+    }
+    cmd.arg("--regexp").arg(pattern).arg(target.as_os_str());
+    let output = cmd.output().context("running ripgrep")?;
+    // rg exits 1 for "no matches" (fine) and 2 for real errors (fall back).
+    let code = output.status.code().unwrap_or(-1);
+    if code == 2 {
+        anyhow::bail!("ripgrep error");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut out = String::new();
+    let mut hits = 0usize;
+    let mut files = 0usize;
+    let mut groups: Vec<MatchGroup> = Vec::new();
+    'outer: for line in stdout.lines() {
+        // Parse "path:linenum:text" (rg with --no-heading --line-number).
+        let mut it = line.splitn(3, ':');
+        let (Some(path), Some(num), Some(text)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let Ok(lineno) = num.parse::<usize>() else { continue };
+        // rg prints paths relative to cwd (the workspace root); strip a leading
+        // "./" so they read as repo-relative like the built-in output.
+        let rel_path = path.strip_prefix("./").unwrap_or(path).to_string();
+        let shown: String = text.trim_end().chars().take(240).collect();
+        if groups.last().map(|g| g.file != rel_path).unwrap_or(true) {
+            groups.push(MatchGroup { file: rel_path.clone(), lines: Vec::new() });
+            files += 1;
+        }
+        if let Some(g) = groups.last_mut() {
+            g.lines.push((lineno, shown.clone()));
+        }
+        hits += 1;
+        let _ = writeln!(out, "{rel_path}:{lineno}: {shown}");
+        if hits >= limit {
+            let _ = writeln!(out, "[... result limit {limit} reached ...]");
+            break 'outer;
+        }
+    }
+    if hits == 0 {
+        out = format!("no matches for `{pattern}`");
+    }
+    Ok(Outcome::ok(
+        truncate(&out, ctx.cfg.max_tool_output_bytes),
+        format!("search {pattern} ({hits} hits in {files} files)"),
+    )
+    .with(ToolView::Matches {
+        pattern: pattern.to_string(),
+        groups,
+        hits,
+        truncated: hits >= limit,
+    }))
+}
+
+/// The always-available in-process search: walks files with the `ignore` crate
+/// (ripgrep's walker, respecting .gitignore) and matches with `regex`. No
+/// external binary required — this is the fallback when ripgrep isn't installed.
+fn search_builtin(pattern: &str, args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
+    let base = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+    let root = resolve(ctx, base)?;
+    let limit = arg_usize(args, "limit").unwrap_or(80).min(1000);
+    let re = regex::RegexBuilder::new(pattern)
         .case_insensitive(false)
         .build()
         .with_context(|| format!("invalid regex `{pattern}`"))?;
@@ -1445,7 +1589,7 @@ fn search(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         format!("search {pattern} ({hits} hits in {files} files)"),
     )
     .with(ToolView::Matches {
-        pattern: pattern.clone(),
+        pattern: pattern.to_string(),
         groups: groups.clone(),
         hits,
         truncated: hits >= limit,
@@ -2123,6 +2267,22 @@ mod tests {
 
         let bad = search(&json!({"pattern": "("}), &c);
         assert!(bad.is_err(), "invalid regex should error");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn search_builtin_fallback_matches_when_ripgrep_disabled() {
+        // With ripgrep forced off, search() must fall back to the in-process
+        // engine and still respect .gitignore, globs, and repo-relative paths.
+        let dir = fixture("search-fallback");
+        let c = ctx(&dir);
+        std::env::set_var("KODA_NO_RIPGREP", "1");
+        let out = search(&json!({"pattern": "todo"}), &c).unwrap();
+        std::env::remove_var("KODA_NO_RIPGREP");
+        assert!(out.ok, "{}", out.content);
+        assert!(out.content.contains("src/main.rs:2"), "{}", out.content);
+        assert!(out.content.contains("README.md:2"), "{}", out.content);
+        assert!(!out.content.contains("secret.rs"), "gitignore leaked: {}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 
