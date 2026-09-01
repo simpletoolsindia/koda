@@ -2019,17 +2019,26 @@ fn draw(f: &mut Frame, app: &mut App) {
     let (body, rule, input, status) = (chunks[0], chunks[1], chunks[3], chunks[4]);
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
-    let total_before = app.transcript.total_lines();
-    let scrollable = total_before > body.height as usize;
-    let gutter = u16::from(scrollable);
+    // Decide scrollability from the total at the ACTUAL text width, not a stale
+    // count: reserve no gutter, lay out, and only if that overflows do we
+    // reserve the gutter and re-lay-out at the narrower width. Doing it in this
+    // order keeps the reserved gutter and the real line count consistent, so the
+    // scrollbar can never paint over the last column of text (and never flickers
+    // on/off between frames from a stale total).
+    let full_w = body.width.saturating_sub(2); // left pad (1) + right pad (1)
+    let mut total = app.transcript.relayout(full_w);
+    let mut gutter = 0u16;
+    if total > body.height as usize {
+        gutter = 1;
+        total = app.transcript.relayout(full_w.saturating_sub(1));
+    }
     let text_area = Rect {
         x: body.x + 1,
         y: body.y,
-        width: body.width.saturating_sub(2 + gutter),
+        width: full_w.saturating_sub(gutter),
         height: body.height,
     };
     app.body_h = text_area.height as usize;
-    let total = app.transcript.relayout(text_area.width);
     let max_scroll = total.saturating_sub(app.body_h);
     if app.follow {
         app.scroll = max_scroll;
