@@ -278,10 +278,12 @@ pub fn specs() -> Vec<Spec> {
         },
         Spec {
             name: "codegraph",
-            desc: "Ask the project's symbol graph instead of grepping. `overview` maps the \
-                   project; `symbol` says where a name is defined and which files use it; \
-                   `file` lists what a file defines, imports, and who depends on it. Start \
-                   here, then read the files it points at.",
+            desc: "Locate a symbol via the project's prebuilt symbol graph — faster and \
+                   more precise than grep for where-is-it questions. `symbol` says where a \
+                   name is defined and which files use it; `file` lists what a file \
+                   defines, imports, and who depends on it; `overview` maps an unfamiliar \
+                   project. Use it for symbol location, not for reading a known file or \
+                   searching by text (use read_file / search for those).",
             params: json!({
                 "type": "object",
                 "properties": {

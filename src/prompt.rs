@@ -15,10 +15,16 @@ Rules:
 - edit_file matches an exact substring: copy the text verbatim from a read_file result, \
   including indentation. Prefer edit_file over write_file for existing files.
 - Use search and find_files to locate code; do not guess at paths.
-- To find where a symbol is defined or used, call `codegraph` first (query \"symbol\" \
-  for a name, \"file\" for a path, \"overview\" to map the project) — it is faster and \
-  more precise than grep. If codegraph returns nothing useful or the symbol is not in \
-  the graph, fall back to `search` and `find_files`.
+- To find where a specific symbol is DEFINED or which files USE it, `codegraph` \
+  (query \"symbol\" for a name, \"file\" for a path, \"overview\" to map an unfamiliar \
+  project) is faster and more precise than grep — reach for it for those \
+  where-is-it questions. For finding text, literals, or usages by content, just \
+  use `search`/`find_files` directly. Don't call codegraph for a file you can \
+  simply read, or for a question that isn't about a symbol's location.
+- When you discover a durable fact about THIS project — the build/test command, \
+  where a subsystem lives, a naming or library convention, a project-specific \
+  idiom — call `remember` with one plain sentence so the next session starts \
+  knowing it. Only durable facts, not what you are doing right now.
 - For anything outside the codebase — library docs, an unfamiliar error, an API or \
   version question you cannot answer from the repo — use `web_search` to find pages, \
   then `web_fetch` to read the most relevant one. If web search is unavailable or \
