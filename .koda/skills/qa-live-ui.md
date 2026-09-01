@@ -39,6 +39,29 @@ It reads the endpoint, model and key from `~/.config/koda/config.toml` so it
 hits the same MTPLX server koda normally uses. Exit status is non-zero if any
 check fails.
 
+## Choosing a backend (local Ollama vs remote)
+
+A release gate must be **reproducible**. A remote box (MTPLX) can be busy or
+briefly down, which produces false failures. So the harness prefers a **local
+Ollama small model** when one is available — it is fast, always up, and (with
+`granite4.1:8b`) supports tool calls, which the approval-modal test needs.
+
+- `QA_BACKEND=auto` (default): use local Ollama if it is up, else the configured
+  server.
+- `QA_BACKEND=ollama`: force local Ollama (`OLLAMA_URL`, default
+  `http://localhost:11434/v1`; picks `granite4.1:8b` or another small
+  tool-capable model).
+- `QA_BACKEND=config`: force the configured server (e.g. MTPLX).
+
+```bash
+QA_BACKEND=ollama BIN=./target/release/koda python3 tests/qa/live_qa.py
+```
+
+The harness auto-selects a served, non-embedding model and prints which one it
+used. If no server is reachable at all, it exits with status 3 (infra, not a
+UI bug) rather than reporting false failures.
+
+
 ## What it verifies (every user-facing component)
 
 - **Startup & status bar**: welcome banner, ready indicator, live model + live

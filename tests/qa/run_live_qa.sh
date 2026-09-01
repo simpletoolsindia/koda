@@ -17,13 +17,15 @@ echo "› building release binary…"
 [ -x "$BIN" ] || { echo "build failed: $BIN missing"; exit 1; }
 echo "✓ built"
 
-# The command the new window runs. Keep it self-contained.
+# The command the new window runs. Keep it self-contained. Default to the local
+# Ollama backend for a stable, reproducible gate (override with QA_BACKEND).
+QA_BACKEND="${QA_BACKEND:-auto}"
 RUN_CMD="cd $(printf %q "$REPO") && \
 clear && \
 echo '════════════════════════════════════════════════' && \
 echo '  koda LIVE UI QA — watch it drive koda for you' && \
 echo '════════════════════════════════════════════════' && \
-BIN=$(printf %q "$BIN") python3 tests/qa/live_qa.py; \
+QA_BACKEND=$(printf %q "$QA_BACKEND") BIN=$(printf %q "$BIN") python3 tests/qa/live_qa.py; \
 echo; echo 'QA finished — press any key to close.'; read -n 1 -s"
 
 if [ "$(uname)" = "Darwin" ]; then
