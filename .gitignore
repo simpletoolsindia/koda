@@ -15,5 +15,8 @@ tests/visual/playwright-report/
 # Built docs-site output
 docs-site/dist/
 
+# Rust build output in example projects (source-less build artifacts)
+examples/**/target/
+
 # OS / editor cruft
 .DS_Store
