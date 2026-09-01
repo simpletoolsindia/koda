@@ -278,6 +278,11 @@ pub struct Agent {
     /// hidden reasoning); we nudge once with a concrete hint, then stop cleanly
     /// instead of looping. Reset at the start of each top-level turn.
     empty_replies: u32,
+    /// Whether codegraph has already been called in this turn. Used to give a
+    /// single corrective hint when a model greps for a bare symbol first.
+    used_codegraph_this_turn: bool,
+    /// Prevent repeated codegraph reminders from polluting tool results.
+    codegraph_hint_sent: bool,
     /// Outcomes for read-only tools pre-computed concurrently for the current
     /// step, keyed by call id, so `execute` can reuse them instead of re-running
     /// the work serially. Drained as the step's calls are processed.
@@ -368,6 +373,8 @@ impl Agent {
             turn_seq: 0,
             last_failure: None,
             empty_replies: 0,
+            used_codegraph_this_turn: false,
+            codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
         })
     }
@@ -443,6 +450,8 @@ impl Agent {
             turn_seq: 0,
             last_failure: None,
             empty_replies: 0,
+            used_codegraph_this_turn: false,
+            codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
@@ -698,6 +707,8 @@ impl Agent {
             // Each top-level turn is its own undo group.
             self.turn_seq = self.turn_seq.wrapping_add(1);
             self.empty_replies = 0;
+            self.used_codegraph_this_turn = false;
+            self.codegraph_hint_sent = false;
             let _ = tx.send(Event::TurnStart);
         }
         self.history.push(self.user_message(&input, tx));
@@ -915,7 +926,7 @@ impl Agent {
             // Mine the turn's observations into candidate rules. Deterministic
             // and cheap; candidates stay dormant until the user runs /learn.
             if self.cfg.learning {
-                self.learning.induce();
+                let mut learned = self.learning.induce();
                 // Project-idiom mining (Phase 3): once per session, when the
                 // code graph is ready, surface load-bearing internal symbols and
                 // common imports as candidate rules.
@@ -927,12 +938,17 @@ impl Agent {
                             let idioms = g.idioms(3);
                             let imports = g.common_imports(3);
                             drop(guard);
-                            self.learning.induce_idioms(&idioms, &imports);
+                            learned += self.learning.induce_idioms(&idioms, &imports);
                             self.mined_idioms = true;
                         }
                     }
                 }
                 let _ = self.learning.save();
+                if learned > 0 {
+                    let _ = tx.send(Event::Notice(format!(
+                        "learned {learned} new project rule candidate(s) — review with /learn"
+                    )));
+                }
             }
             let _ = tx.send(Event::TurnEnd {
                 history_tokens: self.history_tokens(),
@@ -983,6 +999,13 @@ impl Agent {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("codegraph")
             });
+        } else if let Some(pos) = list.iter().position(|t| {
+            t.pointer("/function/name").and_then(|n| n.as_str()) == Some("codegraph")
+        }) {
+            // Tool order is a meaningful prior for smaller models. Put the
+            // structural index before generic search/read tools.
+            let graph = list.remove(pos);
+            list.insert(0, graph);
         }
         // `manage_agent` creates delegatable role agents, so it only makes sense
         // for the top-level agent when delegation is on. A subagent must not
@@ -1379,11 +1402,14 @@ impl Agent {
 
         let started = std::time::Instant::now();
         let args_for_memory = args.clone();
+        if name == "codegraph" {
+            self.used_codegraph_this_turn = true;
+        }
         // Snapshot before the write, so /undo can put it back without git.
         if matches!(name.as_str(), "write_file" | "edit_file") {
             self.snapshot(&args, &name);
         }
-        let outcome = match name.as_str() {
+        let mut outcome = match name.as_str() {
             "delegate" => self.delegate(&args, tx).await,
             "ask_user" => self.ask_user(&args, tx).await,
             "remember" => self.remember(&args),
@@ -1425,6 +1451,24 @@ impl Agent {
                 None => tools::run(&name, args, &self.ctx).await,
             },
         };
+        if self.depth == 0
+            && self.cfg.codegraph
+            && !self.used_codegraph_this_turn
+            && !self.codegraph_hint_sent
+            && looks_like_symbol_search(&name, &args_for_memory)
+        {
+            let symbol = args_for_memory
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            outcome.content.push_str(&format!(
+                "\n\nCODEGRAPH HINT: `{symbol}` looks like a symbol lookup. Call `codegraph` \
+                 with query=`symbol` before more search/read calls; it returns the definition \
+                 and cross-file users in one result."
+            ));
+            self.codegraph_hint_sent = true;
+        }
         // Command outcomes are the one thing worth learning without being asked:
         // next session should know which test runner actually works here.
         if name == "run_command" && self.cfg.memory && self.depth == 0 {
@@ -2698,6 +2742,24 @@ fn balanced_json_objects(text: &str) -> Vec<&str> {
 
 /// A short reminder of what a tool expects, for when a model sends unparseable/// arguments. Names the required parameters (falling back to all declared ones)
 /// so a small model can re-issue the call without guessing the schema.
+/// A bare identifier (including a qualified `Type::method`) is almost always a
+/// symbol lookup rather than a free-text search. Regexes, phrases and literals
+/// stay on the normal search path.
+fn looks_like_symbol_search(tool: &str, args: &Value) -> bool {
+    if tool != "search" {
+        return false;
+    }
+    let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()).map(str::trim) else {
+        return false;
+    };
+    !pattern.is_empty()
+        && pattern.len() <= 120
+        && pattern.chars().any(|c| c.is_ascii_alphabetic())
+        && pattern
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':'))
+}
+
 fn required_params_hint(name: &str) -> String {
     let Some(spec) = tools::spec(name) else {
         return format!("`{name}` is not a known tool.");
@@ -3042,6 +3104,27 @@ mod tests {
 
     /// The malformed-argument hint names the tool and its required parameters
     /// so a small model can re-issue the call instead of hitting a hard error.
+    #[test]
+    fn bare_identifier_search_is_recognised_as_symbol_lookup() {
+        assert!(looks_like_symbol_search("search", &serde_json::json!({"pattern": "Agent::execute"})));
+        assert!(looks_like_symbol_search("search", &serde_json::json!({"pattern": "compact"})));
+        assert!(!looks_like_symbol_search("search", &serde_json::json!({"pattern": "error: connection reset"})));
+        assert!(!looks_like_symbol_search("search", &serde_json::json!({"pattern": "foo.*bar"})));
+        assert!(!looks_like_symbol_search("read_file", &serde_json::json!({"pattern": "compact"})));
+    }
+
+    #[test]
+    fn codegraph_is_the_first_advertised_tool_when_enabled() {
+        let agent = test_agent();
+        assert!(agent.cfg.codegraph);
+        let advertised = agent.advertised_tools();
+        let names: Vec<&str> = advertised
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names.first().copied(), Some("codegraph"), "{names:?}");
+    }
+
     #[test]
     fn required_params_hint_names_required_params() {
         let hint = required_params_hint("read_file");

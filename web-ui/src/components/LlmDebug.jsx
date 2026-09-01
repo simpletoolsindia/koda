@@ -107,13 +107,13 @@ function LlmDebug({ debug, loading, error }) {
   if (debug && !debug.enabled) {
     return (
       <div className="flex items-center justify-center h-full p-8">
-        <div className="max-w-md text-center p-8 rounded-2xl bg-gradient-to-br from-amber-500/10 to-orange-500/5 border border-amber-500/20 backdrop-blur-sm">
+        <div className="max-w-md text-center p-8 rounded-2xl bg-surface border border-amber-500/25 shadow-panel">
           <div className="w-14 h-14 mx-auto mb-4 rounded-xl bg-amber-500/20 flex items-center justify-center">
             <svg className="w-7 h-7 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
           </div>
           <h3 className="text-lg font-semibold text-amber-200 mb-2">Debug capture is disabled</h3>
           <p className="text-sm text-gray-400 leading-relaxed">
-            Turn on <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">debug</code> capture in koda — the <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">/debug</code> command, the <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">/settings</code> page, or <code className="px-1.5 py-0.5 rounded bg-white/10 text-cyan-300 font-mono text-xs">KODA_DEBUG=1</code> — to watch the exact prompt koda is processing and the model's response as it streams back.
+            Turn on <code className="px-1.5 py-0.5 rounded bg-white/10 text-indigo-300 font-mono text-xs">debug</code> capture in koda — the <code className="px-1.5 py-0.5 rounded bg-white/10 text-indigo-300 font-mono text-xs">/debug</code> command, the <code className="px-1.5 py-0.5 rounded bg-white/10 text-indigo-300 font-mono text-xs">/settings</code> page, or <code className="px-1.5 py-0.5 rounded bg-white/10 text-indigo-300 font-mono text-xs">KODA_DEBUG=1</code> — to watch the exact prompt koda is processing and the model's response as it streams back.
           </p>
         </div>
       </div>
@@ -124,10 +124,10 @@ function LlmDebug({ debug, loading, error }) {
   const anyProcessing = sessions.some(s => statusById[s.id] && statusById[s.id].processing);
 
   return (
-    <div className="flex h-full">
+    <div className="flex flex-col md:flex-row h-full min-h-0">
       {/* Session list */}
-      <aside className="w-56 shrink-0 border-r border-white/5 overflow-y-auto bg-white/[0.02]">
-        <div className="p-3 sticky top-0 bg-[#0a0b12]/80 backdrop-blur-sm z-10">
+      <aside className="w-full h-36 md:w-64 md:h-full shrink-0 border-b md:border-b-0 md:border-r border-line overflow-y-auto bg-surface">
+        <div className="p-3 sticky top-0 bg-[#15171d]/95 border-b border-line backdrop-blur-sm z-10">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
             <span>Sessions · {sessions.length}</span>
             {anyProcessing && (
@@ -138,7 +138,7 @@ function LlmDebug({ debug, loading, error }) {
             )}
           </div>
           <label className="mt-2 flex items-center gap-1.5 text-[10px] text-gray-500 normal-case tracking-normal cursor-pointer select-none">
-            <input type="checkbox" checked={followLatest} onChange={e => setFollowLatest(e.target.checked)} className="accent-cyan-500" />
+            <input type="checkbox" checked={followLatest} onChange={e => setFollowLatest(e.target.checked)} className="accent-indigo-500" />
             Follow latest (currently processing)
           </label>
         </div>
@@ -151,7 +151,7 @@ function LlmDebug({ debug, loading, error }) {
           return (
             <button key={s.id} onClick={() => { setSelectedId(s.id); setFollowLatest(false); }}
               className={`w-full text-left px-3 py-2.5 text-xs border-l-2 transition-all ${
-                selectedId === s.id ? 'border-cyan-400 bg-cyan-500/10 text-cyan-200' : 'border-transparent text-gray-400 hover:bg-white/5'
+                selectedId === s.id ? 'border-indigo-400 bg-indigo-500/10 text-indigo-200' : 'border-transparent text-gray-400 hover:bg-white/5'
               }`} aria-current={selectedId === s.id}>
               <div className="flex items-center gap-1.5">
                 <span className="font-mono font-medium truncate">{s.id}</span>
@@ -170,7 +170,7 @@ function LlmDebug({ debug, loading, error }) {
       </aside>
 
       {/* Detail */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex-1 min-h-0 overflow-y-auto bg-canvas p-4 md:p-5 lg:p-6">
         {!selected && <div className="text-gray-500 text-sm">Select a session to inspect.</div>}
         {selected && <SessionDetail session={selected} status={statusById[selected.id]} />}
       </div>
@@ -192,7 +192,7 @@ function SessionDetail({ session, status }) {
   }, [processing]);
 
   return (
-    <div className="animate-fade-in space-y-4">
+    <div className="space-y-4">
       {/* Live status banner */}
       <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs ${
         processing ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-white/[0.03] border-white/10 text-gray-400'
@@ -215,7 +215,7 @@ function SessionDetail({ session, status }) {
         {['request','response'].map(t => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              tab === t ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
+              tab === t ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
             }`}>
             {t === 'request' ? '→ Prompt (our request)' : '← Response (LLM)'}
             {t === 'response' && processing && <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse align-middle" />}
@@ -237,7 +237,7 @@ function SessionDetail({ session, status }) {
                 </Panel>
               )}
               {Array.isArray(req.messages) && (
-                <Panel title={`Messages (${req.messages.length})`} accent="cyan">
+                <Panel title={`Messages (${req.messages.length})`} accent="indigo">
                   <div className="space-y-2">
                     {req.messages.map((m, i) => (
                       <div key={i} className="rounded-lg bg-black/30 border border-white/5 overflow-hidden">
@@ -283,7 +283,7 @@ function SessionDetail({ session, status }) {
       {tab === 'response' && (
         <div className="space-y-3">
           {resp.text && (
-            <Panel title="Assistant Text" accent="cyan" copy={resp.text}>
+            <Panel title="Assistant Text" accent="indigo" copy={resp.text}>
               <div className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">
                 {resp.text}
                 {processing && <span className="inline-block w-2 h-4 ml-0.5 bg-emerald-400/80 align-text-bottom animate-pulse" />}
@@ -348,7 +348,7 @@ function MessageContent({ m }) {
             const url = (part.image_url && (part.image_url.url || part.image_url)) || part.url || '';
             return (
               <div key={i} className="flex items-start gap-2">
-                <span className="text-[9px] uppercase tracking-wider text-cyan-400/70 pt-1 shrink-0">image</span>
+                <span className="text-[9px] uppercase tracking-wider text-indigo-400/70 pt-1 shrink-0">image</span>
                 {url ? <img src={url} alt="attached image" className="max-h-40 rounded-lg border border-white/10 object-contain bg-black/30" />
                      : <span className="text-[11px] text-gray-500">(no url)</span>}
               </div>
@@ -368,13 +368,13 @@ function MessageContent({ m }) {
   return <pre className="p-2.5 text-[11px] text-gray-300 whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-mono">{JSON.stringify(c ?? m, null, 2)}</pre>;
 }
 
-function Panel({ title, accent = 'cyan', children, copy }) {
+function Panel({ title, accent = 'indigo', children, copy }) {
   const accentColors = {
-    cyan: 'border-cyan-500/20', purple: 'border-purple-500/20', green: 'border-emerald-500/20',
+    indigo: 'border-indigo-500/20', purple: 'border-purple-500/20', green: 'border-emerald-500/20',
   };
-  const dotColors = { cyan: 'bg-cyan-400', purple: 'bg-purple-400', green: 'bg-emerald-400' };
+  const dotColors = { indigo: 'bg-indigo-400', purple: 'bg-purple-400', green: 'bg-emerald-400' };
   return (
-    <section className={`rounded-xl bg-white/[0.03] border ${accentColors[accent]} backdrop-blur-sm overflow-hidden`}>
+    <section className={`rounded-xl bg-surface border ${accentColors[accent]} shadow-panel overflow-hidden`}>
       <h3 className="px-3 py-2 text-xs font-semibold text-gray-300 border-b border-white/5 flex items-center gap-2">
         <span className={`w-1.5 h-1.5 rounded-full ${dotColors[accent]}`} />{title}
         {copy != null && copy !== '' && <span className="ml-auto"><CopyButton text={copy} label="" /></span>}

@@ -14,17 +14,7 @@ Rules:
 - Investigate before you edit. Read the relevant file before changing it.
 - edit_file matches an exact substring: copy the text verbatim from a read_file result, \
   including indentation. Prefer edit_file over write_file for existing files.
-- Use search and find_files to locate code; do not guess at paths.
-- ANALYZING CODE: your FIRST move for any \"where is X defined / used\", \"what \
-  calls Y\", \"what does this file depend on\", \"how is this structured\", or \
-  \"where do I change Z\" question is `codegraph` — it is the fast, precise \
-  symbol index (query \"symbol\" for a name, \"file\" for a path, \"overview\" to map \
-  an unfamiliar project). Call it BEFORE grepping or reading around: it tells you \
-  the exact file/line a symbol is defined and every file that uses it, so you \
-  read only what matters. Only fall back to `search`/`find_files` when the target \
-  is free text/a literal, or when codegraph returns nothing for a symbol. Don't \
-  guess at a symbol's location or hunt with `search` when `codegraph symbol` \
-  answers it in one call.
+- Use search and find_files to locate free text or files; do not guess at paths.
 - When you discover a durable fact about THIS project — the build/test command, \
   where a subsystem lives, a naming or library convention, a project-specific \
   idiom — call `remember` with one plain sentence so the next session starts \
@@ -53,6 +43,15 @@ calls and diffs already, so do not repeat them.";
 pub fn base_prompt() -> &'static str {
     BASE
 }
+
+/// Functional guardrail layered onto every prompt while the tool is enabled.
+/// Keep this outside `BASE`: a custom system prompt replaces the base, but must
+/// not accidentally remove the code-analysis workflow that makes koda precise.
+const CODEGRAPH_GUIDANCE: &str = "\n\nCODE ANALYSIS WORKFLOW (mandatory): for questions about where a symbol is \
+defined or used, what calls it, file dependencies, project structure, or where \
+to make a change, call `codegraph` FIRST (`symbol`, `file`, or `overview`). Use \
+its file/line result to choose what to read. Use `search`/`find_files` first only \
+for free text or literals, and as a fallback when codegraph has no match.";
 
 const TEXT_PROTOCOL: &str = "\
 Tool calls use this exact format, one per message, at the end of your reply:
@@ -170,6 +169,9 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
         p.push_str(BASE);
     } else {
         p.push_str(cfg.system_prompt.trim());
+    }
+    if cfg.codegraph {
+        p.push_str(CODEGRAPH_GUIDANCE);
     }
     match mode {
         Mode::Plan => {
@@ -290,4 +292,31 @@ fn dedup(v: &[&str]) -> Vec<String> {
         }
     }
     out
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_prompt_keeps_codegraph_workflow_when_enabled() {
+        let mut cfg = Config::default();
+        cfg.system_prompt = "Custom concise reviewer.".into();
+        cfg.codegraph = true;
+        let prompt = build(&cfg, Path::new("/tmp/koda-prompt-test"), false, Mode::Execute);
+        assert!(prompt.starts_with("Custom concise reviewer."));
+        assert!(prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
+        assert!(prompt.contains("call `codegraph` FIRST"), "{prompt}");
+    }
+
+    #[test]
+    fn disabled_codegraph_is_not_advertised_in_prompt() {
+        let mut cfg = Config::default();
+        cfg.system_prompt = "Custom concise reviewer.".into();
+        cfg.codegraph = false;
+        let prompt = build(&cfg, Path::new("/tmp/koda-prompt-test"), false, Mode::Execute);
+        assert!(!prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
+        assert!(!prompt.contains("`codegraph`"), "{prompt}");
+    }
 }

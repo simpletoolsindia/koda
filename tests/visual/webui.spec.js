@@ -65,17 +65,37 @@ test('web UI navigation exposes all features', async ({ page }) => {
   // --- System Prompt: the newly-added navigation + editor ---
   await page.getByRole('tab', { name: 'System Prompt' }).click();
   await expect(page.getByRole('heading', { name: 'System Prompt' })).toBeVisible();
-  await expect(page.getByLabel('System prompt')).toBeVisible();  // the textarea
+  await expect(page.getByRole('textbox', { name: 'System prompt', exact: true })).toBeVisible();  // the textarea
   await expect(page.getByRole('button', { name: /Save prompt/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /Load built-in/ })).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/07-system-prompt.png` });
   // Edit and save a custom prompt.
-  const ta = page.getByLabel('System prompt');
-  await ta.fill('You are a terse, senior Rust reviewer. Prefer small diffs.');
+  const ta = page.getByRole('textbox', { name: 'System prompt', exact: true });
+  await ta.fill(`You are a terse, senior Rust reviewer. Prefer small diffs. Run ${Date.now()}.`);
   await page.getByRole('button', { name: /Save prompt/ }).click();
   await expect(page.getByText(/System prompt saved/)).toBeVisible({ timeout: 5000 });
   await page.screenshot({ path: `${SHOTS}/08-system-prompt-saved.png` });
 
   // No uncaught JS/render errors anywhere in the flow.
   expect(consoleErrors, consoleErrors.join('\n')).toEqual([]);
+});
+
+
+test('mobile workspace keeps every section reachable without horizontal overflow', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+
+  for (const label of ['Live Logs', 'LLM Debug', 'Code Graph', 'Agents & Skills', 'System Prompt']) {
+    await expect(page.getByRole('tab', { name: label })).toBeVisible();
+  }
+
+  await page.getByRole('tab', { name: 'LLM Debug' }).click();
+  await expect(page.getByText('rr-session-2').first()).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/09-mobile-llm.png`, fullPage: false });
+
+  await page.getByRole('tab', { name: 'System Prompt' }).click();
+  await expect(page.getByRole('textbox', { name: 'System prompt', exact: true })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: `${SHOTS}/10-mobile-system.png`, fullPage: false });
 });

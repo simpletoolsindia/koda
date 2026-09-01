@@ -62,14 +62,14 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
   return (
     <div className="flex flex-col lg:flex-row h-full overflow-hidden">
       {/* List */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex-1 overflow-y-auto bg-canvas p-4 md:p-6">
         <div className="flex items-center gap-2 mb-3">
           <h2 className="text-sm font-semibold text-gray-200">Knowledge Base</h2>
           <div className="flex gap-1 ml-auto" role="group" aria-label="Filter">
             {[['all', `All ${list.length}`], ['skills', `Skills ${skillCount}`], ['agents', `Agents ${agentCount}`]].map(([v, label]) => (
               <button key={v} onClick={() => setFilter(v)}
                 className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
-                  filter === v ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
+                  filter === v ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
                 }`}>{label}</button>
             ))}
           </div>
@@ -84,7 +84,7 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
         <div className="grid gap-2 sm:grid-cols-2">
           {filtered.map((s, i) => (
             <div key={i}
-              className="relative text-left p-3 rounded-xl bg-white/[0.03] border border-white/5 hover:border-cyan-500/30 hover:bg-white/[0.05] transition-all group animate-fade-in">
+              className="relative text-left p-4 rounded-xl bg-surface border border-line hover:border-line-strong hover:bg-raised transition-colors group animate-fade-in shadow-panel">
               <div className="flex items-center gap-2 mb-1">
                 <button type="button" onClick={() => loadIntoForm(s)} className="flex items-center gap-2 min-w-0 flex-1 text-left" aria-label={`Edit ${s.name}`}>
                   <span className="font-mono text-sm text-gray-100 font-semibold truncate">{s.name}</span>
@@ -94,13 +94,13 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
                     <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-medium border border-emerald-500/30 shrink-0">skill</span>
                   )}
                 </button>
-                <div className="flex items-center gap-1 ml-auto opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex items-center gap-1 ml-auto opacity-100 transition-opacity">
                   <button type="button" onClick={() => loadIntoForm(s)} title="Edit" aria-label={`Edit ${s.name}`}
-                    className="p-1 rounded text-gray-500 hover:text-cyan-300 hover:bg-white/10">
+                    className="w-8 h-8 inline-flex items-center justify-center rounded-md text-gray-500 hover:text-indigo-300 hover:bg-white/10">
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                   </button>
                   <button type="button" onClick={(e) => remove(s, e)} title="Delete" aria-label={`Delete ${s.name}`}
-                    className="p-1 rounded text-gray-500 hover:text-red-400 hover:bg-red-500/10">
+                    className="w-8 h-8 inline-flex items-center justify-center rounded-md text-gray-500 hover:text-red-400 hover:bg-red-500/10">
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                   </button>
                 </div>
@@ -116,7 +116,7 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
       </div>
 
       {/* Editor */}
-      <aside className="lg:w-96 shrink-0 border-t lg:border-t-0 lg:border-l border-white/5 overflow-y-auto bg-white/[0.02]">
+      <aside className="lg:w-[420px] shrink-0 border-t lg:border-t-0 lg:border-l border-line overflow-y-auto bg-surface">
         <form onSubmit={submit} className="p-4 space-y-3">
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-gray-200">{form.role ? 'Edit / Create Agent' : 'Edit / Create Skill'}</h2>
@@ -151,7 +151,7 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
           </Field>
 
           <button type="submit" disabled={submitting}
-            className="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-500 text-white text-sm font-semibold hover:from-cyan-400 hover:to-blue-400 transition-all disabled:opacity-50 active:scale-[0.98] shadow-lg shadow-cyan-500/20">
+            className="primary-button w-full py-2.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
             {submitting ? 'Saving…' : (form.role ? 'Save Agent' : 'Save Skill')}
           </button>
         </form>
@@ -163,7 +163,7 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
 function Field({ label, required, children }) {
   return (
     <label className="block">
-      <span className="text-[11px] font-medium text-gray-400 mb-1 block">{label}{required && <span className="text-cyan-400"> *</span>}</span>
+      <span className="text-[11px] font-medium text-gray-400 mb-1 block">{label}{required && <span className="text-indigo-400"> *</span>}</span>
       {children}
     </label>
   );

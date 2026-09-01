@@ -47,13 +47,13 @@ function LiveLogs({ logs, version, connected }) {
 
   const levelColors = {
     debug: 'text-gray-500',
-    info: 'text-cyan-400',
+    info: 'text-indigo-400',
     warn: 'text-amber-400',
     error: 'text-red-400',
   };
   const levelBg = {
     debug: 'bg-gray-500/10 border-gray-600/30',
-    info: 'bg-cyan-500/10 border-cyan-500/30',
+    info: 'bg-indigo-500/10 border-indigo-500/30',
     warn: 'bg-amber-500/10 border-amber-500/30',
     error: 'bg-red-500/10 border-red-500/30',
   };
@@ -67,7 +67,7 @@ function LiveLogs({ logs, version, connected }) {
   return (
     <div className="flex flex-col h-full">
       {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-2 p-3 border-b border-white/5 bg-white/[0.02] backdrop-blur-sm">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-line bg-surface">
         {/* Level toggles */}
         <div className="flex gap-1" role="group" aria-label="Log level filters">
           {['debug','info','warn','error'].map(lv => (
@@ -83,13 +83,13 @@ function LiveLogs({ logs, version, connected }) {
         <div className="w-px h-5 bg-white/10 mx-1" />
         {/* Area select */}
         <select value={areaFilter} onChange={e => setAreaFilter(e.target.value)}
-          className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+          className="control px-2.5 py-1 text-xs focus:outline-none"
           aria-label="Filter by area">
           {areas.map(a => <option key={a} value={a}>{a}</option>)}
         </select>
         {/* Detail level */}
         <select value={detailLevel} onChange={e => setDetailLevel(e.target.value)}
-          className="bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+          className="control px-2.5 py-1 text-xs focus:outline-none"
           aria-label="Detail level">
           <option value="simple">Simple (info+)</option>
           <option value="medium">Medium (+tool)</option>
@@ -100,12 +100,12 @@ function LiveLogs({ logs, version, connected }) {
           <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
           <input type="text" value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Search logs…" aria-label="Search logs"
-            className="w-full bg-white/5 border border-white/10 rounded-lg pl-7 pr-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" />
+            className="form-input !min-h-[32px] !py-1 w-full pl-7 pr-2 text-xs" />
         </div>
         {/* Auto-scroll toggle */}
         <button onClick={() => { setAutoScroll(!autoScroll); if (!autoScroll && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' }); }}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all border ${
-            autoScroll ? 'bg-cyan-500/15 border-cyan-500/30 text-cyan-400' : 'bg-white/5 border-white/10 text-gray-500'
+            autoScroll ? 'bg-indigo-500/15 border-indigo-500/30 text-indigo-400' : 'bg-white/5 border-white/10 text-gray-500'
           } hover:scale-105 active:scale-95`}
           aria-label={autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll'}>
           {autoScroll ? (
@@ -137,11 +137,20 @@ function LiveLogs({ logs, version, connected }) {
 
       {/* Log entries */}
       <div ref={containerRef} onScroll={handleScroll}
-        className="flex-1 overflow-y-auto overflow-x-hidden font-mono text-[12px] leading-5 scroll-smooth"
+        className="flex-1 overflow-y-auto overflow-x-hidden bg-canvas font-mono text-[12px] leading-5 scroll-smooth"
         role="log" aria-live="polite" aria-label="Live log output">
         {trimmed > 0 && (
           <div className="text-center text-gray-600 text-[10px] py-1 border-b border-white/5">
             … {trimmed} older entries hidden …
+          </div>
+        )}
+        {visible.length === 0 && (
+          <div className="h-full min-h-[320px] flex items-center justify-center p-8">
+            <div className="empty-state max-w-sm w-full px-6 py-8 text-center">
+              <div className="mx-auto mb-3 w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-300 font-mono text-sm">›_</div>
+              <div className="text-sm font-medium text-zinc-200">No matching runtime events</div>
+              <p className="mt-1.5 text-[12px] leading-5 text-subtle">Adjust the filters, or run a task in koda to start the live event stream.</p>
+            </div>
           </div>
         )}
         {visible.map((entry, i) => (

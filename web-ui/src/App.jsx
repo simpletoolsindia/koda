@@ -1,7 +1,4 @@
-// App.jsx — Root component: nav, data polling, toasts, section routing
-// Fetch JSON from a koda API endpoint. A 404 almost always means the running
-// koda binary is older than this UI and lacks the endpoint — so say exactly
-// that, since "failed to load" alone sends people hunting in the wrong place.
+// App.jsx — workspace shell, data polling, toasts, and section routing
 async function fetchJson(path) {
   const res = await fetch(path);
   if (res.status === 404) {
@@ -10,6 +7,34 @@ async function fetchJson(path) {
   if (!res.ok) throw new Error(`${path} returned ${res.status}`);
   return res.json();
 }
+
+const WORKSPACE_TABS = [
+  {
+    id: 'logs', label: 'Live Logs', short: 'Logs', key: '1',
+    description: 'Inspect runtime events, tool activity, retries, and failures as they happen.',
+    icon: 'M4 6h16M4 12h16M4 18h10',
+  },
+  {
+    id: 'debug', label: 'LLM Debug', short: 'LLM', key: '2',
+    description: 'See the exact prompt, streaming response, reasoning, and tool calls for each turn.',
+    icon: 'M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z',
+  },
+  {
+    id: 'graph', label: 'Code Graph', short: 'Graph', key: '3',
+    description: 'Explore indexed symbols, definitions, references, and file relationships.',
+    icon: 'M8 6a2 2 0 11-4 0 2 2 0 014 0zm12 0a2 2 0 11-4 0 2 2 0 014 0zM14 18a2 2 0 11-4 0 2 2 0 014 0zM7.7 7.2l3.1 8.1m5.5-8.1l-3.1 8.1M8 6h8',
+  },
+  {
+    id: 'skills', label: 'Agents & Skills', short: 'Skills', key: '4',
+    description: 'Manage reusable project knowledge and specialized delegation roles.',
+    icon: 'M12 3l2.1 4.26L19 8l-3.5 3.4.83 4.8L12 14l-4.33 2.2.83-4.8L5 8l4.9-.74L12 3z',
+  },
+  {
+    id: 'system', label: 'System Prompt', short: 'Prompt', key: '5',
+    description: 'Review and tune the operating instructions applied to every koda session.',
+    icon: 'M9 5h6M9 9h6m-6 4h4m5 8H6a2 2 0 01-2-2V3h16v16a2 2 0 01-2 2z',
+  },
+];
 
 function App() {
   const [tab, setTab] = React.useState('logs');
@@ -21,15 +46,12 @@ function App() {
   const [debug, setDebug] = React.useState(null);
   const [debugLoading, setDebugLoading] = React.useState(false);
   const [debugError, setDebugError] = React.useState(null);
-
   const [graph, setGraph] = React.useState(null);
   const [graphLoading, setGraphLoading] = React.useState(false);
   const [graphError, setGraphError] = React.useState(null);
-
   const [skills, setSkills] = React.useState(null);
   const [skillsLoading, setSkillsLoading] = React.useState(false);
   const [skillsError, setSkillsError] = React.useState(null);
-
   const [settings, setSettings] = React.useState(null);
   const [settingsLoading, setSettingsLoading] = React.useState(false);
   const [settingsError, setSettingsError] = React.useState(null);
@@ -37,13 +59,12 @@ function App() {
   const seenSeqRef = React.useRef(-1);
   const logsRef = React.useRef([]);
 
-  const pushToast = (message, kind = 'info') => {
+  const pushToast = React.useCallback((message, kind = 'info') => {
     const id = Math.random().toString(36).slice(2);
-    setToasts(t => [...t, { id, message, kind }]);
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000);
-  };
+    setToasts(items => [...items, { id, message, kind }]);
+    setTimeout(() => setToasts(items => items.filter(item => item.id !== id)), 4000);
+  }, []);
 
-  // Merge new log entries (append-only by seq)
   const mergeLogs = React.useCallback((data) => {
     if (!data) return;
     if (typeof data.version === 'number') setVersion(data.version);
@@ -51,79 +72,73 @@ function App() {
     if (entries.length === 0) return;
     let maxSeq = seenSeqRef.current;
     const fresh = [];
-    for (const e of entries) {
-      if (e.seq > seenSeqRef.current) { fresh.push(e); if (e.seq > maxSeq) maxSeq = e.seq; }
+    for (const entry of entries) {
+      if (entry.seq > seenSeqRef.current) {
+        fresh.push(entry);
+        if (entry.seq > maxSeq) maxSeq = entry.seq;
+      }
     }
     if (fresh.length > 0) {
       seenSeqRef.current = maxSeq;
-      logsRef.current = [...logsRef.current, ...fresh];
-      // hard cap in memory at 5000
-      if (logsRef.current.length > 5000) logsRef.current = logsRef.current.slice(-5000);
+      logsRef.current = [...logsRef.current, ...fresh].slice(-5000);
       setLogs(logsRef.current.slice());
     }
   }, []);
 
-  // Poll logs every ~1s
   React.useEffect(() => {
     let alive = true;
     const poll = async () => {
       try {
-        const since = seenSeqRef.current + 1;
-        const res = await fetch(`/api/logs?since=${since}`);
-        if (!res.ok) throw new Error('bad status ' + res.status);
+        const res = await fetch(`/api/logs?since=${seenSeqRef.current + 1}`);
+        if (!res.ok) throw new Error(`bad status ${res.status}`);
         const data = await res.json();
         if (!alive) return;
         setConnected(true);
         mergeLogs(data);
-      } catch (e) {
+      } catch (_) {
         if (alive) setConnected(false);
       }
     };
     poll();
-    const iv = setInterval(poll, 1000);
-    return () => { alive = false; clearInterval(iv); };
+    const timer = setInterval(poll, 1000);
+    return () => { alive = false; clearInterval(timer); };
   }, [mergeLogs]);
 
-  // Optional SSE for lower-latency updates
   React.useEffect(() => {
-    let es;
+    let source;
     try {
-      es = new EventSource('/api/events');
-      es.addEventListener('logs', (ev) => {
-        try { const data = JSON.parse(ev.data); setConnected(true); mergeLogs(data); } catch {}
+      source = new EventSource('/api/events');
+      source.addEventListener('logs', event => {
+        try { setConnected(true); mergeLogs(JSON.parse(event.data)); } catch (_) {}
       });
-      es.onerror = () => { /* fall back to polling; keep quiet */ };
-    } catch {}
-    return () => { if (es) es.close(); };
+      source.onerror = () => {};
+    } catch (_) {}
+    return () => { if (source) source.close(); };
   }, [mergeLogs]);
 
-  // Lazy-load section data
   const loadDebug = React.useCallback(async () => {
     setDebugLoading(true); setDebugError(null);
-    try {
-      setDebug(await fetchJson('/api/debug'));
-    } catch (e) { setDebugError(e.message); } finally { setDebugLoading(false); }
+    try { setDebug(await fetchJson('/api/debug')); }
+    catch (error) { setDebugError(error.message); }
+    finally { setDebugLoading(false); }
   }, []);
-
   const loadGraph = React.useCallback(async () => {
     setGraphLoading(true); setGraphError(null);
-    try {
-      setGraph(await fetchJson('/api/codegraph'));
-    } catch (e) { setGraphError(e.message); } finally { setGraphLoading(false); }
+    try { setGraph(await fetchJson('/api/codegraph')); }
+    catch (error) { setGraphError(error.message); }
+    finally { setGraphLoading(false); }
   }, []);
-
   const loadSkills = React.useCallback(async () => {
     setSkillsLoading(true); setSkillsError(null);
-    try {
-      setSkills(await fetchJson('/api/skills'));
-    } catch (e) { setSkillsError(e.message); } finally { setSkillsLoading(false); }
+    try { setSkills(await fetchJson('/api/skills')); }
+    catch (error) { setSkillsError(error.message); }
+    finally { setSkillsLoading(false); }
   }, []);
-
   const loadSettings = React.useCallback(async () => {
     setSettingsLoading(true); setSettingsError(null);
-    try {
-      setSettings(await fetchJson('/api/settings'));
-    } catch (e) { setSettingsError(e.message); } finally { setSettingsLoading(false); }
+    try { setSettings(await fetchJson('/api/settings')); }
+    catch (error) { setSettingsError(error.message); }
+    finally { setSettingsLoading(false); }
   }, []);
 
   React.useEffect(() => {
@@ -131,123 +146,137 @@ function App() {
     if (tab === 'graph' && !graph) loadGraph();
     if (tab === 'skills' && !skills) loadSkills();
     if (tab === 'system' && !settings) loadSettings();
-  }, [tab]);
+  }, [tab, debug, graph, skills, settings, loadDebug, loadGraph, loadSkills, loadSettings]);
 
-  // While the LLM Debug tab is open, poll so the prompt currently being
-  // processed and the response streaming back appear live (no manual refresh).
-  // Silent refresh: never flips the tab into a loading spinner.
   const refreshDebugQuiet = React.useCallback(async () => {
     try {
       const res = await fetch('/api/debug');
-      if (!res.ok) return;
-      setDebug(await res.json());
-    } catch (_) { /* keep last snapshot on a blip */ }
+      if (res.ok) setDebug(await res.json());
+    } catch (_) {}
   }, []);
-
   React.useEffect(() => {
     if (tab !== 'debug') return;
-    const iv = setInterval(refreshDebugQuiet, 1000);
-    return () => clearInterval(iv);
+    const timer = setInterval(refreshDebugQuiet, 1000);
+    return () => clearInterval(timer);
   }, [tab, refreshDebugQuiet]);
 
-  // Keyboard shortcuts 1-4
   React.useEffect(() => {
-    const handler = (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      const map = { '1': 'logs', '2': 'debug', '3': 'graph', '4': 'skills', '5': 'system' };
-      if (map[e.key]) setTab(map[e.key]);
+    const handler = event => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
+      const target = WORKSPACE_TABS.find(item => item.key === event.key);
+      if (target) setTab(target.id);
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
-  const tabs = [
-    { id: 'logs', label: 'Live Logs', icon: 'M4 6h16M4 12h16M4 18h7' },
-    { id: 'debug', label: 'LLM Debug', icon: 'M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' },
-    { id: 'graph', label: 'Code Graph', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
-    { id: 'skills', label: 'Agents & Skills', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
-    { id: 'system', label: 'System Prompt', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
-  ];
+  const active = WORKSPACE_TABS.find(item => item.id === tab) || WORKSPACE_TABS[0];
+  const refreshCurrent = () => {
+    if (tab === 'debug') loadDebug();
+    if (tab === 'graph') loadGraph();
+    if (tab === 'skills') loadSkills();
+    if (tab === 'system') loadSettings();
+  };
 
   return (
-    <div className="flex flex-col h-screen text-gray-100">
-      {/* Header / Nav */}
-      <header className="shrink-0 border-b border-white/10 bg-gradient-to-r from-[#0d0e18]/90 to-[#0a0b12]/90 backdrop-blur-xl">
-        <div className="flex items-center gap-4 px-4 h-14">
-          {/* Logo */}
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 via-blue-500 to-purple-600 flex items-center justify-center shadow-lg shadow-cyan-500/30">
-              <span className="text-white font-black text-sm">K</span>
+    <div className="flex h-screen overflow-hidden bg-canvas text-ink">
+      <aside className="app-sidebar fixed z-40 bottom-0 inset-x-0 h-16 border-t md:static md:w-[236px] md:h-full md:border-t-0 md:border-r flex md:flex-col shrink-0">
+        <div className="hidden md:flex items-center gap-3 h-[76px] px-4 border-b border-line">
+          <div className="w-9 h-9 rounded-[10px] bg-indigo-500 flex items-center justify-center shadow-lg shadow-indigo-950/30">
+            <span className="text-white font-semibold text-[15px] tracking-tight">K</span>
+          </div>
+          <div className="min-w-0">
+            <div className="text-[14px] font-semibold tracking-tight text-zinc-100">koda</div>
+            <div className="text-[11px] text-subtle">observability workspace</div>
+          </div>
+        </div>
+
+        <nav className="flex flex-1 md:flex-none md:block items-stretch justify-around md:px-2.5 md:py-3 md:space-y-1" role="tablist" aria-label="Workspace sections">
+          {WORKSPACE_TABS.map(item => (
+            <button key={item.id} id={`tab-${item.id}`} type="button"
+              role="tab" aria-selected={tab === item.id} aria-controls="workspace-panel"
+              aria-label={item.label} data-active={tab === item.id}
+              onClick={() => setTab(item.id)}
+              className="nav-item group relative flex flex-col md:flex-row items-center justify-center md:justify-start gap-1 md:gap-2.5 flex-1 md:w-full md:h-10 px-1 md:px-2.5 rounded-none md:rounded-lg text-[10px] md:text-[13px] font-medium transition-colors">
+              <svg className="w-[18px] h-[18px] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d={item.icon} />
+              </svg>
+              <span className="md:hidden">{item.short}</span>
+              <span className="hidden md:inline truncate">{item.label}</span>
+              <kbd className="nav-key hidden md:inline-flex ml-auto min-w-[21px] h-5 px-1 items-center justify-center rounded text-[10px] font-mono">{item.key}</kbd>
+            </button>
+          ))}
+        </nav>
+
+        <div className="hidden md:block mt-auto p-3">
+          <div className="rounded-xl border border-line bg-surface p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`w-2 h-2 shrink-0 rounded-full ${connected ? 'bg-emerald-400 status-dot' : 'bg-rose-400'}`} />
+                <span className="text-[12px] font-medium text-zinc-300">{connected ? 'Runtime live' : 'Reconnecting'}</span>
+              </div>
+              <span className="text-[10px] text-subtle font-mono tabular-nums">v{version}</span>
             </div>
-            <div>
-              <div className="text-sm font-bold tracking-tight bg-gradient-to-r from-cyan-300 to-purple-300 bg-clip-text text-transparent">koda</div>
-              <div className="text-[9px] text-gray-500 -mt-0.5 tracking-wider uppercase">observability</div>
+            <div className="mt-2 text-[11px] leading-4 text-subtle">
+              {connected ? `${logs.length} events in this view` : 'Waiting for the local koda server'}
             </div>
           </div>
+        </div>
+      </aside>
 
-          {/* Tabs */}
-          <nav className="flex items-center gap-1 ml-2" role="tablist" aria-label="Sections">
-            {tabs.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)}
-                role="tab" aria-selected={tab === t.id}
-                className={`relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  tab === t.id ? 'text-white' : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-                }`}>
-                {tab === t.id && <span className="absolute inset-0 rounded-lg bg-gradient-to-r from-cyan-500/20 to-purple-500/20 border border-cyan-500/30" />}
-                <svg className="relative w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d={t.icon} /></svg>
-                <span className="relative hidden sm:inline">{t.label}</span>
+      <section className="min-w-0 flex-1 flex flex-col pb-16 md:pb-0">
+        <header className="topbar shrink-0 min-h-[76px] border-b px-4 md:px-6 flex items-center gap-4">
+          <div className="md:hidden w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center text-white text-sm font-semibold">K</div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <div className="text-[15px] md:text-[16px] leading-5 font-semibold tracking-tight text-zinc-100 truncate">{active.label}</div>
+              {tab === 'logs' && (
+                <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/[0.08] px-2 py-0.5 text-[10px] font-medium text-emerald-300">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />live tail
+                </span>
+              )}
+            </div>
+            <p className="hidden sm:block mt-0.5 max-w-2xl text-[12px] leading-4 text-subtle truncate">{active.description}</p>
+          </div>
+
+          <div className="ml-auto flex items-center gap-2">
+            <div className="md:hidden flex items-center gap-1.5 px-2 text-[11px] text-muted">
+              <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+              <span className="hidden sm:inline">{connected ? 'Live' : 'Offline'}</span>
+            </div>
+            {tab !== 'logs' && (
+              <button type="button" onClick={refreshCurrent}
+                className="control inline-flex items-center gap-2 px-3 text-[12px] font-medium"
+                aria-label="Refresh data" title="Refresh this view">
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M20 11a8.1 8.1 0 00-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0015.5 2M20 20v-5h-5" />
+                </svg>
+                <span className="hidden sm:inline">Refresh</span>
               </button>
-            ))}
-          </nav>
-
-          {/* Status */}
-          <div className="ml-auto flex items-center gap-4">
-            <div className="flex items-center gap-2 text-xs">
-              <span className={`relative flex h-2.5 w-2.5`}>
-                {connected && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60" />}
-                <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${connected ? 'bg-emerald-400' : 'bg-red-500'}`} />
-              </span>
-              <span className={connected ? 'text-emerald-400' : 'text-red-400'}>
-                {connected ? 'Live' : 'Reconnecting…'}
-              </span>
-            </div>
-            <div className="text-xs text-gray-500 tabular-nums" title="koda log version counter">
-              v<span className="text-gray-300 font-medium">{version}</span>
-            </div>
+            )}
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* Body */}
-      <main className="flex-1 overflow-hidden relative" role="tabpanel">
-        <div className={tab === 'logs' ? 'h-full' : 'hidden'}>
-          <LiveLogs logs={logs} version={version} connected={connected} />
-        </div>
-        {tab === 'debug' && <LlmDebug debug={debug} loading={debugLoading} error={debugError} />}
-        {tab === 'graph' && <CodeGraph graph={graph} loading={graphLoading} error={graphError} />}
-        {tab === 'skills' && <AgentsSkills skills={skills} loading={skillsLoading} error={skillsError} onRefresh={loadSkills} pushToast={pushToast} />}
-        {tab === 'system' && <SystemPrompt data={settings} loading={settingsLoading} error={settingsError} onRefresh={loadSettings} pushToast={pushToast} />}
-      </main>
+        <main id="workspace-panel" className="relative flex-1 min-h-0 overflow-hidden" role="tabpanel" aria-labelledby={`tab-${tab}`}>
+          <div className={tab === 'logs' ? 'h-full' : 'hidden'}>
+            <LiveLogs logs={logs} version={version} connected={connected} />
+          </div>
+          {tab === 'debug' && <LlmDebug debug={debug} loading={debugLoading} error={debugError} />}
+          {tab === 'graph' && <CodeGraph graph={graph} loading={graphLoading} error={graphError} />}
+          {tab === 'skills' && <AgentsSkills skills={skills} loading={skillsLoading} error={skillsError} onRefresh={loadSkills} pushToast={pushToast} />}
+          {tab === 'system' && <SystemPrompt data={settings} loading={settingsLoading} error={settingsError} onRefresh={loadSettings} pushToast={pushToast} />}
+        </main>
+      </section>
 
-      {/* Refresh button for section data */}
-      {tab !== 'logs' && (
-        <button onClick={() => { if (tab==='debug') loadDebug(); if (tab==='graph') loadGraph(); if (tab==='skills') loadSkills(); if (tab==='system') loadSettings(); }}
-          className="fixed bottom-4 right-4 z-20 w-10 h-10 rounded-full bg-white/10 backdrop-blur border border-white/10 flex items-center justify-center text-gray-300 hover:bg-white/20 hover:rotate-180 transition-all duration-500"
-          aria-label="Refresh data" title="Refresh">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-        </button>
-      )}
-
-      {/* Toasts */}
-      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none" aria-live="assertive">
-        {toasts.map(t => (
-          <div key={t.id}
-            className={`pointer-events-auto px-4 py-2.5 rounded-xl shadow-2xl backdrop-blur-md border text-sm font-medium animate-toast-in max-w-md ${
-              t.kind === 'success' ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-200' :
-              t.kind === 'error' ? 'bg-red-500/20 border-red-500/40 text-red-200' :
-              'bg-white/10 border-white/20 text-gray-200'
-            }`} role="status">
-            {t.message}
+      <div className="fixed z-50 bottom-20 md:bottom-5 right-4 md:right-5 flex flex-col gap-2 items-end pointer-events-none" aria-live="polite">
+        {toasts.map(toast => (
+          <div key={toast.id} role={toast.kind === 'error' ? 'alert' : 'status'}
+            className={`pointer-events-auto max-w-sm px-3.5 py-2.5 rounded-lg shadow-popover border text-[12px] font-medium animate-toast-in ${
+              toast.kind === 'success' ? 'bg-[#102019] border-emerald-500/30 text-emerald-200' :
+              toast.kind === 'error' ? 'bg-[#241216] border-rose-500/30 text-rose-200' :
+              'bg-overlay border-line-strong text-zinc-200'
+            }`}>
+            {toast.message}
           </div>
         ))}
       </div>

@@ -56,13 +56,13 @@ function SystemPrompt({ data, loading, error, onRefresh, pushToast }) {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <div className="flex items-center gap-2 p-4 border-b border-white/5">
+      <div className="flex flex-wrap items-center gap-3 px-4 md:px-6 py-4 border-b border-line bg-surface">
         <div>
           <h2 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
             System Prompt
             {usingBuiltin
               ? <span className="px-1.5 py-0.5 rounded bg-white/10 text-gray-400 text-[10px] border border-white/10">built-in</span>
-              : <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 text-[10px] border border-cyan-500/30">custom</span>}
+              : <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 text-[10px] border border-indigo-500/30">custom</span>}
           </h2>
           <p className="text-[11px] text-gray-500 mt-0.5">
             Replaces koda's base instructions. Mode notes, workspace, tools and skills are still layered on.
@@ -75,13 +75,13 @@ function SystemPrompt({ data, loading, error, onRefresh, pushToast }) {
             Load built-in
           </button>
           <button type="button" onClick={save} disabled={saving || !dirty}
-            className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white text-xs font-semibold hover:from-cyan-400 hover:to-blue-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98] shadow-lg shadow-cyan-500/20">
+            className="primary-button px-3 py-1.5 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
             {saving ? 'Saving…' : 'Save prompt'}
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-hidden p-4">
+      <div className="flex-1 overflow-hidden bg-canvas p-4 md:p-6">
         <textarea value={value} onChange={e => setValue(e.target.value)}
           spellCheck={false} aria-label="System prompt"
           placeholder="Type a custom system prompt, or load the built-in and tweak it…"
@@ -89,7 +89,7 @@ function SystemPrompt({ data, loading, error, onRefresh, pushToast }) {
       </div>
 
       {data && data.config_path && (
-        <div className="px-4 py-2 border-t border-white/5 text-[10px] text-gray-600 truncate" title={data.config_path}>
+        <div className="px-4 md:px-6 py-2.5 border-t border-line bg-surface text-[10px] text-subtle truncate" title={data.config_path}>
           📄 saved to {data.config_path} · a running koda applies changes on next start
         </div>
       )}

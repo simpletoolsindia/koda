@@ -922,8 +922,16 @@ impl Graph {
             // merely saw referenced), and have a single clear definition kind.
             let Some(defs) = self.defs.get(name) else { continue };
             let Some(first) = defs.first() else { continue };
-            // Skip trivially short names — too generic to be a useful idiom.
-            if name.len() < 3 {
+            // File-local variables with the same spelling are merged by the
+            // lightweight graph and cannot establish a project-wide idiom.
+            if first.kind == "var" {
+                continue;
+            }
+            // Bare calls such as `.len()`, `.map()` and `.push()` look like
+            // references to a same-named project definition in a lexical graph.
+            // They are language/library vocabulary, not evidence that the user
+            // wants koda to prefer a project abstraction with that name.
+            if is_generic_idiom_name(name) {
                 continue;
             }
             out.push((name.clone(), first.kind, reach));
@@ -952,6 +960,22 @@ impl Graph {
         out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         out
     }
+}
+
+/// Names dominated by language syntax, collection APIs, I/O vocabulary, or
+/// generic data fields. The lexical graph intentionally trades AST precision
+/// for speed; excluding these prevents false cross-file "idioms" when a repo
+/// also happens to define a symbol with the same bare name.
+fn is_generic_idiom_name(name: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "as_ref", "as_str", "body", "build", "chars", "clone", "close", "collect",
+        "contains", "count", "default", "expect", "filter", "find", "first", "from",
+        "get", "insert", "into", "is_empty", "iter", "last", "len", "line", "load",
+        "main", "map", "name", "new", "next", "open", "parse", "path", "push", "read",
+        "remove", "run", "save", "skip", "sort", "take", "text", "to_string", "to_vec",
+        "trim", "unwrap", "update", "value", "write",
+    ];
+    name.len() < 3 || GENERIC.binary_search(&name).is_ok()
 }
 
 #[cfg(test)]
@@ -1210,6 +1234,31 @@ mod tests {
         );
         // A high threshold excludes it.
         assert!(g.idioms(99).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn idioms_reject_generic_methods_and_file_local_variables() {
+        let dir = fixture("idiom-noise");
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn build_widget() {}\npub fn len() -> usize { 0 }\n",
+        )
+        .unwrap();
+        // Generic `.len()` calls previously inflated the project `len` symbol;
+        // repeated local `path` bindings similarly looked project-wide.
+        for f in ["a", "b", "c"] {
+            std::fs::write(
+                dir.join(format!("src/{f}.rs")),
+                "fn use_it() { let path = vec![1]; let _ = path.len(); build_widget(); }\n",
+            )
+            .unwrap();
+        }
+        let g = scan(&dir);
+        let idioms = g.idioms(3);
+        assert!(idioms.iter().any(|(name, _, _)| name == "build_widget"), "{idioms:?}");
+        assert!(!idioms.iter().any(|(name, _, _)| name == "len"), "{idioms:?}");
+        assert!(!idioms.iter().any(|(name, _, _)| name == "path"), "{idioms:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

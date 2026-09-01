@@ -10,7 +10,7 @@ function CodeGraph({ graph, loading, error }) {
   const reducedMotion = React.useRef(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   const kindColors = {
-    fn: '#22d3ee', function: '#22d3ee', method: '#38bdf8',
+    fn: '#818cf8', function: '#818cf8', method: '#a5b4fc',
     struct: '#a78bfa', class: '#f472b6', interface: '#c084fc',
     enum: '#fbbf24', trait: '#fb923c', type: '#facc15',
     const: '#34d399', var: '#4ade80', module: '#94a3b8',
@@ -127,7 +127,7 @@ function CodeGraph({ graph, loading, error }) {
     ctx.lineWidth = 0.7 / t.k;
     for (const e of edges) {
       const active = focusId && (e.source.id === focusId || e.target.id === focusId);
-      ctx.strokeStyle = active ? 'rgba(34,211,238,0.5)' : 'rgba(148,163,184,0.12)';
+      ctx.strokeStyle = active ? 'rgba(129,140,248,0.55)' : 'rgba(148,163,184,0.12)';
       ctx.beginPath();
       ctx.moveTo(e.source.x, e.source.y);
       ctx.lineTo(e.target.x, e.target.y);
@@ -250,21 +250,21 @@ function CodeGraph({ graph, loading, error }) {
   const usedKinds = graph ? Array.from(new Set(graph.nodes.map(n => n.kind))) : [];
 
   return (
-    <div className="relative h-full">
+    <div className="relative h-full bg-canvas">
       {/* Top controls */}
       <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center gap-2 pointer-events-none">
         <div className="relative pointer-events-auto">
           <input type="text" value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Highlight symbol…" aria-label="Search symbols to highlight"
-            className="w-52 bg-black/40 backdrop-blur border border-white/10 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/50" />
+            className="form-input !min-h-[36px] !w-60 bg-[#101116]/95 backdrop-blur px-3 py-1.5 text-xs" />
         </div>
         {graph && (
-          <div className="pointer-events-auto px-2.5 py-1.5 rounded-lg bg-black/40 backdrop-blur border border-white/10 text-[11px] text-gray-400">
+          <div className="pointer-events-auto px-2.5 py-1.5 rounded-lg bg-[#15171d]/95 backdrop-blur border border-line text-[11px] text-gray-400">
             {graph.files} files · {graph.nodes.length} symbols · {graph.edges.length} edges
           </div>
         )}
         {focused && (
-          <button onClick={() => setFocused(null)} className="pointer-events-auto px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[11px] hover:bg-cyan-500/30">
+          <button onClick={() => setFocused(null)} className="pointer-events-auto px-2.5 py-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[11px] hover:bg-indigo-500/30">
             ✕ Clear focus
           </button>
         )}
@@ -278,7 +278,7 @@ function CodeGraph({ graph, loading, error }) {
 
       {/* Language legend */}
       {languages.length > 0 && (
-        <div className="absolute bottom-3 left-3 z-10 p-2.5 rounded-lg bg-black/40 backdrop-blur border border-white/10 max-w-[200px]">
+        <div className="absolute bottom-3 left-3 z-10 p-2.5 rounded-lg bg-[#15171d]/95 backdrop-blur border border-line max-w-[200px]">
           <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5 font-semibold">Languages</div>
           <div className="space-y-0.5">
             {languages.map(([lang, count], i) => (
@@ -293,7 +293,7 @@ function CodeGraph({ graph, loading, error }) {
 
       {/* Kind legend */}
       {usedKinds.length > 0 && (
-        <div className="absolute bottom-3 right-3 z-10 p-2.5 rounded-lg bg-black/40 backdrop-blur border border-white/10">
+        <div className="absolute bottom-3 right-3 z-10 p-2.5 rounded-lg bg-[#15171d]/95 backdrop-blur border border-line">
           <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5 font-semibold">Symbol kinds</div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 max-w-[220px]">
             {usedKinds.map(k => (
@@ -310,8 +310,8 @@ function CodeGraph({ graph, loading, error }) {
 
       {/* Hover tooltip */}
       {hovered && hovered.type === 'symbol' && (
-        <div className="absolute top-14 right-3 z-10 p-3 rounded-lg bg-black/70 backdrop-blur border border-white/10 max-w-xs animate-fade-in">
-          <div className="font-mono text-sm text-cyan-300 font-semibold break-all">{hovered.id}</div>
+        <div className="absolute top-14 right-3 z-10 p-3 rounded-lg bg-[#1a1c24]/95 backdrop-blur border border-line-strong shadow-popover max-w-xs animate-fade-in">
+          <div className="font-mono text-sm text-indigo-300 font-semibold break-all">{hovered.id}</div>
           <div className="text-[11px] text-gray-400 mt-1">
             <span className="px-1.5 py-0.5 rounded bg-white/10 mr-1" style={{ color: colorFor(hovered.kind) }}>{hovered.kind}</span>
             {hovered.refs != null && <span>· {hovered.refs} refs</span>}

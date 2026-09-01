@@ -60,6 +60,22 @@ const MAX_RULES: usize = 80;
 /// One-off edits are noise; a habit repeats.
 const MIN_SUPPORT: u32 = 2;
 
+fn obsolete_generic_idiom(key: &str) -> bool {
+    let Some(name) = key.strip_prefix("idiom.symbol.") else {
+        return false;
+    };
+    matches!(
+        name,
+        "body" | "build" | "chars" | "clone" | "collect" | "contains" | "count"
+            | "default" | "filter" | "find" | "first" | "from" | "get" | "insert"
+            | "into" | "is_empty" | "iter" | "last" | "len" | "line" | "load"
+            | "main" | "map" | "name" | "new" | "next" | "open" | "parse" | "path"
+            | "push" | "read" | "remove" | "run" | "save" | "skip" | "sort"
+            | "take" | "text" | "to_string" | "trim" | "unwrap" | "update"
+            | "value" | "write"
+    )
+}
+
 fn dir(root: &Path) -> PathBuf {
     root.join(".koda").join("learning")
 }
@@ -126,6 +142,14 @@ impl Learning {
                 // `- [key] the rule text — (3)`
                 if let Some(item) = t.strip_prefix("- ") {
                     if let Some(rule) = parse_rule_line(item, section_accepted) {
+                        // Older graph mining could mistake ubiquitous collection
+                        // methods (`len`, `map`, `push`, …) for project idioms.
+                        // Never discard an explicitly accepted rule, but retire
+                        // those low-signal pending candidates automatically.
+                        if !rule.accepted && obsolete_generic_idiom(&rule.key) {
+                            l.dirty = true;
+                            continue;
+                        }
                         l.rules.push(rule);
                     }
                 }
@@ -195,7 +219,7 @@ impl Learning {
         imports: &[(String, usize)],
     ) -> usize {
         let mut mined = Vec::new();
-        for (name, kind, reach) in idioms.iter().take(12) {
+        for (name, kind, reach) in idioms.iter().take(8) {
             mined.push(Rule {
                 key: format!("idiom.symbol.{}", slug(name)),
                 text: format!(
@@ -206,7 +230,7 @@ impl Learning {
                 accepted: false,
             });
         }
-        for (module, n) in imports.iter().take(8) {
+        for (module, n) in imports.iter().take(6) {
             mined.push(Rule {
                 key: format!("idiom.import.{}", slug(module)),
                 text: format!(
@@ -299,7 +323,9 @@ impl Learning {
         if accepted.is_empty() {
             return String::new();
         }
-        let mut out = String::from("\n\nConventions learned in this project (follow them):\n");
+        let mut out = String::from(
+            "\n\nMANDATORY PROJECT CONVENTIONS (learned from this user's corrections and workflow):\n",
+        );
         for r in accepted {
             let _ = writeln!(out, "- {}", r.text);
         }
@@ -922,6 +948,23 @@ mod tests {
     fn empty_learning_contributes_nothing_to_the_prompt() {
         let d = tmp("empty");
         assert!(Learning::load(&d).brief().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn load_prunes_generic_idiom_candidates_but_keeps_accepted_rules() {
+        let d = tmp("prune-generic");
+        std::fs::create_dir_all(dir(&d)).unwrap();
+        std::fs::write(
+            rules_path(&d),
+            "# koda learned rules\n\n## Accepted\n- [idiom.symbol.len] Keep accepted len. — (9)\n\n## Candidates\n- [idiom.symbol.map] noisy map — (12)\n- [idiom.symbol.log_audit] useful helper — (5)\n",
+        )
+        .unwrap();
+        let l = Learning::load(&d);
+        assert!(l.rules.iter().any(|r| r.key == "idiom.symbol.len" && r.accepted));
+        assert!(!l.rules.iter().any(|r| r.key == "idiom.symbol.map"));
+        assert!(l.rules.iter().any(|r| r.key == "idiom.symbol.log_audit"));
+        assert!(l.dirty, "pruning should rewrite the rules file on the next save");
         std::fs::remove_dir_all(&d).ok();
     }
 
