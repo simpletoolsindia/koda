@@ -328,8 +328,18 @@ impl App {
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
             }
-            Event::Text(chunk) => self.transcript.assistant_delta(&chunk),
-            Event::Reasoning(chunk) => self.transcript.reasoning_delta(&chunk),
+            Event::Text(chunk) => {
+                // The model is producing the reply — say so, so the status row
+                // isn't stuck on a stale tool label or a generic quip.
+                self.activity = Some("writing the reply".into());
+                self.transcript.assistant_delta(&chunk);
+            }
+            Event::Reasoning(chunk) => {
+                // Reasoning can run for many seconds before any visible output;
+                // surface it so a thinking model never reads as a frozen app.
+                self.activity = Some("thinking".into());
+                self.transcript.reasoning_delta(&chunk);
+            }
             Event::ToolStart {
                 id,
                 name,
@@ -363,9 +373,10 @@ impl App {
                 detail,
                 view,
             } => {
-                // Done with this tool — back to a generic "working" until the
-                // next tool starts or the turn ends.
-                self.activity = None;
+                // Done with this tool — the model now decides the next step,
+                // which can take a few seconds. Say so rather than dropping to a
+                // generic quip that reads as idle.
+                self.activity = Some("thinking about the next step".into());
                 // A write may have created a file, so `@` completion is stale.
                 if summary.starts_with("created") || summary.starts_with("wrote") {
                     self.files.invalidate();
@@ -2008,15 +2019,33 @@ fn draw(f: &mut Frame, app: &mut App) {
     // input and bottom bar — the user can always read the full final line.
     let spacer = if m.tiny { 0 } else { 1 };
 
+    // Sticky plan: while a multi-step task is in progress, pin the todo list just
+    // above the input so it stays visible and updates in place as steps finish —
+    // even after it has scrolled out of the transcript. Hidden when there is no
+    // plan or every step is done. Capped so a long plan can't eat the screen.
+    let sticky = app.transcript.current_todos().filter(|items| {
+        !items.is_empty() && items.iter().any(|i| i.status != crate::tools::TodoStatus::Done)
+    });
+    let plan_h: u16 = if m.tiny {
+        0
+    } else {
+        sticky
+            .as_ref()
+            .map(|items| (items.len() as u16).min(6) + 1) // +1 header row
+            .unwrap_or(0)
+    };
+
     let chunks = Layout::vertical([
         Constraint::Min(1),          // transcript
+        Constraint::Length(plan_h),  // sticky plan (0 when none)
         Constraint::Length(1),       // hint / state row (status + keys)
         Constraint::Length(spacer),  // breathing room above the input
         Constraint::Length(input_h), // input
         Constraint::Length(1),       // powerline status bar (mode + model)
     ])
     .split(area);
-    let (body, rule, input, status) = (chunks[0], chunks[1], chunks[3], chunks[4]);
+    let (body, plan_area, rule, input, status) =
+        (chunks[0], chunks[1], chunks[2], chunks[4], chunks[5]);
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
     // Decide scrollability from the total at the ACTUAL text width, not a stale
@@ -2076,6 +2105,11 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let t = &app.theme;
+    if plan_h > 0 {
+        if let Some(items) = sticky {
+            draw_sticky_plan(f, plan_area, app, &items);
+        }
+    }
     f.render_widget(Paragraph::new(hint_row(app, area.width, m)), rule);
 
     // Input.
@@ -2609,8 +2643,59 @@ fn draw_scrollbar(f: &mut Frame, rect: Rect, app: &App, total: usize) {
     f.render_widget(Paragraph::new(lines), rect);
 }
 
-/// Completions as a single line above the input. A tall overlay would cover the
-/// transcript — including whatever the user just asked to see.
+/// The sticky plan panel pinned above the input while a multi-step task runs.
+/// Compact: a header with live progress, then one line per task with the same
+/// status glyphs as the transcript card. The active step is highlighted; done
+/// steps are struck through. Capped to a few rows so it never dominates.
+fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools::Todo]) {
+    use crate::tools::TodoStatus;
+    let t = &app.theme;
+    let g = &app.glyphs;
+    if rect.height == 0 {
+        return;
+    }
+    let done = items.iter().filter(|i| i.status == TodoStatus::Done).count();
+    let total = items.len();
+    let avail = rect.width.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    // Header row: a pin-style marker, "Plan", and live progress.
+    lines.push(Line::from(vec![
+        Span::styled(format!("{} ", g.pending), t.fg(t.accent)),
+        Span::styled("Plan".to_string(), t.emphasis(t.heading)),
+        Span::styled(format!("  {done}/{total} done"), t.dim()),
+    ]));
+
+    // Show the tasks; if there are more than fit, keep the active one in view by
+    // windowing around it, and note how many are hidden.
+    let cap = (rect.height as usize).saturating_sub(1).max(1);
+    let active = items.iter().position(|i| i.status == TodoStatus::Active).unwrap_or(0);
+    let start = if items.len() <= cap {
+        0
+    } else {
+        active.saturating_sub(cap / 2).min(items.len() - cap)
+    };
+    let shown = &items[start..(start + cap).min(items.len())];
+    for it in shown {
+        let (glyph, gstyle, tstyle) = match it.status {
+            TodoStatus::Done => (
+                g.ok,
+                t.emphasis(t.success),
+                t.dim().add_modifier(Modifier::CROSSED_OUT),
+            ),
+            TodoStatus::Active => (g.running, t.emphasis(t.warning), t.body().add_modifier(Modifier::BOLD)),
+            TodoStatus::Pending => (g.pending, t.dim(), t.dim()),
+        };
+        let text: String = it.text.chars().take(avail.saturating_sub(3)).collect();
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {glyph} "), gstyle),
+            Span::styled(text, tstyle),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines), rect);
+}
+
 fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     let t = &app.theme;
     let prefix = app.editor.buf.clone();

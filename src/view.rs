@@ -170,6 +170,16 @@ impl Transcript {
         })
     }
 
+    /// The current task list, for the sticky plan panel above the input. Returns
+    /// the most recent non-empty list so the plan stays visible even after it
+    /// has scrolled out of the transcript.
+    pub fn current_todos(&self) -> Option<Vec<Todo>> {
+        self.blocks.iter().rev().find_map(|b| match &b.item {
+            Item::Todos(items) if !items.is_empty() => Some(items.clone()),
+            _ => None,
+        })
+    }
+
     /// Append pre-rendered lines. The caller owns their width.
     pub fn raw(&mut self, mut lines: Vec<Line<'static>>) {
         lines.push(Line::default());
