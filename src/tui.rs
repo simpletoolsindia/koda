@@ -904,8 +904,24 @@ impl App {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => a.sel = a.sel.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => a.sel = (a.sel + 1).min(total - 1),
+            // Number keys 1-9 jump to (and select) an option directly.
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as u8 - b'1') as usize;
+                if idx < a.options.len() {
+                    let answer = a.options[idx].clone();
+                    let asking = self.asking.take().unwrap();
+                    self.transcript.user(answer.clone());
+                    let _ = asking.reply.send(answer);
+                    self.follow = true;
+                } else if idx == a.options.len() {
+                    // The custom-answer row number.
+                    a.custom = true;
+                    a.sel = a.options.len();
+                    self.note("type your answer and press enter");
+                }
+            }
             KeyCode::Esc => {
-                // Cancel: fall back to a custom free-text answer.
+                // Cancel the picker: fall back to a custom free-text answer.
                 a.custom = true;
                 a.sel = a.options.len();
                 self.note("type your answer and press enter");
@@ -3015,55 +3031,71 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let g = &app.glyphs;
 
-    let max_w = area.width.saturating_sub(6).clamp(24, 96);
-    let body_w = max_w.saturating_sub(4) as usize;
+    let max_w = area.width.saturating_sub(6).clamp(28, 100);
+    let body_w = max_w.saturating_sub(6) as usize;
 
+    let picking = !a.options.is_empty() && !a.custom;
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "koda has a question".to_string(),
-        t.emphasis(t.info),
-    )));
-    lines.push(Line::default());
+
+    // Question header — wrapped, emphasized, like oh-my-pi's dialog header.
     for l in md::hard_wrap(&a.question, body_w) {
         lines.push(Line::from(Span::styled(l, t.emphasis(t.text))));
     }
     lines.push(Line::default());
 
-    // Dropdown of options (plus a custom-answer entry) when the model offered
-    // choices and the user hasn't switched to typing a custom answer.
-    if !a.options.is_empty() && !a.custom {
+    if picking {
+        // Options as a radio list: a cursor arrow on the focused row, a filled
+        // dot for the selection, a hollow dot otherwise — mirrors oh-my-pi's
+        // single-select rows. Number keys 1-9 quick-select.
         let custom_idx = a.options.len();
+        let radio_on = if g.fine_blocks { "●" } else { "*" };
+        let radio_off = if g.fine_blocks { "○" } else { "o" };
         for (i, opt) in a.options.iter().enumerate() {
-            let selected = i == a.sel;
-            let marker = if selected { g.pick } else { " " };
-            let style = if selected {
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-            } else {
-                t.body()
-            };
+            let focused = i == a.sel;
+            let cursor = if focused { format!("{} ", g.pick) } else { "  ".into() };
+            let marker = if focused { radio_on } else { radio_off };
+            let color = if focused { t.accent } else { t.text };
+            let num = t.dim();
             let shown: String = opt.chars().take(body_w.saturating_sub(6)).collect();
             lines.push(Line::from(vec![
-                Span::styled(format!(" {marker} {}. ", i + 1), t.fg(t.accent)),
-                Span::styled(shown, style),
+                Span::styled(cursor, t.fg(t.accent)),
+                Span::styled(format!("{marker} "), t.fg(if focused { t.accent } else { t.muted })),
+                Span::styled(format!("{}. ", i + 1), num),
+                Span::styled(
+                    shown,
+                    if focused {
+                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                    } else {
+                        t.fg(color)
+                    },
+                ),
             ]));
         }
-        // Custom-answer row.
-        let selected = a.sel == custom_idx;
-        let marker = if selected { g.pick } else { " " };
-        let style = if selected {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-        } else {
-            t.dim()
-        };
+        // The "type your own" row, always last (oh-my-pi's "Other").
+        let focused = a.sel == custom_idx;
+        let cursor = if focused { format!("{} ", g.pick) } else { "  ".into() };
+        let marker = if focused { radio_on } else { radio_off };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {marker} {}. ", custom_idx + 1), t.fg(t.accent)),
-            Span::styled("✎ type a custom answer…".to_string(), style),
+            Span::styled(cursor, t.fg(t.accent)),
+            Span::styled(format!("{marker} "), t.fg(if focused { t.accent } else { t.muted })),
+            Span::styled(format!("{}. ", custom_idx + 1), t.dim()),
+            Span::styled(
+                format!("{} type your own answer", g.pencil),
+                if focused {
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    t.dim()
+                },
+            ),
         ]));
     } else {
-        lines.push(Line::from(Span::styled(
-            "↓ type your answer in the input and press enter".to_string(),
-            t.dim(),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", g.arrow), t.fg(t.accent)),
+            Span::styled(
+                "type your answer in the input below, then press enter".to_string(),
+                t.dim(),
+            ),
+        ]));
     }
 
     let content_w = lines
@@ -3071,26 +3103,29 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0) as u16;
-    let w = (content_w + 4).clamp(40, max_w);
-    let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(6).max(6));
+    let w = (content_w + 6).clamp(44, max_w);
+    let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(4).max(6));
+    // Bottom-anchored, like oh-my-pi: the dialog rises from just above the
+    // input/status dock rather than floating in the middle, so the eye stays
+    // near where typing happens.
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
-        y: (area.height.saturating_sub(h)) / 3,
+        y: area.height.saturating_sub(h),
         width: w,
         height: h,
     };
 
-    let footer = if !a.options.is_empty() && !a.custom {
-        " ↑↓ choose · enter select · esc = custom "
+    let footer = if picking {
+        " ↑↓ move · 1-9 pick · enter select · esc type your own "
     } else {
-        " type your answer below · enter to send "
+        " enter to send · esc cancel "
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(t.info).add_modifier(Modifier::BOLD))
         .title(Span::styled(
-            format!(" {} question ", g.pending),
+            format!(" {} Ask ", g.pending),
             Style::default().fg(t.info).add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ))
         .title_bottom(Span::styled(footer.to_string(), t.dim()));
