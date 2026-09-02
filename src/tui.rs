@@ -26,7 +26,9 @@ use ratatui::crossterm::event::{
     KeyModifiers,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture, MouseEventKind};
+use ratatui::crossterm::event::{DisableMouseCapture, MouseButton, MouseEventKind};
+#[cfg(windows)]
+use ratatui::crossterm::event::EnableMouseCapture;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
     EnterAlternateScreen, LeaveAlternateScreen,
@@ -258,6 +260,9 @@ pub struct App {
     sync_output: bool,
     /// Whether the mouse is currently captured (wheel scroll vs native select).
     mouse_capture: bool,
+    /// Set once we have told the user how to select text, so a second
+    /// swallowed drag does not repeat the advice.
+    select_hinted: bool,
     /// Last size we drew at, to drop the duplicate resize events emulators send.
     last_size: (u16, u16),
     /// Set after a destructive key so a second press confirms.
@@ -304,6 +309,24 @@ pub struct App {
 impl App {
     fn send(&mut self, cmd: Command) {
         let _ = self.cmd_tx.send(cmd);
+    }
+
+    /// Turn mouse tracking on or off, keeping the live terminal state and the
+    /// config in step. Capture is an escape sequence, not just a flag, so every
+    /// route that changes it — /mouse, the settings page, the web rail — has to
+    /// come through here or the terminal and the config drift apart.
+    fn set_mouse_capture(&mut self, on: bool) {
+        self.mouse_capture = on;
+        self.cfg.mouse_capture = on;
+        let mut out = std::io::stdout();
+        if on {
+            let _ = execute!(out, EnableMouseTracking);
+        } else {
+            // The disable is deliberately crossterm's, not the inverse of
+            // EnableMouseTracking: it clears all five modes, so it also cleans
+            // up after a terminal left in a wider mode by something else.
+            let _ = execute!(out, DisableMouseCapture);
+        }
     }
 
     fn note(&mut self, msg: impl Into<String>) {
@@ -1209,6 +1232,11 @@ impl App {
             self.auto_tier = cfg.auto_tier;
             self.send(Command::SetAutoTier(cfg.auto_tier));
         }
+        // Mouse capture: a terminal mode rather than a stored flag, so a change
+        // has to be written out, not just recorded.
+        if cfg.mouse_capture != self.mouse_capture {
+            self.set_mouse_capture(cfg.mouse_capture);
+        }
         // Debug capture: flip the global switch as soon as it's toggled.
         crate::debug::set_enabled(cfg.debug);
         // Web search + backend: mirror to the agent so the tool availability and
@@ -1800,14 +1828,23 @@ impl App {
             "mouse" | "select" => {
                 // Toggling capture off hands click-drag back to the terminal so
                 // the user can select and copy text; on restores wheel-scroll.
-                self.mouse_capture = !self.mouse_capture;
-                let mut out = std::io::stdout();
-                if self.mouse_capture {
-                    let _ = execute!(out, EnableMouseCapture);
-                    self.note("mouse capture on — wheel scrolls; text selection is the terminal's");
+                let on = !self.mouse_capture;
+                self.set_mouse_capture(on);
+                if on {
+                    self.note(format!(
+                        "mouse capture on — the wheel scrolls; {} to select text",
+                        select_override()
+                    ));
                 } else {
-                    let _ = execute!(out, DisableMouseCapture);
-                    self.note("mouse capture off — select & copy text with the mouse; scroll with pgup/pgdn");
+                    self.note("mouse capture off — drag to select and copy; pgup/pgdn scrolls");
+                }
+                // Unlike the other toggles this one is a persisted preference:
+                // someone who wants to select text wants it in every session,
+                // not just this one, and rediscovering /mouse each launch is
+                // the whole reason selection felt broken in the first place.
+                if let Err(e) = crate::config::save(&self.cfg) {
+                    self.transcript
+                        .error(format!("could not save settings: {e}"));
                 }
             }
             "motion" => {
@@ -3329,12 +3366,60 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
 type Term = Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
 
+/// Mouse tracking narrowed to what koda actually reads.
+///
+/// crossterm's `EnableMouseCapture` switches on four tracking modes at once,
+/// among them `?1003h` — any-event tracking, a report for every cell the
+/// pointer crosses whether a button is down or not. koda consumes exactly two
+/// mouse events, the wheel, so the rest is noise, and the noise costs the user
+/// something real: while any-event tracking is on, emulators stop honouring the
+/// shift/option override that hands a drag back to the terminal for native
+/// select-and-copy, and tmux switches to mouse handling of its own. Asking for
+/// button tracking (`?1000h`, which carries the wheel), drag tracking
+/// (`?1002h`, how we notice someone trying to select), and SGR coordinates
+/// (`?1006h`) keeps scrolling intact and gives the override back. `?1015h` is
+/// the obsolete rxvt encoding `?1006h` supersedes; nothing wants both.
+struct EnableMouseTracking;
+
+impl ratatui::crossterm::Command for EnableMouseTracking {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    }
+
+    // Legacy Windows consoles have no VT parser, and there crossterm reads the
+    // mouse through the console API rather than these sequences — the narrowing
+    // does not apply, so defer to crossterm's own path.
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        ratatui::crossterm::Command::execute_winapi(&EnableMouseCapture)
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        false
+    }
+}
+
+/// The modifier that makes an emulator do its own text selection while an
+/// application is reading the mouse. Shift is the xterm convention and what
+/// most terminals use; the two common macOS ones bind option instead.
+fn select_override() -> &'static str {
+    select_override_for(&std::env::var("TERM_PROGRAM").unwrap_or_default())
+}
+
+fn select_override_for(term_program: &str) -> &'static str {
+    match term_program {
+        "Apple_Terminal" | "iTerm.app" => "hold \u{2325} option",
+        _ => "hold shift",
+    }
+}
+
 fn setup(mouse: bool) -> Result<Term> {
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
     if mouse {
-        execute!(out, EnableMouseCapture)?;
+        execute!(out, EnableMouseTracking)?;
     }
     let backend = ratatui::backend::CrosstermBackend::new(out);
     let mut term = Terminal::new(backend)?;
@@ -3422,6 +3507,7 @@ pub async fn run(
         // the frame budget derive from this one capability-aware flag.
         sync_output: cfg.sync_output && anim::sync_trustworthy(),
         mouse_capture: cfg.mouse_capture,
+        select_hinted: false,
         last_size: (0, 0),
         confirm: None,
         files: FileIndex::new(),
@@ -3700,6 +3786,23 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
                 app.scroll_by(3);
                 true
             }
+            // A left-drag only reaches us because capture took it from the
+            // terminal — which is to say, because a selection just failed. That
+            // is the moment the user decides copying is broken, so it is the
+            // moment to say how to get it back. Once per session: the second
+            // failed drag does not need telling twice.
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if app.select_hinted {
+                    false
+                } else {
+                    app.select_hinted = true;
+                    app.note(format!(
+                        "to select text: {} while dragging, or /mouse to hand the mouse back for good",
+                        select_override()
+                    ));
+                    true
+                }
+            }
             _ => false,
         },
         _ => false,
@@ -3720,6 +3823,40 @@ mod tests {
         assert_eq!(base64(b"hello world"), "aGVsbG8gd29ybGQ=");
     }
 
+    /// The whole point of the narrowed command: any-event tracking (?1003) is
+    /// what stops emulators honouring the shift/option selection override, and
+    /// koda never reads a motion event, so it must not be asked for. ?1015 is
+    /// the obsolete encoding ?1006 replaces.
+    #[test]
+    fn mouse_tracking_asks_only_for_the_modes_koda_reads() {
+        let mut seq = String::new();
+        ratatui::crossterm::Command::write_ansi(&EnableMouseTracking, &mut seq).unwrap();
+        assert!(seq.contains("?1000h"), "wheel and button tracking: {seq:?}");
+        assert!(
+            seq.contains("?1002h"),
+            "drag, to notice a failed selection: {seq:?}"
+        );
+        assert!(seq.contains("?1006h"), "SGR coordinates: {seq:?}");
+        assert!(
+            !seq.contains("?1003"),
+            "any-event tracking breaks selection: {seq:?}"
+        );
+        assert!(
+            !seq.contains("?1015"),
+            "rxvt encoding is superseded: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn select_override_names_the_terminals_own_modifier() {
+        assert_eq!(
+            select_override_for("Apple_Terminal"),
+            "hold \u{2325} option"
+        );
+        assert_eq!(select_override_for("iTerm.app"), "hold \u{2325} option");
+        assert_eq!(select_override_for("WezTerm"), "hold shift");
+        assert_eq!(select_override_for(""), "hold shift");
+    }
 
     #[test]
     fn token_display_is_compact() {

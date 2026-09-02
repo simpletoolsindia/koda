@@ -152,7 +152,7 @@ its default:
 | `sync_output` | `true` | Wrap each frame in DEC 2026 synchronized-update markers. |
 | `motion` | `true` | Animate the UI (spinners, gauges, text reveal). |
 | `reveal` | `true` | Reveal streaming replies progressively. Needs `motion`. |
-| `mouse_capture` | `true` | Capture the mouse for wheel-scrolling. |
+| `mouse_capture` | `true` | Capture the mouse for wheel-scrolling. `/mouse` writes this back. |
 | `theme` | `auto` | Palette name, or `auto`/`""`. |
 | `icons` | `auto` | `auto`, `unicode`, or `ascii`. |
 | `sessions` | `true` | Record each session to `<project>/.koda/sessions`. |
@@ -258,7 +258,7 @@ These are the exact command names koda recognizes. Type `/` to see them all;
 | `/tools` | List available tools. |
 | `/think` | Show or hide model reasoning. |
 | `/motion` | Turn animation on or off. |
-| `/mouse` (`/select`) | Toggle mouse capture. Off = select & copy text with the mouse. |
+| `/mouse` (`/select`) | Toggle mouse capture. Off = select & copy text with the mouse. Saved to config. |
 | `/reveal` | Toggle progressive text reveal. |
 | `/copy` | Copy the last reply to the clipboard. |
 | `/cwd` (`/pwd`) | Show the workspace root. |
@@ -269,7 +269,8 @@ Notes:
 - `/help` and `/keys` open the same combined examples/keys panel.
 - `/clear` requires running twice to confirm before wiping the conversation.
 - `/mouse` off hands click-drag text selection back to the terminal; scroll then
-  uses `pgup`/`pgdn`.
+  uses `pgup`/`pgdn`. The choice is written to the config, so it holds for every
+  later session.
 - `/motion` and `/reveal` are distinct: `/motion` governs all animation
   (spinners, gauges, text reveal); `/reveal` controls only the progressive
   typing-in of streaming text and takes effect only when motion is on.
@@ -670,6 +671,17 @@ Other appearance controls:
   reveal. `NO_MOTION`/`REDUCED_MOTION` env vars and a non-tty stdout disable
   animation regardless of config.
 - `/mouse` toggles mouse capture: on, the wheel scrolls the transcript; off, you
-  can select and copy text with the mouse and scroll with `pgup`/`pgdn`.
+  can select and copy text with the mouse and scroll with `pgup`/`pgdn`. The
+  toggle is saved to the config, and the same switch sits on the `/settings`
+  page as **mouse capture**.
+- **Selecting text while capture is on.** An application reading the mouse takes
+  click-drag away from the terminal, so a plain drag selects nothing. Hold the
+  emulator's override modifier and the drag goes back to the terminal: `shift`
+  in most (WezTerm, kitty, Alacritty, GNOME Terminal, Konsole, xterm, Windows
+  Terminal), `⌥ option` in Apple Terminal and iTerm2. koda only asks for the
+  tracking modes it actually reads — button, drag, and SGR coordinates — and
+  deliberately not any-event tracking (`?1003`), which is what stops many
+  terminals honouring that override. The first drag koda swallows prints a
+  one-time note naming the right modifier for your terminal.
 - `sync_output` (DEC 2026 synchronized updates) presents each frame atomically
   to stop tearing.

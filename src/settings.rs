@@ -23,6 +23,7 @@ pub enum Row {
     Theme,
     Motion,
     Reveal,
+    Mouse,
     Sandbox,
     Sessions,
     Memory,
@@ -42,13 +43,14 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 21] = [
+    pub const ALL: [Row; 22] = [
         Row::Mode,
         Row::Autonomy,
         Row::Reasoning,
         Row::Theme,
         Row::Motion,
         Row::Reveal,
+        Row::Mouse,
         Row::Sandbox,
         Row::Sessions,
         Row::Memory,
@@ -74,6 +76,7 @@ impl Row {
             Row::Theme => "theme",
             Row::Motion => "animation",
             Row::Reveal => "text reveal",
+            Row::Mouse => "mouse capture",
             Row::Sandbox => "sandbox",
             Row::Sessions => "sessions",
             Row::Memory => "memory",
@@ -100,6 +103,7 @@ impl Row {
             Row::Theme => "colour palette",
             Row::Motion => "spinners, gauges, and text reveal",
             Row::Reveal => "stream replies in progressively (needs animation)",
+            Row::Mouse => "on: wheel scrolls · off: drag selects and copies",
             Row::Sandbox => "confine file tools to the workspace",
             Row::Sessions => "record conversations to .koda/sessions",
             Row::Memory => "carry facts between sessions in .koda/memory.md",
@@ -219,6 +223,7 @@ impl Settings {
             }
             Row::Motion => self.cfg.motion = !self.cfg.motion,
             Row::Reveal => self.cfg.reveal = !self.cfg.reveal,
+            Row::Mouse => self.cfg.mouse_capture = !self.cfg.mouse_capture,
             Row::Sandbox => self.cfg.sandbox = !self.cfg.sandbox,
             Row::Sessions => self.cfg.sessions = !self.cfg.sessions,
             Row::Memory => self.cfg.memory = !self.cfg.memory,
@@ -319,6 +324,7 @@ impl Settings {
             Row::Theme => self.cfg.theme.clone(),
             Row::Motion => on(self.cfg.motion),
             Row::Reveal => on(self.cfg.reveal),
+            Row::Mouse => on(self.cfg.mouse_capture),
             Row::Sandbox => on(self.cfg.sandbox),
             Row::Sessions => on(self.cfg.sessions),
             Row::Memory => on(self.cfg.memory),
