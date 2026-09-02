@@ -142,13 +142,138 @@ ensure_ripgrep() {
     fi
 }
 
-uninstall() {
-    local prefix="$1"; local bin_dir="$prefix/bin"
-    if [ -f "$bin_dir/$BIN_NAME" ]; then
-        rm -f "$bin_dir/$BIN_NAME"
-        ok "removed $bin_dir/$BIN_NAME"
+# --- where koda is actually installed ----------------------------------------
+# Both prefixes plus whatever is first on PATH, deduplicated by real path: a
+# system-wide install used to be invisible to uninstall, and updating the copy
+# in ~/.local while a stale /usr/local one shadowed it on PATH looked, to the
+# user, as though the update had silently done nothing.
+find_installs() {
+    local seen=" " cand real
+    for cand in "$USER_PREFIX/bin/$BIN_NAME" "$SYS_PREFIX/bin/$BIN_NAME" \
+                "$(command -v "$BIN_NAME" 2>/dev/null || true)"; do
+        [ -n "$cand" ] && [ -f "$cand" ] || continue
+        real="$(cd "$(dirname "$cand")" && pwd)/$(basename "$cand")"
+        case "$seen" in *" $real "*) continue ;; esac
+        seen="$seen$real "
+        printf '%s\n' "$real"
+    done
+}
+
+# Removing from a system prefix needs root; asking for it only when the path
+# really is unwritable keeps the common ~/.local case password-free.
+maybe_sudo() {
+    local target="$1"; shift
+    if [ -w "$(dirname "$target")" ]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        warn "$target needs elevated permission"
+        sudo "$@"
     else
-        warn "no koda binary found at $bin_dir/$BIN_NAME"
+        die "cannot write $target and sudo is not available"
+    fi
+}
+
+version_of() { "$1" --version 2>/dev/null | head -1 || echo "unknown"; }
+
+# --- update: fetch the latest source, then rebuild ---------------------------
+# The old option 3 was byte-for-byte identical to option 1: it rebuilt whatever
+# happened to be checked out and never fetched anything, so "update to the
+# latest" reinstalled the same version and reported success.
+update() {
+    local targets first before
+    targets="$(find_installs)"
+    if [ -z "$targets" ]; then
+        warn "koda is not installed yet — installing instead"
+        build_and_install "$USER_PREFIX"
+        return
+    fi
+    first="$(printf '%s\n' "$targets" | head -1)"
+    before="$(version_of "$first")"
+    info "installed: $before"
+    printf '%s\n' "$targets" | while IFS= read -r t; do printf '    %s\n' "$t"; done
+
+    resolve_src
+    if [ -d "$SRC/.git" ]; then
+        command -v git >/dev/null 2>&1 || die "git not found — needed to fetch updates."
+        info "fetching the latest source…"
+        # --ff-only: a fast-forward is an update. Anything else means local
+        # commits or a diverged branch, which is the user's to resolve -- an
+        # installer must not rewrite or discard their work to save a step.
+        if ! git -C "$SRC" pull --ff-only >/dev/null 2>&1; then
+            warn "could not fast-forward $SRC (local changes or a diverged branch)"
+            warn "rebuilding from the source as it stands"
+        fi
+    fi
+
+    # Update every copy found, so a shadowed one cannot keep serving old code.
+    local prefix t
+    while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        prefix="$(dirname "$(dirname "$t")")"
+        build_and_install "$prefix"
+    done <<EOF
+$targets
+EOF
+    ok "updated: $before → $(version_of "$first")"
+}
+
+# --- uninstall ---------------------------------------------------------------
+uninstall() {
+    local targets t n ans
+    targets="$(find_installs)"
+    if [ -z "$targets" ]; then
+        warn "no koda binary found in $USER_PREFIX/bin, $SYS_PREFIX/bin, or on your PATH"
+    else
+        n="$(printf '%s\n' "$targets" | wc -l | tr -d ' ')"
+        info "found:"
+        printf '%s\n' "$targets" | while IFS= read -r t; do printf '    %s\n' "$t"; done
+        # Deleting is not the safe default. Without a terminal there is no way
+        # to ask, so refuse and say how to confirm rather than assuming yes --
+        # an installer that cannot ask should never guess in favour of removal.
+        if [ -t 0 ]; then
+            if [ "$n" -gt 1 ]; then
+                printf '  Remove these %s binaries? [y/N]: ' "$n"
+            else
+                printf '  Remove it? [y/N]: '
+            fi
+            read -r ans
+            case "${ans:-n}" in [Yy]*) ;; *) info "left alone"; return 0 ;; esac
+        elif [ -z "${KODA_UNINSTALL_YES:-}" ]; then
+            warn "not a terminal, so nothing was removed"
+            warn "re-run in a terminal, or set KODA_UNINSTALL_YES=1 to confirm"
+            return 0
+        fi
+        while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            maybe_sudo "$t" rm -f "$t" && ok "removed $t"
+        done <<EOF
+$targets
+EOF
+    fi
+
+    # Config is deliberately a separate question and defaults to no: it holds
+    # the endpoint, model and API key, which are tedious to set up again and
+    # nothing to do with the binary being present.
+    local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/$BIN_NAME"
+    if [ -d "$cfg" ]; then
+        if [ -t 0 ]; then
+            printf '  Also delete your settings at %s? [y/N]: ' "$cfg"
+            read -r ans
+            case "${ans:-n}" in
+                [Yy]*) rm -rf "$cfg" && ok "removed $cfg" ;;
+                *) info "kept your settings at $cfg" ;;
+            esac
+        else
+            info "your settings are kept at $cfg"
+        fi
+    fi
+
+    # Per-project state lives in <project>/.koda and is the user's data; say
+    # where it is rather than hunting the filesystem for directories to delete.
+    info "per-project data (sessions, memory, skills) stays in each project's .koda/"
+
+    if command -v "$BIN_NAME" >/dev/null 2>&1; then
+        warn "'$BIN_NAME' is still on your PATH at $(command -v "$BIN_NAME") — remove it by hand"
     fi
 }
 
@@ -173,8 +298,8 @@ fi
 banner
 printf '  %s1%s  Install for me            %s(%s)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$USER_PREFIX/bin" "$C_OFF"
 printf '  %s2%s  Install system-wide       %s(%s, may need sudo)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$SYS_PREFIX/bin" "$C_OFF"
-printf '  %s3%s  Update to the latest\n' "$C_GREEN" "$C_OFF"
-printf '  %s4%s  Uninstall\n' "$C_GREEN" "$C_OFF"
+printf '  %s3%s  Update to the latest      %s(git pull + rebuild)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
+printf '  %s4%s  Uninstall                 %s(binary; asks about settings)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
 printf '  %s5%s  Quit\n\n' "$C_GREEN" "$C_OFF"
 printf '  choose [1]: '
 read -r choice
@@ -184,8 +309,8 @@ echo
 case "$choice" in
     1) build_and_install "$USER_PREFIX" ;;
     2) build_and_install "$SYS_PREFIX" ;;
-    3) build_and_install "$USER_PREFIX" ;;
-    4) uninstall "$USER_PREFIX" ;;
+    3) update ;;
+    4) uninstall ;;
     5|q|Q) info "nothing to do"; exit 0 ;;
     *) die "unknown choice: $choice" ;;
 esac
