@@ -1157,6 +1157,18 @@ setInterval(tick, 1000); tick();
 mod tests {
     use super::*;
 
+    /// Serializes the tests that touch process-global state: `XDG_CONFIG_HOME`
+    /// (which `Config::load` and `config::save` resolve on every call) and the
+    /// control queue. Both are one-per-process, so tests using them cannot run
+    /// concurrently — one test's `remove_var` lands in the middle of another's
+    /// save, and a queue assertion sees a neighbour's push. The guard is
+    /// poison-tolerant: a panicking test has already failed, and re-reporting
+    /// its poison as a failure in every other test hides the real one.
+    fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn detail_maps_to_level() {
         assert_eq!(detail_to_level("simple"), Level::Info);
@@ -1235,7 +1247,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // Holding the guard across the awaits is the point: the test owns the
+    // global config env for its whole body, not just up to the first await.
+    #[allow(clippy::await_holding_lock)]
     async fn a_post_split_across_packets_is_read_whole() {
+        let _env = global_state_lock();
         // TCP may deliver the head and body separately. Before this was handled,
         // the body was silently truncated and closing the socket with unread
         // bytes reset the connection, losing the response.
@@ -1278,6 +1294,7 @@ mod tests {
 
     #[test]
     fn config_post_rejects_bad_input_and_changes_nothing() {
+        let _env = global_state_lock();
         let root = std::env::temp_dir().join(format!("koda-cfg-bad-{}", std::process::id()));
         std::fs::create_dir_all(&root).ok();
         // Each of these is individually invalid and must be refused.
@@ -1302,6 +1319,7 @@ mod tests {
 
     #[test]
     fn memory_and_learning_posts_queue_control_requests() {
+        let _env = global_state_lock();
         // Start from a clean queue: other tests may have left items.
         let _ = take_control();
         assert!(post_memory(r#"{"remember":"tests run with cargo test"}"#).contains("\"ok\":true"));
@@ -1402,7 +1420,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // Holding the guard across the awaits is the point: the test owns the
+    // global config env for its whole body, not just up to the first await.
+    #[allow(clippy::await_holding_lock)]
     async fn control_endpoints_round_trip_over_http() {
+        let _env = global_state_lock();
         let cfg_home = std::env::temp_dir().join(format!("koda-xdg-ctl-{}", std::process::id()));
         std::fs::remove_dir_all(&cfg_home).ok();
         std::fs::create_dir_all(&cfg_home).ok();
@@ -1538,9 +1560,20 @@ mod tests {
 
     #[test]
     fn settings_json_reports_builtin_by_default() {
+        let _env = global_state_lock();
         let root = std::env::temp_dir().join(format!("koda-settings-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
+        // settings_json merges the global config under the project one, so the
+        // global has to be an empty dir of ours rather than the real user
+        // config — which may well set a system prompt.
+        let cfg_home =
+            std::env::temp_dir().join(format!("koda-xdg-builtin-{}", std::process::id()));
+        std::fs::remove_dir_all(&cfg_home).ok();
+        std::fs::create_dir_all(&cfg_home).ok();
+        std::env::set_var("XDG_CONFIG_HOME", &cfg_home);
         let json = settings_json(&root);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::fs::remove_dir_all(&cfg_home).ok();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         // A fresh project uses the built-in prompt and exposes it to the UI.
         assert_eq!(v["using_builtin"], serde_json::Value::Bool(true));
@@ -1555,7 +1588,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // Holding the guard across the awaits is the point: the test owns the
+    // global config env for its whole body, not just up to the first await.
+    #[allow(clippy::await_holding_lock)]
     async fn server_gets_and_posts_system_prompt() {
+        let _env = global_state_lock();
         // Isolate the global config dir so the POST never touches the real user
         // config. (config::save writes to XDG_CONFIG_HOME/koda/config.toml.)
         let cfg_home = std::env::temp_dir().join(format!("koda-xdg-{}", std::process::id()));
