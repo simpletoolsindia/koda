@@ -3381,8 +3381,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A fresh agent on a workspace of its own. The counter matters: every test
+    /// in a binary shares one process id, so a pid-tagged path is a constant,
+    /// and the tests that write into `.koda/` were clearing each other's files
+    /// mid-run when cargo scheduled them in parallel.
     fn test_agent() -> Agent {
-        let dir = std::env::temp_dir().join(format!("koda-agent-test-{}", std::process::id()));
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("koda-agent-test-{}-{n}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).ok();
         let cfg = Arc::new(crate::config::Config::default());
         Agent::new(
