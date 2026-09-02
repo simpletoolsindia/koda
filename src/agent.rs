@@ -501,9 +501,25 @@ impl Agent {
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
-        if self.mode != mode {
-            self.mode = mode;
-            self.rebuild_system();
+        if self.mode == mode {
+            return;
+        }
+        let from = self.mode;
+        self.mode = mode;
+        self.rebuild_system();
+        // A switch made mid-conversation has to be visible *in the
+        // conversation*, not only in the system prompt. Plan mode tells the
+        // model it cannot act, so the model says so out loud; those refusals
+        // stay in the history. Rebuilding the prompt underneath removes the
+        // prohibition but never contradicts what the model already said, and it
+        // goes on refusing — reasonably, since its own last word on the subject
+        // is that it is not allowed. This gives it the event to react to.
+        if !self.history.is_empty() {
+            self.history.push(Message::user(format!(
+                "[The user switched from {from} mode to {mode} mode. This supersedes \
+                 anything you said earlier about what you are allowed to do. Continue \
+                 under {mode} mode, and do not ask to be switched to it.]"
+            )));
         }
     }
 
@@ -3386,6 +3402,53 @@ mod tests {
     /// in a binary shares one process id, so a pid-tagged path is a constant,
     /// and the tests that write into `.koda/` were clearing each other's files
     /// mid-run when cargo scheduled them in parallel.
+    /// The reported bug: switch plan -> execute mid-conversation and the model
+    /// kept saying it was still in plan mode and could not act. Two causes, both
+    /// pinned here — execute mode said nothing at all in the system prompt, so
+    /// switching only *removed* the prohibition, and the switch left no trace in
+    /// the history to contradict the refusals the model had already written.
+    #[test]
+    fn switching_to_execute_tells_the_model_it_may_now_act() {
+        let mut a = test_agent();
+        a.set_mode(crate::config::Mode::Plan);
+        assert!(
+            a.system.contains("MODE: PLAN"),
+            "plan mode states its constraint"
+        );
+
+        // A refusal of the kind plan mode produces, now sitting in the history.
+        a.history
+            .push(Message::assistant("I'm still in Plan mode — I can't execute anything."));
+
+        a.set_mode(crate::config::Mode::Execute);
+
+        // The prompt must assert capability, not merely stop prohibiting it.
+        assert!(
+            a.system.contains("MODE: EXECUTE"),
+            "execute mode must not be silent: {}",
+            a.system
+        );
+        assert!(!a.system.contains("MODE: PLAN"), "plan text is gone");
+
+        // And the switch must be visible in the conversation itself.
+        let last = a.history.last().expect("a marker was appended");
+        let text = format!("{last:?}");
+        assert!(
+            text.contains("plan") && text.contains("execute"),
+            "the history records the transition: {text}"
+        );
+    }
+
+    /// The marker is for an ongoing conversation only — setting the starting
+    /// mode before anyone has said anything must not invent a turn.
+    #[test]
+    fn setting_the_initial_mode_adds_no_history() {
+        let mut a = test_agent();
+        assert!(a.history.is_empty());
+        a.set_mode(crate::config::Mode::Plan);
+        assert!(a.history.is_empty(), "no marker before the conversation starts");
+    }
+
     fn test_agent() -> Agent {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
