@@ -603,6 +603,37 @@ fn parse_in_parallel(inputs: Vec<(String, &'static str, String)>) -> Vec<FilePar
     out
 }
 
+/// Directories that hold dependencies or build output rather than this
+/// project's code.
+///
+/// .gitignore covers these in a well-kept repo and the walker honours it, but
+/// only when the rules are actually there and the scan root is the git root.
+/// When they are not, indexing them is worse than slow: a /learn list reported
+/// `undefined` as "a load-bearing fn in this project (used across 2026 files)",
+/// which is what indexing somebody else's code looks like from the inside.
+/// `target` was already excluded by name for exactly this reason -- these are
+/// the same thing for the other ecosystems.
+///
+/// Deliberately not here: `build` and `out`, which are real source directories
+/// often enough that excluding them by name would lose code. .gitignore remains
+/// the right mechanism for those.
+fn is_vendor_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "target"
+            | "node_modules"
+            | "__pycache__"
+            | "venv"
+            | "dist"
+            | "vendor"
+            | "coverage"
+            | ".next"
+            | ".venv"
+            | ".turbo"
+    )
+}
+
 /// Walk the project and build the graph. Blocking: callers run it off-thread.
 pub fn scan(root: &Path) -> Graph {
     let started = Instant::now();
@@ -613,7 +644,7 @@ pub fn scan(root: &Path) -> Graph {
         .git_ignore(true)
         .require_git(false)
         .git_global(false)
-        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != "target")
+        .filter_entry(|e| !is_vendor_dir(&e.file_name().to_string_lossy()))
         .build();
 
     // Phase 1 (I/O, single thread): walk the tree and read eligible files.
@@ -1131,6 +1162,43 @@ mod tests {
     /// is a load-bearing fn (used across 2026 files)", `toString`, `useState`,
     /// `defineProperties`. All are long or compound, so the distinctiveness
     /// heuristic waved them through; none belongs to the project.
+    /// Indexing dependencies is what makes a /learn list read "`undefined` is a
+    /// load-bearing fn in this project (used across 2026 files)". .gitignore
+    /// catches this in a well-kept repo, so the test proves the walker no longer
+    /// depends on that being true.
+    #[test]
+    fn dependency_and_build_directories_are_not_indexed() {
+        let dir = std::env::temp_dir().join(format!("koda-graph-vendor-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/app.js"), "export function ownSymbol() {}\n").unwrap();
+        // No .gitignore at all: the walker must exclude these by name.
+        for d in ["node_modules/pkg", "dist", "__pycache__", "vendor", "coverage"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("dep.js"), "export function vendored() {}\n").unwrap();
+        }
+        let g = scan(&dir);
+        assert!(g.defs.contains_key("ownSymbol"), "the project's own code is indexed");
+        assert!(
+            !g.defs.contains_key("vendored"),
+            "dependency and build directories are not: {:?}",
+            g.defs.keys().collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_and_out_are_left_to_gitignore() {
+        // Excluding these by name would lose real source in projects that use
+        // them for code, so they are deliberately not on the list.
+        assert!(!is_vendor_dir("build"));
+        assert!(!is_vendor_dir("out"));
+        assert!(!is_vendor_dir("src"));
+        assert!(is_vendor_dir("node_modules"));
+        assert!(is_vendor_dir("target"));
+        assert!(is_vendor_dir(".git"));
+    }
+
     #[test]
     fn language_and_framework_vocabulary_is_not_a_project_idiom() {
         for noise in [
@@ -1154,14 +1222,8 @@ mod tests {
     /// filter that quietly stops filtering is worse than no filter.
     #[test]
     fn ambient_and_generic_lists_are_sorted() {
-        let ambient: Vec<&str> = ["Array", "undefined", "useState", "valueOf", "values"]
-            .iter()
-            .copied()
-            .collect();
-        let mut sorted = ambient.clone();
-        sorted.sort_unstable();
-        assert_eq!(ambient, sorted, "sample stays representative");
-        // The real proof: every name the lists claim to hold is actually found.
+        // Every name the lists claim to hold must actually be found; an
+        // unsorted slice makes binary_search miss entries without erroring.
         for n in ["Array", "undefined", "useState", "values", "join", "toString"] {
             assert!(is_ambient_vocabulary(n), "{n} must be found by binary_search");
         }
