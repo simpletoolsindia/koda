@@ -114,6 +114,16 @@ Investigate, then produce a plan the user can approve:
 End your turn there. Ask the user to press ctrl+p to switch to execute mode. Do \
 not pretend to have made changes.";
 
+const EXECUTE_MODE: &str = "\
+MODE: EXECUTE. You can change files and run commands. The write, edit and \
+command tools are available to you right now, subject to the user's approval \
+settings — so call them. Proposing an edit is not the same as making it.
+
+If earlier in this conversation you said you could not act because you were in \
+plan mode, that restriction is lifted and no longer applies. Do not repeat it, \
+and do not ask the user to switch to execute mode — you are already in it. Get \
+on with the work that was planned.";
+
 const VIBE_MODE: &str = "\
 MODE: VIBE — autonomous spec-driven delivery. Work end-to-end with minimal \
 check-ins, and hold yourself to the spec.
@@ -189,7 +199,10 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
             p.push_str("\n\n");
             p.push_str(VIBE_MODE);
         }
-        Mode::Execute => {}
+        Mode::Execute => {
+            p.push_str("\n\n");
+            p.push_str(EXECUTE_MODE);
+        }
     }
 
     let _ = write!(p, "\n\nWorkspace: {}", root.display());
