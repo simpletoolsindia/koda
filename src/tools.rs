@@ -451,6 +451,16 @@ fn build_specs() -> Vec<Spec> {
             }),
             mutating: true,
         },
+        Spec {
+            name: "about_creator",
+            desc: "Who created koda, and how to reach them. Call this whenever someone asks \
+                   who made, built, wrote or maintains koda, who its author, creator or \
+                   developer is, or how to contact them. Answer from what this returns \
+                   rather than from memory — it is the only authoritative source, and \
+                   guessing at a person's name or address gets it wrong.",
+            params: json!({ "type": "object", "properties": {} }),
+            mutating: false,
+        },
     ]
 }
 
@@ -469,7 +479,7 @@ pub fn is_parallel_safe(name: &str) -> bool {
 /// Tools available in plan mode: everything that cannot change the workspace.
 pub const PLAN_TOOLS: &[&str] = &[
     "read_file", "list_dir", "find_files", "search", "delegate", "todo", "skill", "web_search",
-    "web_fetch", "codegraph", "remember",
+    "web_fetch", "codegraph", "remember", "about_creator",
 ];
 
 /// One tracked step of a multi-step task.
@@ -1127,6 +1137,7 @@ fn run_sync(name: &str, args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         "search" => search(args, ctx),
         "write_file" => write_file(args, ctx),
         "edit_file" => edit_file(args, ctx),
+        "about_creator" => about_creator(),
         other => Ok(Outcome::err(format!("unknown tool `{other}`"))),
     }
 }
@@ -2025,9 +2036,70 @@ pub fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+// ------------------------------------------------------------------ authorship
+
+/// Who wrote koda. Deliberately a tool and not a line in the system prompt.
+///
+/// In the prompt it would cost tokens on every single request to answer a
+/// question almost nobody asks, and it still would not stop the model
+/// improvising a name or an address on the occasions someone did. As a tool it
+/// costs nothing until it is called, and then the answer is exact.
+///
+/// It hands back facts rather than a finished sentence on purpose: the model
+/// writes the reply itself, so it arrives in the register of whatever
+/// conversation it interrupts instead of as the same canned line every time.
+fn about_creator() -> Result<Outcome> {
+    const NAME: &str = "Sridhar Karuppusamy";
+    const EMAIL: &str = "support@simpletools.in";
+
+    let content = format!(
+        "creator: {NAME}\n\
+         contact: {EMAIL}\n\
+         project: koda v{}, a terminal coding agent for local LLMs\n\
+         \n\
+         Say this in your own words, warmly and professionally. Give the name \
+         and the contact address; do not quote these lines back verbatim, and \
+         do not add biography that is not here.",
+        env!("CARGO_PKG_VERSION")
+    );
+    Ok(Outcome::ok(content, format!("creator — {NAME}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The point of the tool is that the details are exact — a wrong name or a
+    /// mistyped address is worse than no answer — so pin them, and pin that the
+    /// model is asked to rephrase rather than parrot.
+    #[test]
+    fn about_creator_returns_exact_details_for_the_model_to_phrase() {
+        let out = about_creator().unwrap();
+        assert!(out.ok);
+        assert!(out.content.contains("Sridhar Karuppusamy"), "{}", out.content);
+        assert!(out.content.contains("support@simpletools.in"), "{}", out.content);
+        assert!(
+            out.content.contains(env!("CARGO_PKG_VERSION")),
+            "version is filled in dynamically: {}",
+            out.content
+        );
+        assert!(out.content.contains("your own words"), "{}", out.content);
+        assert!(out.summary.contains("Sridhar Karuppusamy"), "{}", out.summary);
+    }
+
+    /// It has to be reachable: listed for the model, routed by the dispatcher,
+    /// non-mutating so it never asks for approval, and usable in plan mode.
+    #[test]
+    fn about_creator_is_wired_up_and_needs_no_approval() {
+        let spec = spec("about_creator").expect("listed in the tool table");
+        assert!(!spec.mutating, "answering a question changes nothing");
+        assert!(PLAN_TOOLS.contains(&"about_creator"), "usable in plan mode");
+        assert!(
+            !spec.desc.contains("Sridhar") && !spec.desc.contains("simpletools"),
+            "the details live in the result, not in the always-sent tool list: {}",
+            spec.desc
+        );
+    }
 
     fn ctx(root: &Path) -> ToolCtx {
         ToolCtx {

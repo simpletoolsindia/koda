@@ -3169,6 +3169,7 @@ pub fn label_for(name: &str, args: &Value) -> String {
             format!("delegate: {task}")
         }
         "todo" => "plan".to_string(),
+        "about_creator" => "about the creator".to_string(),
         "remember" => match args.get("forget").and_then(|f| f.as_str()) {
             Some(f) => format!("forget {f}"),
             None => format!("remember: {}", s("note").chars().take(50).collect::<String>()),
