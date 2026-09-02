@@ -1817,12 +1817,28 @@ impl Agent {
     /// URL; non-images and misses are left as plain text for the model to open
     /// with `read_file`. Images ride alongside the original text unchanged, so
     /// a text-only model simply never sees the extra content parts.
+    /// Whether images may be put on the wire for the active model.
+    ///
+    /// The name heuristic is a guess, and behind a router it is a guess with no
+    /// information: `auto` and `best-coding` say nothing about modality, and the
+    /// endpoint may not list the alias at all. So the guess is only the default
+    /// — an explicit setting always wins, in both directions, because being
+    /// unable to send an image the model supports is just as broken as sending
+    /// one it does not.
+    fn accepts_images(&self) -> bool {
+        match self.cfg.vision.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "always" => true,
+            "off" | "false" | "no" | "never" => false,
+            _ => crate::llm::model_is_vision(&self.model),
+        }
+    }
+
     fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
         let mut images = Vec::new();
         // OCR'd text blocks, appended to the message when the model can't see
         // images (and OCR is enabled) so the content isn't simply lost.
         let mut ocr_blocks: Vec<String> = Vec::new();
-        let vision = crate::llm::model_is_vision(&self.model);
+        let vision = self.accepts_images();
         for tok in input.split_whitespace() {
             let Some(raw) = tok.strip_prefix('@') else {
                 continue;
@@ -1868,8 +1884,10 @@ impl Agent {
                     }
                 }
             } else {
+                // Name the way out. "isn't vision-capable" is a dead end when
+                // the model *is* capable and only its name is unguessable.
                 let _ = tx.send(Event::Notice(format!(
-                    "skipped image {raw}: model '{}' isn't vision-capable (enable OCR in /settings)",
+                    "skipped image {raw}: koda does not think '{}' takes images.                      If it does, set vision = \"on\" in your config (or turn on OCR).",
                     self.model
                 )));
             }
@@ -3447,6 +3465,35 @@ mod tests {
         assert!(a.history.is_empty());
         a.set_mode(crate::config::Mode::Plan);
         assert!(a.history.is_empty(), "no marker before the conversation starts");
+    }
+
+    /// A router alias carries no modality information: `auto` matches no name
+    /// hint, and `/v1/models` may not list it at all, so images were silently
+    /// dropped for a model that in fact accepts them. The setting has to be able
+    /// to override the guess in both directions.
+    #[test]
+    fn vision_setting_overrides_the_name_guess_both_ways() {
+        let mut a = test_agent();
+        a.model = "auto".into();
+
+        let with = |a: &mut Agent, v: &str| {
+            let mut c = (*a.cfg).clone();
+            c.vision = v.into();
+            a.cfg = std::sync::Arc::new(c);
+        };
+
+        with(&mut a, "auto");
+        assert!(!a.accepts_images(), "the name `auto` gives nothing to go on");
+        with(&mut a, "on");
+        assert!(a.accepts_images(), "an explicit yes wins");
+        with(&mut a, "off");
+        assert!(!a.accepts_images(), "an explicit no wins too");
+
+        // A model the heuristic does recognise is still refused when told off.
+        a.model = "qwen2.5-vl:7b".into();
+        assert!(!a.accepts_images(), "off overrides a positive guess");
+        with(&mut a, "auto");
+        assert!(a.accepts_images(), "and auto still recognises a real vision name");
     }
 
     fn test_agent() -> Agent {
