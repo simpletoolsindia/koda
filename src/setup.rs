@@ -19,16 +19,26 @@ pub enum Field {
     Url,
     Model,
     Key,
+    /// Whether this model accepts images. A toggle, not a text field: the
+    /// answer is one of three words and typing it out invites typos that
+    /// silently read as "auto".
+    Vision,
 }
 
 impl Field {
-    const ALL: [Field; 3] = [Field::Url, Field::Model, Field::Key];
+    const ALL: [Field; 4] = [Field::Url, Field::Model, Field::Key, Field::Vision];
+
+    /// Cycled with left/right rather than typed into.
+    pub fn is_toggle(&self) -> bool {
+        matches!(self, Field::Vision)
+    }
 
     fn label(&self) -> &'static str {
         match self {
             Field::Url => "endpoint",
             Field::Model => "model",
             Field::Key => "api key",
+            Field::Vision => "images",
         }
     }
 
@@ -37,6 +47,7 @@ impl Field {
             Field::Url => "http://localhost:11434/v1",
             Field::Model => "leave empty to use the server's first model",
             Field::Key => "\"local\" is fine for a local server",
+            Field::Vision => "← → : auto guesses from the model name; set on behind a router",
         }
     }
 
@@ -44,15 +55,17 @@ impl Field {
         match self {
             Field::Url => Field::Model,
             Field::Model => Field::Key,
-            Field::Key => Field::Url,
+            Field::Key => Field::Vision,
+            Field::Vision => Field::Url,
         }
     }
 
     fn prev(&self) -> Field {
         match self {
-            Field::Url => Field::Key,
+            Field::Url => Field::Vision,
             Field::Model => Field::Url,
             Field::Key => Field::Model,
+            Field::Vision => Field::Key,
         }
     }
 }
@@ -62,6 +75,9 @@ pub struct Setup {
     url: Editor,
     model: Editor,
     key: Editor,
+    /// Held in an Editor like the rest so the drawing and caret code needs no
+    /// special case; its buffer is only ever replaced by `cycle_vision`.
+    vision: Editor,
     /// Models fetched from the endpoint, offered as suggestions.
     pub available: Vec<String>,
     pub status: Option<String>,
@@ -74,12 +90,14 @@ impl Setup {
             url: Editor::default(),
             model: Editor::default(),
             key: Editor::default(),
+            vision: Editor::default(),
             available: Vec::new(),
             status: None,
         };
         s.url.insert(&cfg.endpoint());
         s.model.insert(&cfg.model);
         s.key.insert(&cfg.api_key);
+        s.vision.insert(normalize_vision(&cfg.vision));
         s
     }
 
@@ -88,6 +106,7 @@ impl Setup {
             Field::Url => &mut self.url,
             Field::Model => &mut self.model,
             Field::Key => &mut self.key,
+            Field::Vision => &mut self.vision,
         }
     }
 
@@ -96,6 +115,7 @@ impl Setup {
             Field::Url => &self.url,
             Field::Model => &self.model,
             Field::Key => &self.key,
+            Field::Vision => &self.vision,
         }
     }
 
@@ -113,12 +133,29 @@ impl Setup {
             Field::Url => &self.url.buf,
             Field::Model => &self.model.buf,
             Field::Key => &self.key.buf,
+            Field::Vision => &self.vision.buf,
         }
     }
 
     pub fn focused(&mut self) -> &mut Editor {
         let f = self.focus;
         self.editor(f)
+    }
+
+    /// Step the images setting. Left and right rather than typing: three fixed
+    /// words are a choice, not a value, and a typo in a typed one reads as
+    /// "auto" without saying so.
+    pub fn cycle_vision(&mut self, forward: bool) {
+        let next = match (normalize_vision(&self.vision.buf), forward) {
+            ("auto", true) => "on",
+            ("on", true) => "off",
+            ("auto", false) => "off",
+            ("on", false) => "auto",
+            (_, true) => "auto",
+            (_, false) => "on",
+        };
+        self.vision = Editor::default();
+        self.vision.insert(next);
     }
 
     pub fn next_field(&mut self) {
@@ -151,7 +188,18 @@ impl Setup {
         cfg.base_url = self.url.buf.trim().to_string();
         cfg.model = self.model.buf.trim().to_string();
         cfg.api_key = self.key.buf.trim().to_string();
+        cfg.vision = normalize_vision(&self.vision.buf).to_string();
         crate::config::save(cfg)
+    }
+}
+
+/// Fold any spelling of the setting onto the three values the UI cycles, so a
+/// hand-edited config still lands somewhere in the cycle instead of sticking.
+fn normalize_vision(v: &str) -> &'static str {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "always" => "on",
+        "off" | "false" | "no" | "never" => "off",
+        _ => "auto",
     }
 }
 
@@ -170,6 +218,8 @@ fn masked(s: &str) -> String {
 
 pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
     let w = area.width.saturating_sub(6).clamp(40, 78);
+    // Three lines per field plus the header: four fields come to 13, which is
+    // exactly the inner height here. A fifth would need this raised.
     let h = 15u16.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
@@ -305,6 +355,83 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
 mod tests {
     use super::*;
 
+    /// The panel is a fixed height and the fields are laid out three lines
+    /// apart, so adding one is not free: at three fields the content came to
+    /// exactly the inner height, and a fourth pushed the footer off the bottom
+    /// where no test would have noticed.
+    #[test]
+    fn setup_panel_shows_every_field_without_clipping() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let cfg = Config::default();
+        let s = Setup::new(&cfg);
+        let mut term = Terminal::new(TestBackend::new(90, 30)).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            draw(f, area, &s, &crate::theme::resolve("auto"), &crate::theme::UNICODE);
+        })
+        .unwrap();
+
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        for label in ["endpoint", "model", "api key", "images"] {
+            assert!(text.contains(label), "{label} is missing from the panel");
+        }
+        // "images" is the last row, so its presence is what proves the added
+        // field did not overflow the fixed height. The footer is a block title,
+        // drawn whatever the content does, so it proves nothing here.
+        let images_at = text.find("images").expect("images row present");
+        let key_at = text.find("api key").expect("api key row present");
+        assert!(images_at > key_at, "the new row is laid out after the others");
+    }
+
+    /// Vision belongs beside the model because it is a fact about the model.
+    /// The people who need it are exactly those whose model name cannot be
+    /// guessed from -- and they meet the setup page, not the config file.
+    #[test]
+    fn vision_is_a_toggle_on_the_setup_page() {
+        assert!(Field::Vision.is_toggle());
+        assert!(!Field::Model.is_toggle(), "the text fields still take text");
+
+        let mut cfg = Config::default();
+        cfg.vision = "auto".into();
+        let mut s = Setup::new(&cfg);
+        assert_eq!(s.value(Field::Vision), "auto", "seeded from the config");
+
+        s.cycle_vision(true);
+        assert_eq!(s.value(Field::Vision), "on");
+        s.cycle_vision(true);
+        assert_eq!(s.value(Field::Vision), "off");
+        s.cycle_vision(true);
+        assert_eq!(s.value(Field::Vision), "auto", "forward wraps");
+        s.cycle_vision(false);
+        assert_eq!(s.value(Field::Vision), "off", "and steps backwards");
+
+        // Saving puts it where the agent reads it.
+        s.cycle_vision(false);
+        assert_eq!(s.value(Field::Vision), "on");
+        let mut out = Config::default();
+        out.base_url = "x".into();
+        let _ = s.save(&mut out);
+        assert_eq!(out.vision, "on", "save carries the choice into the config");
+    }
+
+    /// Tab order has to include the new field, in both directions.
+    #[test]
+    fn field_cycle_includes_vision() {
+        assert_eq!(Field::Key.next(), Field::Vision);
+        assert_eq!(Field::Vision.next(), Field::Url);
+        assert_eq!(Field::Url.prev(), Field::Vision);
+        assert_eq!(Field::Vision.prev(), Field::Key);
+    }
+
     #[test]
     fn seeds_from_config_and_saves_back() {
         let cfg = Config {
@@ -318,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_all_three_fields() {
+    fn tab_cycles_every_field() {
         let mut s = Setup::new(&Config::default());
         assert_eq!(s.focus, Field::Url);
         s.next_field();
@@ -326,9 +453,11 @@ mod tests {
         s.next_field();
         assert_eq!(s.focus, Field::Key);
         s.next_field();
+        assert_eq!(s.focus, Field::Vision);
+        s.next_field();
         assert_eq!(s.focus, Field::Url);
         s.prev_field();
-        assert_eq!(s.focus, Field::Key);
+        assert_eq!(s.focus, Field::Vision);
     }
 
     #[test]

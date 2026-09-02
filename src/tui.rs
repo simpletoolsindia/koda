@@ -1129,6 +1129,20 @@ impl App {
 
     fn setup_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // A toggle field is a choice, not a value: left/right and space step it,
+        // and typing must not reach the editor behind it -- a half-typed "of"
+        // would otherwise be saved and read back as "auto".
+        if let Some(s) = self.setup.as_mut() {
+            if s.focus.is_toggle() {
+                match key.code {
+                    KeyCode::Left => { s.cycle_vision(false); return; }
+                    KeyCode::Right | KeyCode::Char(' ') => { s.cycle_vision(true); return; }
+                    KeyCode::Char(_) if !ctrl => return,
+                    KeyCode::Backspace => return,
+                    _ => {}
+                }
+            }
+        }
         match key.code {
             KeyCode::Esc => {
                 self.setup = None;
@@ -1197,6 +1211,11 @@ impl App {
                 self.model = cfg.model.clone();
                 self.send(Command::SetEndpoint(cfg.endpoint()));
                 self.send(Command::SetModel(cfg.model.clone()));
+                // The agent keeps its own copy of the config, and endpoint and
+                // model are the only two it is told about by name. Anything else
+                // set here -- the images toggle -- would otherwise be saved to
+                // disk and ignored until the next start.
+                self.send(Command::UpdateConfig(Box::new(cfg.clone())));
                 self.note(format!("saved to {}", path.display()));
                 crate::tel_info!("ui", "provider saved", "endpoint" => cfg.endpoint());
             }
