@@ -93,10 +93,74 @@ function Build-And-Install {
     Ok "done - run 'koda' to start, or 'koda --help'"
 }
 
+function Version-Of($exe) {
+    try { (& $exe --version 2>$null | Select-Object -First 1) } catch { "unknown" }
+}
+
+# Fetch the latest source, then rebuild. The menu used to offer "Install /
+# update" as a single item that never fetched anything, so choosing it rebuilt
+# whatever was already checked out and reported success.
+function Update {
+    $exe = Join-Path $BinDir "koda.exe"
+    if (-not (Test-Path $exe)) {
+        Warn "koda is not installed yet - installing instead"
+        Build-And-Install
+        return
+    }
+    $before = Version-Of $exe
+    Info "installed: $before"
+
+    $Src = Resolve-Src
+    if (Test-Path (Join-Path $Src ".git")) {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "git not found - needed to fetch updates." }
+        Info "fetching the latest source..."
+        # --ff-only: a fast-forward is an update. Anything else means local
+        # commits or a diverged branch, which is the user's to resolve - an
+        # installer must not rewrite or discard their work to save a step.
+        git -C $Src pull --ff-only 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Warn "could not fast-forward $Src (local changes or a diverged branch)"
+            Warn "rebuilding from the source as it stands"
+        }
+    }
+    Build-And-Install
+    Ok "updated: $before -> $(Version-Of $exe)"
+}
+
 function Uninstall {
     $exe = Join-Path $BinDir "koda.exe"
-    if (Test-Path $exe) { Remove-Item $exe -Force; Ok "removed $exe" }
-    else { Warn "no koda binary found at $exe" }
+    if (Test-Path $exe) {
+        # Deleting is not the safe default; without a console there is no way to
+        # ask, so refuse rather than assume yes.
+        if ([Environment]::UserInteractive) {
+            $ans = Read-Host "  Remove $exe? [y/N]"
+            if ($ans -notmatch '^[Yy]') { Info "left alone"; return }
+        } elseif (-not $env:KODA_UNINSTALL_YES) {
+            Warn "not interactive, so nothing was removed"
+            Warn "re-run in a console, or set KODA_UNINSTALL_YES=1 to confirm"
+            return
+        }
+        Remove-Item $exe -Force
+        Ok "removed $exe"
+    } else {
+        Warn "no koda binary found at $exe"
+    }
+
+    # Settings are a separate question and default to no: they hold the
+    # endpoint, model and API key, which are tedious to set up again and nothing
+    # to do with the binary being present.
+    $cfg = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME "koda" }
+           else { Join-Path $env:APPDATA "koda" }
+    if (Test-Path $cfg) {
+        if ([Environment]::UserInteractive) {
+            $ans = Read-Host "  Also delete your settings at $cfg? [y/N]"
+            if ($ans -match '^[Yy]') { Remove-Item $cfg -Recurse -Force; Ok "removed $cfg" }
+            else { Info "kept your settings at $cfg" }
+        } else {
+            Info "your settings are kept at $cfg"
+        }
+    }
+    Info "per-project data (sessions, memory, skills) stays in each project's .koda/"
 }
 
 # Non-interactive host (irm | iex): just install.
@@ -109,9 +173,10 @@ Write-Host ""
 Write-Host "  koda installer" -ForegroundColor Cyan -NoNewline
 Write-Host "  Windows"
 Write-Host ""
-Write-Host "  1  Install / update   ($BinDir)" -ForegroundColor Green
-Write-Host "  2  Uninstall" -ForegroundColor Green
-Write-Host "  3  Quit" -ForegroundColor Green
+Write-Host "  1  Install              ($BinDir)" -ForegroundColor Green
+Write-Host "  2  Update to the latest  (git pull + rebuild)" -ForegroundColor Green
+Write-Host "  3  Uninstall             (binary; asks about settings)" -ForegroundColor Green
+Write-Host "  4  Quit" -ForegroundColor Green
 Write-Host ""
 $choice = Read-Host "  choose [1]"
 if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
@@ -119,7 +184,8 @@ Write-Host ""
 
 switch ($choice) {
     "1" { Build-And-Install }
-    "2" { Uninstall }
-    "3" { Info "nothing to do"; exit 0 }
+    "2" { Update }
+    "3" { Uninstall }
+    "4" { Info "nothing to do"; exit 0 }
     default { Die "unknown choice: $choice" }
 }
