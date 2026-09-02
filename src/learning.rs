@@ -507,6 +507,8 @@ fn import_preferences(obs: &[Observation]) -> Vec<Rule> {
 fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
     // (removed_token, added_token) -> count
     let mut subs: BTreeMap<(String, String), u32> = BTreeMap::new();
+    // Structural habits the user imposed on koda's code: (key, text) -> count.
+    let mut habits: BTreeMap<&'static str, (u32, &'static str)> = BTreeMap::new();
     // Also: a whole import line the user swapped, mined as a library preference.
     for o in obs {
         if let Observation::Correction { koda_wrote, user_has, path } = o {
@@ -514,12 +516,20 @@ fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
                 continue;
             }
             for (k_line, u_line) in aligned_changed_lines(koda_wrote, user_has) {
-                if let Some((removed, added)) = single_token_swap(&k_line, &u_line) {
+                // A rewrite is rarely a single token: renaming a function and its
+                // parameters in one go is normal. Take every identifier the user
+                // swapped in that line, up to a small cap — beyond that the line
+                // was rewritten wholesale and no crisp rule follows from it.
+                for (removed, added) in token_swaps(&k_line, &u_line, 3) {
                     // Ignore trivial/short tokens and pure whitespace churn.
                     if removed.len() >= 2 && added.len() >= 2 && removed != added {
                         *subs.entry((removed, added)).or_insert(0) += 1;
                     }
                 }
+            }
+            for (key, text) in style_habits(koda_wrote, user_has) {
+                let e = habits.entry(key).or_insert((0, text));
+                e.0 += 1;
             }
         }
     }
@@ -544,7 +554,108 @@ fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
             });
         }
     }
+    for (key, (n, text)) in habits {
+        out.push(Rule {
+            key: format!("correction.style.{key}"),
+            text: text.to_string(),
+            support: n,
+            accepted: false,
+        });
+    }
     out
+}
+
+/// Every identifier the user swapped between two versions of a line, in order,
+/// as long as the line was edited rather than replaced: the two lines must still
+/// have the same token count and share most of their tokens. Capped at `max`
+/// substitutions, because a line that changed more than that was rewritten and
+/// no single preference can be read out of it.
+fn token_swaps(a: &str, b: &str, max: usize) -> Vec<(String, String)> {
+    let ta = tokenize(a);
+    let tb = tokenize(b);
+    if ta.len() != tb.len() || ta.is_empty() {
+        return Vec::new();
+    }
+    let mut diff: Vec<(String, String)> = Vec::new();
+    for (x, y) in ta.iter().zip(tb.iter()) {
+        if x != y {
+            diff.push((x.clone(), y.clone()));
+        }
+    }
+    if diff.is_empty() || diff.len() > max {
+        return Vec::new();
+    }
+    // At least half the line must be untouched, so "same shape, renamed thing"
+    // is learnable but a wholesale rewrite is not.
+    if diff.len() * 2 > ta.len() {
+        return Vec::new();
+    }
+    diff
+}
+
+/// Structural conventions the user added to koda's code. Deterministic and
+/// conservative: each one is a shape that is either present or absent, so the
+/// rule states an observed fact rather than an inference.
+fn style_habits(koda: &str, user: &str) -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    let k_defs: Vec<&str> = def_lines(koda);
+    let u_defs: Vec<&str> = def_lines(user);
+    if !k_defs.is_empty() && !u_defs.is_empty() {
+        // Type annotations: the user annotated a signature koda left bare.
+        let k_annotated = k_defs.iter().any(|l| is_annotated_def(l));
+        let u_annotated = u_defs.iter().any(|l| is_annotated_def(l));
+        if !k_annotated && u_annotated {
+            out.push((
+                "annotate_signatures",
+                "Annotate function signatures with types — the user added type \
+                 annotations to code koda wrote without them.",
+            ));
+        }
+    }
+    // Docstrings: the user documented a function koda left undocumented.
+    if !has_docstring(koda) && has_docstring(user) {
+        out.push((
+            "docstrings",
+            "Give new functions a docstring — the user added one to code koda \
+             wrote without it.",
+        ));
+    }
+    out
+}
+
+fn def_lines(src: &str) -> Vec<&str> {
+    src.lines()
+        .map(str::trim)
+        .filter(|l| {
+            l.starts_with("def ")
+                || l.starts_with("async def ")
+                || l.starts_with("fn ")
+                || l.starts_with("pub fn ")
+                || l.starts_with("function ")
+        })
+        .collect()
+}
+
+/// A signature that names types: `name: T` inside the parameter list, or a
+/// `-> T` return type after it. The parameter list is bounded by its own
+/// parentheses — a Python `def f(a):` ends in a colon that says nothing about
+/// annotations, and counting it would make every signature look annotated.
+fn is_annotated_def(line: &str) -> bool {
+    let Some(open) = line.find('(') else { return false };
+    let Some(close) = line.rfind(')') else { return false };
+    if close <= open {
+        return false;
+    }
+    let params = &line[open + 1..close];
+    let tail = &line[close..];
+    params.contains(':') || tail.contains("->")
+}
+
+fn has_docstring(src: &str) -> bool {
+    src.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("\"\"\"") || t.starts_with("'''") || t.starts_with("///")
+    })
 }
 
 /// Pair up lines that changed between two versions, in order. Lines present in
@@ -576,26 +687,6 @@ fn aligned_changed_lines(koda: &str, user: &str) -> Vec<(String, String)> {
         .into_iter()
         .zip(u_changed)
         .collect()
-}
-
-/// If two lines differ by exactly one token (same tokens otherwise, in order),
-/// return (removed, added). Tokens are identifier-ish runs.
-fn single_token_swap(a: &str, b: &str) -> Option<(String, String)> {
-    let ta = tokenize(a);
-    let tb = tokenize(b);
-    if ta.len() != tb.len() {
-        return None;
-    }
-    let mut diff: Option<(String, String)> = None;
-    for (x, y) in ta.iter().zip(tb.iter()) {
-        if x != y {
-            if diff.is_some() {
-                return None; // more than one token changed — too ambiguous
-            }
-            diff = Some((x.clone(), y.clone()));
-        }
-    }
-    diff
 }
 
 /// Split a line into identifier-ish tokens (letters, digits, underscore, dot),
@@ -1047,12 +1138,69 @@ mod tests {
     }
 
     #[test]
-    fn single_token_swap_detects_one_changed_token() {
+    fn token_swaps_reports_the_identifiers_the_user_changed() {
+        // One token changed: the classic library/identifier preference.
         assert_eq!(
-            single_token_swap("return logging.info", "return log.audit"),
-            Some(("logging.info".into(), "log.audit".into()))
+            token_swaps("return logging.info", "return log.audit", 3),
+            vec![("logging.info".to_string(), "log.audit".to_string())]
         );
-        assert_eq!(single_token_swap("a = b", "a = b"), None);
+        // Nothing changed.
+        assert!(token_swaps("a = b", "a = b", 3).is_empty());
+        // A rename that touches the name and one argument is still a shape the
+        // user edited, not a rewrite: both swaps are reported.
+        assert_eq!(
+            token_swaps(
+                "def total_price(items, tax_rate, currency, region):",
+                "def invoice_total(items, tax_rate, currency, region):",
+                3
+            ),
+            vec![("total_price".to_string(), "invoice_total".to_string())]
+        );
+        // A wholesale rewrite yields nothing: more than half the line changed.
+        assert!(token_swaps("let a = foo(bar)", "let b = baz(qux)", 3).is_empty());
+        // Different token counts mean the line's shape changed, not one name.
+        assert!(token_swaps("def f(a)", "def f(a: int) -> int", 3).is_empty());
+    }
+
+    #[test]
+    fn a_realistic_rewrite_still_teaches_the_users_conventions() {
+        // What a correction actually looks like: the user renamed things, added
+        // type annotations and a docstring. The old one-token rule learned
+        // nothing from this; the conventions are the learnable part.
+        let obs = vec![Observation::Correction {
+            path: "src/discount.py".into(),
+            koda_wrote: "def apply_percent_discount(price, percent):\n    \
+                         return price * (1 - percent / 100)\n"
+                .into(),
+            user_has: "def apply_discount(price_cents: int, percent_off: int) -> int:\n    \
+                       \"\"\"Prices are integer cents in this project.\"\"\"\n    \
+                       return price_cents - (price_cents * percent_off) // 100\n"
+                .into(),
+        }];
+        let rules = induce_rules(&obs);
+        assert!(
+            rules.iter().any(|r| r.key == "correction.style.annotate_signatures"),
+            "the added type annotations should be learned: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.key == "correction.style.docstrings"),
+            "the added docstring should be learned: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn style_habits_need_evidence_and_do_not_fire_backwards() {
+        let annotated = "def f(a: int) -> int:\n    return a\n";
+        let bare = "def f(a):\n    return a\n";
+        // koda bare -> user annotated: learn it.
+        assert!(style_habits(bare, annotated).iter().any(|(k, _)| *k == "annotate_signatures"));
+        // The reverse (the user removing annotations) is not this rule.
+        assert!(!style_habits(annotated, bare).iter().any(|(k, _)| *k == "annotate_signatures"));
+        // No docstring either way: no rule.
+        assert!(!style_habits(bare, annotated).iter().any(|(k, _)| *k == "docstrings"));
+        // Rust signatures count as annotated too, so the rule never fires there.
+        let rs = "pub fn f(a: u8) -> u8 {\n    a\n}\n";
+        assert!(!style_habits(rs, rs).iter().any(|(k, _)| *k == "annotate_signatures"));
     }
 
     #[test]

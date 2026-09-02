@@ -1442,6 +1442,10 @@ fn search_ripgrep(rg: &Path, pattern: &str, args: &Value, ctx: &ToolCtx) -> Resu
     cmd.current_dir(&ctx.root)
         .arg("--line-number")
         .arg("--no-heading")
+        // rg omits the filename when the target is a single file, which would
+        // make every hit unparseable here (we read `path:line:text`). Force it
+        // on so one-file and whole-tree searches produce the same shape.
+        .arg("--with-filename")
         .arg("--color=never")
         .arg("--max-columns=240")
         // Respect .gitignore even when the directory is not a git repo, so
@@ -2286,6 +2290,33 @@ mod tests {
         assert!(out.content.contains("src/main.rs:2"), "{}", out.content);
         assert!(out.content.contains("README.md:2"), "{}", out.content);
         assert!(!out.content.contains("secret.rs"), "gitignore leaked: {}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn search_scoped_to_one_file_finds_its_hits_on_both_engines() {
+        // A model narrowing a search to a single file is normal ("is it used in
+        // src/tui.rs?"). ripgrep omits the filename when handed one file, which
+        // silently produced zero results until `--with-filename` was forced.
+        let dir = fixture("search-one-file");
+        let c = ctx(&dir);
+
+        // Whichever engine is available by default (ripgrep on this machine).
+        let rg = search(&json!({"pattern": "todo", "path": "src/main.rs"}), &c).unwrap();
+        assert!(rg.ok, "{}", rg.content);
+        assert!(rg.content.contains("src/main.rs:2"), "rg path: {}", rg.content);
+        assert!(!rg.content.contains("no matches"), "rg path: {}", rg.content);
+        // Scoping to a file must exclude the other files that also match.
+        assert!(!rg.content.contains("README.md"), "rg path leaked: {}", rg.content);
+
+        // And the built-in engine must agree.
+        std::env::set_var("KODA_NO_RIPGREP", "1");
+        let builtin = search(&json!({"pattern": "todo", "path": "src/main.rs"}), &c).unwrap();
+        std::env::remove_var("KODA_NO_RIPGREP");
+        assert!(builtin.ok, "{}", builtin.content);
+        assert!(builtin.content.contains("src/main.rs:2"), "builtin: {}", builtin.content);
+        assert!(!builtin.content.contains("README.md"), "builtin leaked: {}", builtin.content);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

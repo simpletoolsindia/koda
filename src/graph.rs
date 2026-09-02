@@ -244,6 +244,17 @@ fn definitions(lang: &str, line: &str) -> Option<(&'static str, String)> {
     for (prefix, kind) in table {
         if let Some(rest) = t.strip_prefix(prefix) {
             if let Some(name) = take(rest) {
+                // In C-family script languages `const`/`let` is how you declare a
+                // local, so an indented one is a variable inside a function, not
+                // project vocabulary. Indexing those made every `const out = []`
+                // look like a shared symbol. A top-level declaration (column 0)
+                // is a module export and still counts.
+                if matches!(*kind, "const" | "let")
+                    && matches!(lang, "javascript" | "typescript")
+                    && line.starts_with([' ', '\t'])
+                {
+                    continue;
+                }
                 return Some((kind, name));
             }
         }
@@ -886,17 +897,42 @@ impl Graph {
                 let _ = writeln!(out, "- {i}");
             }
         }
-        // Who uses what this file defines.
+        // Who uses what this file defines. Counting *every* symbol would drag in
+        // most of the repo: a file that defines `now`, `version` or `clear` looks
+        // "used by" any file containing those words, including shell scripts that
+        // cannot reference Rust at all. Only distinctive names (compound or long)
+        // support the claim, and the heading says exactly what was matched.
         let mut users: BTreeSet<&String> = BTreeSet::new();
+        let mut matched: Vec<&String> = Vec::new();
         if let Some(syms) = self.by_file.get(&key) {
             for s in syms {
+                if !is_distinctive_idiom_name(s) || is_generic_idiom_name(s) {
+                    continue;
+                }
+                // Defined in more than one file (e.g. `set_enabled` in both this
+                // module and another): a mention cannot be attributed to this
+                // file, so it is not evidence of a dependency.
+                if self.defs.get(s).map(|d| d.len()).unwrap_or(0) > 1 {
+                    continue;
+                }
                 if let Some(files) = self.refs.get(s) {
-                    users.extend(files.iter());
+                    if !files.is_empty() {
+                        matched.push(s);
+                        users.extend(files.iter());
+                    }
                 }
             }
         }
         if !users.is_empty() {
-            let _ = writeln!(out, "\nUsed by ({}):", users.len());
+            let _ = writeln!(
+                out,
+                "\nReferenced by ({}) — files mentioning {}:",
+                users.len(),
+                match matched.len() {
+                    1 => format!("`{}`", matched[0]),
+                    n => format!("{n} of its distinctive symbols"),
+                }
+            );
             for u in users.iter().take(30) {
                 let _ = writeln!(out, "- {u}");
             }
@@ -927,11 +963,27 @@ impl Graph {
             if first.kind == "var" {
                 continue;
             }
+            // Only callable and type vocabulary is worth telling the model to
+            // reuse. A widely-seen constant or static is usually a value, not an
+            // abstraction — "prefer `label` over reinventing an equivalent" is
+            // advice about a variable name and only adds noise to /learn.
+            if !matches!(
+                first.kind,
+                "fn" | "method" | "struct" | "enum" | "trait" | "class" | "interface"
+                    | "type" | "record" | "module" | "macro"
+            ) {
+                continue;
+            }
             // Bare calls such as `.len()`, `.map()` and `.push()` look like
             // references to a same-named project definition in a lexical graph.
             // They are language/library vocabulary, not evidence that the user
             // wants koda to prefer a project abstraction with that name.
             if is_generic_idiom_name(name) {
+                continue;
+            }
+            // A lexical graph counts word occurrences, not resolved calls, so a
+            // short common word's reach is mostly noise.
+            if !is_distinctive_idiom_name(name) {
                 continue;
             }
             out.push((name.clone(), first.kind, reach));
@@ -955,10 +1007,39 @@ impl Graph {
         }
         let mut out: Vec<(String, usize)> = counts
             .into_iter()
-            .filter(|(m, n)| *n >= min_files && m.len() >= 3)
+            .filter(|(m, n)| *n >= min_files && m.len() >= 3 && self.is_internal_import(m))
             .collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         out
+    }
+
+    /// Whether an import is a project convention rather than ambient vocabulary.
+    ///
+    /// "This project imports `std::sync::Arc`" is not a convention worth telling the
+    /// model about — it is the standard library. What matters is which *internal*
+    /// modules the project leans on: an explicitly crate- or path-relative import,
+    /// or one whose first segment names a file or directory this project actually
+    /// contains. A glob such as `super::*` is test-module boilerplate.
+    fn is_internal_import(&self, module: &str) -> bool {
+        let m = module.trim();
+        if m.is_empty() || m.ends_with("::*") || m.ends_with("/*") {
+            return false;
+        }
+        if m.starts_with("crate::") || m.starts_with("self::") || m.starts_with('.') {
+            return true;
+        }
+        let head = m
+            .split(|c| c == ':' || c == '/' || c == '.')
+            .find(|s| !s.is_empty())
+            .unwrap_or("");
+        if head.is_empty() {
+            return false;
+        }
+        self.by_file.keys().any(|f| {
+            let p = std::path::Path::new(f);
+            p.file_stem().map(|s| s == head).unwrap_or(false)
+                || p.components().any(|c| c.as_os_str() == head)
+        })
     }
 }
 
@@ -978,9 +1059,151 @@ fn is_generic_idiom_name(name: &str) -> bool {
     name.len() < 3 || GENERIC.binary_search(&name).is_ok()
 }
 
+/// Whether a name is distinctive enough that counting its cross-file mentions
+/// means something.
+///
+/// This is the structural limit of a lexical graph: it counts occurrences of a
+/// word, not resolved calls. For a short common word like `key`, `error` or
+/// `file`, most of those occurrences are unrelated locals and fields, so the
+/// count says nothing about a shared abstraction — no denylist can keep up with
+/// that. A compound name (`complete_current_plan`, `MatchGroup`) or a long one
+/// is specific enough that a mention is almost certainly the real symbol.
+fn is_distinctive_idiom_name(name: &str) -> bool {
+    let compound = name.contains('_')
+        || name
+            .chars()
+            .zip(name.chars().skip(1))
+            .any(|(a, b)| a.is_lowercase() && b.is_uppercase());
+    compound || name.len() >= 8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_js_consts_are_not_project_symbols() {
+        // `const x = ...` at column 0 is a module-level declaration; the same
+        // line indented is a local inside a function. Indexing locals made every
+        // `const out = []` look like shared project vocabulary.
+        assert_eq!(
+            definitions("javascript", "const WORKSPACE_TABS = [];"),
+            Some(("const", "WORKSPACE_TABS".to_string()))
+        );
+        assert_eq!(definitions("javascript", "  const out = [];"), None);
+        assert_eq!(definitions("javascript", "\tconst key = 1;"), None);
+        // Functions and classes still count wherever they appear.
+        assert_eq!(
+            definitions("javascript", "  function helper() {"),
+            Some(("fn", "helper".to_string()))
+        );
+        // Rust associated consts are real vocabulary, indented or not.
+        assert_eq!(
+            definitions("rust", "    const CAP: usize = 8;"),
+            Some(("const", "CAP".to_string()))
+        );
+    }
+
+    #[test]
+    fn file_query_does_not_invent_dependents_from_generic_names() {
+        // A file defining a short common name must not look "used by" every file
+        // that happens to contain that word — a shell script cannot reference a
+        // Rust module, and a false dependency claim is worse than none.
+        let dir = fixture("file-users");
+        std::fs::write(
+            dir.join("src/trace_ring.rs"),
+            "pub fn now() -> u64 { 0 }\npub fn append_sse_chunk() {}\n",
+        )
+        .unwrap();
+        // Mentions only the generic name.
+        std::fs::write(dir.join("src/other.rs"), "let t = now();\n").unwrap();
+        // Mentions the distinctive one.
+        std::fs::write(dir.join("src/real_user.rs"), "append_sse_chunk();\n").unwrap();
+        // A symbol of the same name exists in two modules, so a mention of it
+        // cannot be attributed to either.
+        std::fs::write(
+            dir.join("src/trace_ring.rs"),
+            "pub fn now() -> u64 { 0 }\npub fn append_sse_chunk() {}\npub fn set_enabled() {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/switch.rs"), "pub fn set_enabled() {}\n").unwrap();
+        std::fs::write(dir.join("src/ambiguous.rs"), "set_enabled();\n").unwrap();
+        let g = scan(&dir);
+        let report = g.file("src/trace_ring.rs");
+        assert!(report.contains("real_user.rs"), "real user missing: {report}");
+        assert!(
+            !report.contains("other.rs"),
+            "a generic-name mention is not a dependency: {report}"
+        );
+        assert!(
+            !report.contains("ambiguous.rs"),
+            "an ambiguous symbol is not evidence: {report}"
+        );
+        assert!(
+            !report.contains("Used by"),
+            "the heading should not overstate what was matched: {report}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_distinctive_names_and_internal_imports_become_conventions() {
+        // Short common words are noise in a lexical graph, however many files
+        // mention them; compound or long names are specific enough to trust.
+        for noisy in ["key", "error", "label", "end", "file", "tool", "raw", "matches"] {
+            assert!(!is_distinctive_idiom_name(noisy), "{noisy} should be rejected");
+        }
+        for real in [
+            "complete_current_plan",
+            "MatchGroup",
+            "parse_todos",
+            "TraceInspector",
+            "paginate",
+        ] {
+            assert!(is_distinctive_idiom_name(real), "{real} should be kept");
+        }
+
+        // Only project-internal modules are a convention; stdlib is ambient.
+        let mut g = Graph::default();
+        g.by_file.insert("src/theme.rs".into(), vec![]);
+        g.by_file.insert("web-ui/src/components/TraceRail.jsx".into(), vec![]);
+        assert!(g.is_internal_import("crate::theme::Theme"));
+        assert!(g.is_internal_import("./components/TraceRail"));
+        assert!(g.is_internal_import("../lib/util"));
+        // A bare module the project actually contains counts (Python/Go style).
+        assert!(g.is_internal_import("theme"));
+        assert!(!g.is_internal_import("std::sync::Arc"));
+        assert!(!g.is_internal_import("ratatui::text::Line"));
+        assert!(!g.is_internal_import("super::*"), "test glob is not a convention");
+        assert!(!g.is_internal_import("crate::view::*"));
+    }
+
+    #[test]
+    fn idioms_only_report_callable_and_type_vocabulary() {
+        let mut g = Graph::default();
+        let def = |kind: &'static str, name: &str| Def {
+            name: name.to_string(),
+            kind,
+            file: "src/x.rs".to_string(),
+            line: 1,
+        };
+        let files = |n: usize| -> std::collections::BTreeSet<String> {
+            (0..n).map(|i| format!("f{i}.rs")).collect()
+        };
+        // A widely-used function is a real idiom.
+        g.defs.insert("render_tool".into(), vec![def("fn", "render_tool")]);
+        g.refs.insert("render_tool".into(), files(4));
+        // A widely-seen constant is a value, not an abstraction.
+        g.defs.insert("label".into(), vec![def("const", "label")]);
+        g.refs.insert("label".into(), files(5));
+
+        let names: Vec<String> = g.idioms(3).into_iter().map(|(n, _, _)| n).collect();
+        assert!(names.contains(&"render_tool".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"label".to_string()),
+            "constants must not be reported as idioms: {names:?}"
+        );
+    }
 
     /// Each test gets its own directory: they run in parallel.
     fn fixture(tag: &str) -> std::path::PathBuf {
@@ -1184,7 +1407,9 @@ mod tests {
         let out = g.file("src/lib.rs");
         assert!(out.contains("Widget"), "{out}");
         assert!(out.contains("std::io"), "{out}");
-        assert!(out.contains("Used by"), "{out}");
+        // `build_widget` is distinctive, so its callers are reported — under a
+        // heading that states what was actually matched.
+        assert!(out.contains("Referenced by"), "{out}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1265,6 +1490,9 @@ mod tests {
     #[test]
     fn common_imports_counts_modules_across_files() {
         let dir = fixture("common-imports-idiom");
+        // The module has to exist in the project for the import to be internal;
+        // a bare third-party name is ambient vocabulary, not a convention.
+        std::fs::write(dir.join("internal_kit.py"), "def helper():\n    pass\n").unwrap();
         for f in ["a", "b", "c"] {
             std::fs::write(
                 dir.join(format!("{f}.py")),
@@ -1277,6 +1505,14 @@ mod tests {
         assert!(
             common.iter().any(|(m, n)| m.contains("internal_kit") && *n >= 3),
             "expected internal_kit imported across files, got {common:?}"
+        );
+        // A standard-library import in the same project is not reported.
+        std::fs::write(dir.join("d.py"), "import os\nimport sys\n").unwrap();
+        let g2 = scan(&dir);
+        assert!(
+            !g2.common_imports(1).iter().any(|(m, _)| m == "os" || m == "sys"),
+            "stdlib must not be a convention: {:?}",
+            g2.common_imports(1)
         );
         std::fs::remove_dir_all(&dir).ok();
     }
