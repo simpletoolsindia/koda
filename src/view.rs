@@ -59,6 +59,20 @@ struct Block {
     offset: usize,
 }
 
+/// How much of the streaming reply is already laid out, so the next frame only
+/// has to render what arrived since. Reset whenever anything it assumes could
+/// have changed (a different block, a new width, or text that did not simply
+/// grow).
+struct StreamRender {
+    /// Which block this describes.
+    block: usize,
+    width: u16,
+    /// Bytes of the shown text folded into the kept lines.
+    stable_end: usize,
+    /// How many leading cached lines came from that prefix.
+    stable_lines: usize,
+}
+
 pub struct Transcript {
     blocks: Vec<Block>,
     pub show_reasoning: bool,
@@ -91,6 +105,15 @@ pub struct Transcript {
     total: usize,
     /// Width the offsets were computed at.
     laid_out_at: u16,
+    /// Incremental render state for the streaming reply (see `relayout`).
+    ///
+    /// A reply arrives token by token, and each token invalidates the block. Re-
+    /// rendering the whole block every frame is O(reply) per frame, so streaming
+    /// a long answer costs O(reply²) — measured at 21µs/frame for 2KB rising to
+    /// 880µs/frame at 60KB. Markdown here is a line-wise pass, so the part of
+    /// the reply before the last blank line renders the same no matter what
+    /// arrives later: keep those lines and re-render only the tail.
+    stream: Option<StreamRender>,
     /// Index of the earliest block whose cached offset may be stale.
     dirty_from: usize,
 }
@@ -114,6 +137,7 @@ impl Transcript {
             animate_reveal: false,
             total: 0,
             laid_out_at: 0,
+            stream: None,
             dirty_from: 0,
         }
     }
@@ -230,12 +254,16 @@ impl Transcript {
         let last = self.blocks.len().saturating_sub(1);
         if let Some(Block {
             item: Item::Assistant(s),
-            cache,
             ..
         }) = self.blocks.last_mut()
         {
             s.push_str(chunk);
-            *cache = None;
+            // Deliberately *not* clearing the cache. The signature already
+            // includes the text length, so `relayout` sees this block as stale
+            // and re-renders it — while the previous lines survive for the
+            // incremental path to extend instead of re-rendering the whole
+            // reply. Dropping them here is what made streaming a long answer
+            // cost O(reply) per frame.
             self.dirty_from = self.dirty_from.min(last);
             return;
         }
@@ -572,6 +600,8 @@ impl Transcript {
         };
         let mut animating = None;
         let last_i = self.blocks.len().saturating_sub(1);
+        // Held outside the loop because the loop borrows `self.blocks` mutably.
+        let mut stream = self.stream.take();
         // Only the tail can be mid-reveal; everything before it is settled.
         let reveal = self.reveal;
         let revealing = self.animate_reveal;
@@ -596,8 +626,21 @@ impl Transcript {
                 None => true,
             };
             if stale {
-                let lines =
-                    render_item(&b.item, width as usize, show, expand_tools, expand_reasoning, &theme, &glyphs, tick, cut);
+                // The streaming reply is the one block that changes every frame,
+                // so it gets the incremental path: keep the lines already laid
+                // out for its settled prefix and render only the tail.
+                let reused = (i == last_i)
+                    .then(|| stream_render(&mut stream, i, b, width, cut, &theme))
+                    .flatten();
+                let lines = match reused {
+                    Some(lines) => lines,
+                    None => {
+                        if i == last_i {
+                            stream = None;
+                        }
+                        render_item(&b.item, width as usize, show, expand_tools, expand_reasoning, &theme, &glyphs, tick, cut)
+                    }
+                };
                 b.cache = Some((width, sig, lines));
             }
             if animating.is_none() && is_running(&b.item) {
@@ -610,6 +653,7 @@ impl Transcript {
         self.laid_out_at = width;
         self.dirty_from = self.blocks.len();
         self.total = cursor;
+        self.stream = stream;
         cursor
     }
 
@@ -757,6 +801,78 @@ fn running_verb(name: &str) -> &'static str {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Lay out the streaming reply by keeping the lines already rendered for its
+/// settled prefix and rendering only what arrived since.
+///
+/// Returns `None` when the incremental path does not apply — a block that is not
+/// a plain reply, a width change, text that did not simply grow, or nothing
+/// settled yet — and the caller falls back to a full render. Correctness rests on
+/// `md::stable_prefix_end`: see the invariant proved in md's tests.
+fn stream_render(
+    state: &mut Option<StreamRender>,
+    index: usize,
+    block: &mut Block,
+    width: u16,
+    cut: Option<usize>,
+    theme: &Theme,
+) -> Option<Vec<Line<'static>>> {
+    let Item::Assistant(text) = &block.item else {
+        return None;
+    };
+    // Exactly the slice the full renderer would show, so the two paths agree.
+    let shown = shown_prefix(text, cut);
+    let split = md::stable_prefix_end(shown);
+    if split == 0 {
+        return None; // nothing has settled yet: one short render is cheaper
+    }
+
+    let fresh = || StreamRender { block: index, width, stable_end: 0, stable_lines: 0 };
+    let st = match state {
+        // Same block, same width, and the settled prefix only grew: reusable.
+        Some(s) if s.block == index && s.width == width && s.stable_end <= split => s,
+        _ => {
+            *state = Some(fresh());
+            state.as_mut()?
+        }
+    };
+
+    // Take the previous lines; without them there is nothing to extend.
+    let mut lines = match block.cache.take() {
+        Some((w, _, lines)) if w == width && lines.len() >= st.stable_lines => lines,
+        _ => {
+            st.stable_end = 0;
+            st.stable_lines = 0;
+            Vec::new()
+        }
+    };
+    lines.truncate(st.stable_lines);
+
+    // Fold the newly settled text into the kept lines. The dropped byte is the
+    // `\n` that separates the halves, which `split` on the whole would consume.
+    if split > st.stable_end {
+        let seg = &shown[st.stable_end..split - 1];
+        lines.extend(md::render(seg, width as usize, theme));
+        st.stable_end = split;
+        st.stable_lines = lines.len();
+    }
+    // Only the unsettled tail is re-rendered every frame.
+    lines.extend(md::render(&shown[split..], width as usize, theme));
+    lines.push(Line::default());
+    Some(lines)
+}
+
+/// The prefix of a reply that is visible mid-reveal. Slicing on a char boundary
+/// matters: cutting a multi-byte character in half would panic.
+fn shown_prefix(text: &str, cut: Option<usize>) -> &str {
+    match cut {
+        Some(n) if n < text.chars().count() => {
+            let end = text.char_indices().nth(n).map(|(i, _)| i).unwrap_or(text.len());
+            &text[..end]
+        }
+        _ => text,
+    }
+}
+
 fn render_item(
     item: &Item,
     width: usize,
@@ -787,19 +903,7 @@ fn render_item(
         // The assistant is the default voice, so it gets no marker at all.
         Item::Assistant(text) => {
             // Mid-reveal, render only the prefix that has been "typed" so far.
-            // Slicing on a char boundary matters: cutting a multi-byte character
-            // in half would panic.
-            let shown = match cut {
-                Some(n) if n < text.chars().count() => {
-                    let end = text
-                        .char_indices()
-                        .nth(n)
-                        .map(|(i, _)| i)
-                        .unwrap_or(text.len());
-                    &text[..end]
-                }
-                _ => text.as_str(),
-            };
+            let shown = shown_prefix(text, cut);
             let mut lines = md::render(shown, width, t);
             lines.push(Line::default());
             lines
@@ -1496,6 +1600,117 @@ fn indent(line: Line<'static>, width: usize, t: &Theme, g: &Glyphs, depth: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shot(t: &Transcript) -> String {
+        t.window(0, t.total_lines().max(1))
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| format!("{}\u{1}{:?}", s.content, s.style))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The streaming reply is rendered incrementally: its settled prefix is kept
+    /// and only the tail is re-rendered. That is only safe if *every* frame looks
+    /// exactly like a transcript rendered in one shot — so compare them at every
+    /// single delta, not just at the end.
+    #[test]
+    fn streaming_renders_frame_for_frame_like_one_shot() {
+        let doc = "# Title\n\nfirst paragraph of prose that wraps across the width.\n\n\
+                   ```rust\nfn f() {\n\n    let x = 1;\n}\n```\n\n\
+                   - a list item\n- another one\n\n\
+                   | a | b |\n|---|---|\n| 1 | 2 |\n\n\
+                   > a quote\n\nlast paragraph, ünïcödé and 日本語 included.";
+        let mut inc = tr();
+        inc.user("question".into());
+        let mut acc = String::new();
+        for piece in doc.split_inclusive(' ') {
+            inc.assistant_delta(piece);
+            acc.push_str(piece);
+            inc.relayout(48);
+
+            let mut one = tr();
+            one.user("question".into());
+            one.assistant_delta(&acc);
+            one.relayout(48);
+            assert_eq!(
+                shot(&inc),
+                shot(&one),
+                "incremental render diverged after {} bytes",
+                acc.len()
+            );
+        }
+    }
+
+    /// Same guarantee while the reveal animation is cutting the text short: the
+    /// shown prefix grows, so the incremental path must track it.
+    #[test]
+    fn streaming_matches_one_shot_while_revealing() {
+        let doc = "para one here\n\npara two here\n\npara three ends it";
+        let mut inc = tr();
+        inc.animate_reveal = true;
+        inc.user("q".into());
+        inc.assistant_delta(doc);
+        // Walk the reveal cursor forward the way the frame clock does.
+        for chars in 1..=doc.chars().count() {
+            inc.reveal = chars;
+            inc.dirty_from = 0;
+            inc.relayout(40);
+
+            let mut one = tr();
+            one.animate_reveal = true;
+            one.user("q".into());
+            one.assistant_delta(doc);
+            one.reveal = chars;
+            one.dirty_from = 0;
+            one.relayout(40);
+            assert_eq!(shot(&inc), shot(&one), "diverged at reveal {chars}");
+        }
+    }
+
+    /// A width change throws away every wrap, including the kept prefix.
+    #[test]
+    fn a_width_change_rerenders_the_streaming_reply() {
+        let doc = "alpha beta gamma delta epsilon\n\nzeta eta theta iota kappa lambda mu nu";
+        let mut inc = tr();
+        inc.user("q".into());
+        for piece in doc.split_inclusive(' ') {
+            inc.assistant_delta(piece);
+            inc.relayout(30);
+        }
+        inc.relayout(90);
+        let mut one = tr();
+        one.user("q".into());
+        one.assistant_delta(doc);
+        one.relayout(90);
+        assert_eq!(shot(&inc), shot(&one), "re-wrap after a width change diverged");
+    }
+
+    /// A reply with no blank line has no settled prefix, so it must still render
+    /// correctly through the full path.
+    #[test]
+    fn a_single_paragraph_reply_still_renders_correctly() {
+        let doc = "one very long paragraph with no blank lines at all so nothing ever settles \
+                   and the whole thing is re-rendered every frame";
+        let mut inc = tr();
+        inc.user("q".into());
+        let mut acc = String::new();
+        for piece in doc.split_inclusive(' ') {
+            inc.assistant_delta(piece);
+            acc.push_str(piece);
+            inc.relayout(36);
+        }
+        let mut one = tr();
+        one.user("q".into());
+        one.assistant_delta(&acc);
+        one.relayout(36);
+        assert_eq!(shot(&inc), shot(&one));
+    }
     use crate::theme::{ANSI, UNICODE};
 
     fn tr() -> Transcript {

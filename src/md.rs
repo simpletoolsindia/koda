@@ -7,7 +7,44 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-/// Render markdown text to styled lines wrapped to `width`.
+/// Where a growing markdown document can be split without changing how it
+/// renders.
+///
+/// `render` is a single pass over lines whose only cross-line state is (a) being
+/// inside a fenced code block and (b) the contiguous rows of a table. So for a
+/// byte offset `p` that starts a line, if no fence is open there and the line
+/// before it is blank, then
+///
+/// ```text
+/// render(text[..p-1]) ++ render(text[p..]) == render(text)
+/// ```
+///
+/// (the dropped byte is the `\n` that separated the two halves, which `split`
+/// consumes). A blank line before `p` is what rules out splitting a table.
+///
+/// Returns the largest such `p`, or 0 when the document has no safe split yet.
+/// This is what lets a streaming reply re-render only its tail instead of the
+/// whole block on every frame.
+pub fn stable_prefix_end(text: &str) -> usize {
+    let mut in_fence = false;
+    let mut best = 0usize;
+    let mut offset = 0usize;
+    for line in text.split('\n') {
+        // `offset` is this line's start; the next line starts after its '\n'.
+        let next = offset + line.len() + 1;
+        let fence = line.trim_start();
+        if fence.starts_with("```") || fence.starts_with("~~~") {
+            in_fence = !in_fence;
+        } else if !in_fence && line.trim_end().is_empty() && next <= text.len() {
+            // A blank line outside a fence: everything up to here is settled, so
+            // the next line is a safe place to resume.
+            best = next;
+        }
+        offset = next;
+    }
+    best
+}
+
 pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
     let width = width.max(8);
     let dim = || t.dim();
@@ -790,6 +827,88 @@ fn first_non_ws(chars: &[char]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The invariant the incremental streaming render depends on: splitting at
+    /// `stable_prefix_end` and rendering the halves separately must produce
+    /// exactly what rendering the whole document produces. If this ever fails,
+    /// a streaming reply would render differently from a settled one.
+    #[test]
+    fn splitting_at_a_stable_point_renders_identically() {
+        let t = crate::theme::resolve("default");
+        let corpus = [
+            "one paragraph only",
+            "para one\n\npara two",
+            "# Heading\n\nbody text here\n\n- a list item\n- another\n",
+            "text\n\n```rust\nfn main() {\n\n    // a blank line inside a fence\n}\n```\n\nafter",
+            "before\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter the table",
+            "> quoted\n\n---\n\n1. first\n2. second\n\ntail",
+            "a\n\n\n\nb",
+            "trailing blank line\n\n",
+            "```\nunterminated fence\n\nstill inside\n",
+            "· unicode — em dash, ünïcödé, 日本語\n\nsecond block 日本語\n",
+        ];
+        for doc in corpus {
+            let whole = render(doc, 60, &t);
+            let p = stable_prefix_end(doc);
+            if p == 0 {
+                continue; // no safe split yet; the full render is the only option
+            }
+            let mut split = render(&doc[..p - 1], 60, &t);
+            split.extend(render(&doc[p..], 60, &t));
+            assert_eq!(
+                fmt(&whole),
+                fmt(&split),
+                "split at {p} changed the render of {doc:?}"
+            );
+        }
+    }
+
+    /// A split must never land inside a code fence, because the fence changes how
+    /// every following line is rendered.
+    #[test]
+    fn a_split_never_lands_inside_a_fence() {
+        // The only blank line is inside the fence, so there is no safe split.
+        assert_eq!(stable_prefix_end("```\ncode\n\nmore code\n"), 0);
+        // Once the fence closes, the blank line after it is safe.
+        let doc = "```\ncode\n```\n\ntail";
+        let p = stable_prefix_end(doc);
+        assert!(p > 0 && &doc[p..] == "tail", "p={p} rest={:?}", &doc[p..]);
+        // Splitting mid-table is impossible: a table has no blank line in it.
+        let doc = "| a | b |\n|---|---|\n| 1 | 2 |";
+        assert_eq!(stable_prefix_end(doc), 0);
+    }
+
+    /// Streaming appends, so the split point may only ever move forward — that is
+    /// what lets the already-rendered prefix be kept.
+    #[test]
+    fn the_split_point_only_moves_forward_as_text_arrives() {
+        let full = "alpha\n\nbeta\n\ngamma\n\ndelta";
+        let mut last = 0;
+        for end in 1..=full.len() {
+            if !full.is_char_boundary(end) {
+                continue;
+            }
+            let p = stable_prefix_end(&full[..end]);
+            assert!(p >= last, "split moved backwards: {last} -> {p} at {end}");
+            last = p;
+        }
+        assert!(last > 0);
+    }
+
+    /// Render lines to a comparable string.
+    fn fmt(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| format!("{}|{:?}", s.content, s.style))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     fn th() -> Theme {
         crate::theme::ANSI

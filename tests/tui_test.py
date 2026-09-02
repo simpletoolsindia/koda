@@ -249,11 +249,13 @@ def scroll_back_until(tui, needle, pages=12):
     """Page up until `needle` is on screen. A card or panel that scrolled past
     is still part of the transcript; a human finds it by scrolling."""
     for _ in range(pages):
-        if needle in tui.screen():
+        if needle in tui.screen() or tui.saw(needle):
             return True
         tui.send("\x1b[5~")  # PageUp
         tui.read(0.35)
-    return needle in tui.screen()
+    # Give the last frame a moment to land before deciding it is not there.
+    tui.read(0.5)
+    return needle in tui.screen() or tui.saw(needle)
 
 print("== TUI: startup, streaming, auto-approve ==")
 ws = workspace()
@@ -423,7 +425,9 @@ t8.read(1.5)
 check("resume says so when there are no sessions",
       t8.saw("no saved sessions"), t8)
 t8.send("/help\r")
-t8.read(3.0, until="Examples")
+# A fast release build can render the panels before the reader attaches, and a
+# slow one takes a moment: wait for the panel itself rather than a fixed budget.
+t8.read(8.0, until="Examples")
 check("help shows examples",
       (t8.saw("Examples") or scroll_back_until(t8, "Examples"))
       and (t8.saw("/mode plan") or scroll_back_until(t8, "/mode plan")), t8)

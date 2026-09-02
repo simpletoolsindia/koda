@@ -132,7 +132,18 @@ fn str_prop(desc: &str) -> Value {
     json!({ "type": "string", "description": desc })
 }
 
-pub fn specs() -> Vec<Spec> {
+/// The tool table.
+///
+/// Built once and shared. It used to be rebuilt on every call — including every
+/// `spec()` lookup, which happens per tool call and while parsing a streaming
+/// reply — allocating all fifteen JSON schemas (~10KB) each time just to read one
+/// field.
+pub fn specs() -> &'static [Spec] {
+    static TABLE: std::sync::OnceLock<Vec<Spec>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(build_specs)
+}
+
+fn build_specs() -> Vec<Spec> {
     vec![
         Spec {
             name: "read_file",
@@ -528,8 +539,8 @@ pub fn parse_todos(args: &Value) -> Vec<Todo> {
 pub const SUBAGENT_TOOLS: &[&str] =
     &["read_file", "list_dir", "find_files", "search", "skill", "codegraph"];
 
-pub fn spec(name: &str) -> Option<Spec> {
-    specs().into_iter().find(|s| s.name == name)
+pub fn spec(name: &str) -> Option<&'static Spec> {
+    specs().iter().find(|s| s.name == name)
 }
 
 pub fn is_mutating(name: &str) -> bool {
@@ -539,7 +550,7 @@ pub fn is_mutating(name: &str) -> bool {
 /// OpenAI `tools` array. `allow` restricts it to a named subset.
 pub fn openai_schema_for(allow: Option<&[&str]>) -> Vec<Value> {
     specs()
-        .into_iter()
+        .iter()
         .filter(|s| allow.map(|a| a.contains(&s.name)).unwrap_or(true))
         .map(|s| {
             json!({
@@ -547,7 +558,7 @@ pub fn openai_schema_for(allow: Option<&[&str]>) -> Vec<Value> {
                 "function": {
                     "name": s.name,
                     "description": s.desc,
-                    "parameters": s.params,
+                    "parameters": s.params.clone(),
                 }
             })
         })
@@ -2296,11 +2307,108 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Hot-path benchmark. Not a correctness test, so it does not run by default:
+    ///
+    /// ```sh
+    /// cargo test --release perf -- --nocapture --ignored
+    /// ```
+    ///
+    /// Numbers on an M-series laptop, for reference (2026-09):
+    ///   spec lookups          ~0.0us   (were 17.5us: the table was rebuilt per call)
+    ///   openai_schema_for      ~34us   per LLM request
+    ///   graph::scan(koda)      ~15ms   once, off-thread at startup
+    ///   streaming a 60KB reply ~11us   per frame (was ~1370us, and grew with length)
+    #[test]
+    #[ignore]
+    fn perf() {
+        use std::time::Instant;
+        macro_rules! bench {
+            ($name:expr, $iters:expr, $body:expr) => {{
+                let t0 = Instant::now();
+                for _ in 0..$iters {
+                    std::hint::black_box($body);
+                }
+                let per = t0.elapsed().as_secs_f64() / ($iters as f64);
+                let unit = if per < 1e-3 {
+                    format!("{:.1}us", per * 1e6)
+                } else {
+                    format!("{:.2}ms", per * 1e3)
+                };
+                println!("  {:<40} {:>10}", $name, unit);
+            }};
+        }
+
+        println!("\n-- tool table (per tool call, and per streamed candidate) --");
+        bench!("specs()", 2000, specs());
+        bench!("spec(\"read_file\")", 2000, spec("read_file"));
+        bench!("is_mutating(\"write_file\")", 2000, is_mutating("write_file"));
+        bench!("openai_schema_for(None) [per request]", 500, openai_schema_for(None));
+
+        println!("\n-- code graph --");
+        let t0 = Instant::now();
+        let g = crate::graph::scan(std::path::Path::new("."));
+        println!("  {:<40} {:>8.0}ms  ({} files, {} symbols)", "graph::scan(cwd)",
+            t0.elapsed().as_secs_f64() * 1e3, g.files, g.defs.len());
+        bench!("graph.overview()", 50, g.overview());
+        bench!("graph.symbol(\"relayout\")", 200, g.symbol("relayout"));
+
+        println!("\n-- telemetry ring (the web UI polls this every second) --");
+        for i in 0..1000 {
+            crate::log::push(crate::log::Level::Info, "perf", format!("entry {i}"),
+                vec![("k".into(), "v".into())]);
+        }
+        bench!("log::recent(Debug, 1000)", 200, crate::log::recent(crate::log::Level::Debug, 1000));
+
+        // The frame cost while a reply streams in is what a user actually feels.
+        // The right-hand column is what a full re-render of the same text costs,
+        // i.e. what this used to pay on every single frame.
+        println!("\n-- streaming one long reply --");
+        println!("  {:<24} {:>14} {:>18}", "reply size", "per frame", "full re-render");
+        let th = crate::theme::resolve("default");
+        let mut tr = crate::view::Transcript::new(th, crate::theme::glyphs("unicode"));
+        tr.user("write me a long explanation".to_string());
+        let para = "This paragraph explains one part of the answer in a couple of lines of \
+prose, wrapping across the terminal width like any real reply would.\n\n";
+        let mut acc = String::new();
+        let mut so_far = 0usize;
+        for target in [2_000usize, 10_000, 30_000, 60_000] {
+            let t0 = Instant::now();
+            let mut frames = 0u32;
+            while so_far < target {
+                for piece in para.split_inclusive(' ') {
+                    tr.assistant_delta(piece);
+                    acc.push_str(piece);
+                    tr.relayout(100);
+                    frames += 1;
+                }
+                so_far += para.len();
+            }
+            let per = t0.elapsed().as_secs_f64() / frames.max(1) as f64;
+            let t1 = Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(crate::md::render(&acc, 100, &th));
+            }
+            let full = t1.elapsed().as_secs_f64() / 20.0;
+            println!("  {:<24} {:>14} {:>18}", format!("~{}KB", target / 1000),
+                format!("{:.1}us", per * 1e6), format!("{:.1}us", full * 1e6));
+        }
+
+        println!("\n-- settled transcript (1000 blocks) --");
+        let mut big = crate::view::Transcript::new(th, crate::theme::glyphs("unicode"));
+        for i in 0..500 {
+            big.user(format!("message {i} asking something of moderate length"));
+            big.assistant_delta(&format!("reply {i} with a couple of sentences of prose.\n\n"));
+            big.finish_reveal();
+        }
+        big.relayout(100);
+        let total = big.total_lines();
+        bench!("relayout(100) with nothing dirty", 500, big.relayout(100));
+        bench!("window(bottom 40)", 2000, big.window(total.saturating_sub(40), 40));
+        println!();
+    }
+
     #[test]
     fn search_scoped_to_one_file_finds_its_hits_on_both_engines() {
-        // A model narrowing a search to a single file is normal ("is it used in
-        // src/tui.rs?"). ripgrep omits the filename when handed one file, which
-        // silently produced zero results until `--with-filename` was forced.
         let dir = fixture("search-one-file");
         let c = ctx(&dir);
 
