@@ -329,6 +329,68 @@ impl App {
         }
     }
 
+    /// Insert pasted text into the composer. A large paste (long or multi-line)
+    /// is stashed and shown as a short `@pasteN` token so the composer stays
+    /// readable; it expands back to the full text on submit.
+    ///
+    /// Shared by bracketed paste and ctrl+v so the two cannot drift apart.
+    fn paste_text(&mut self, text: &str) {
+        let trimmed = text.trim_end_matches('\n');
+        if trimmed.is_empty() {
+            return;
+        }
+        // A path, not prose: attach it instead of typing it out. This is how an
+        // image paste actually arrives in most terminals.
+        if let Some(path) = paste_as_path(trimmed) {
+            let image = crate::tools::is_image_path(&path);
+            self.editor.insert(&format!("@{} ", path.display()));
+            let kb = std::fs::metadata(&path).map(|m| m.len() / 1024).unwrap_or(0);
+            self.note(if image {
+                format!("pasted image ({kb} KB) — it attaches when you send")
+            } else {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                format!("pasted path {name} — it attaches when you send")
+            });
+            return;
+        }
+        if trimmed.len() > 200 || trimmed.contains('\n') {
+            self.pastes.push(trimmed.to_string());
+            let token = format!("@paste{}", self.pastes.len());
+            let lines = trimmed.lines().count().max(1);
+            self.editor.insert(&token);
+            self.note(format!(
+                "pasted {lines} lines as {token} — it expands when you send"
+            ));
+        } else {
+            self.editor.insert(trimmed);
+        }
+    }
+
+    /// Put a clipboard image in front of the model.
+    ///
+    /// koda already attaches an image written as `@path`, so the whole job is
+    /// getting the bytes onto disk and naming them in the composer — the send
+    /// path needs no special case for this at all. Returns false when the
+    /// clipboard holds no image, so the caller can fall back to text.
+    fn paste_clipboard_image(&mut self) -> bool {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        // A temp file rather than the workspace: a pasted screenshot is not
+        // something the user asked to have dropped in their repo.
+        let dest = std::env::temp_dir().join(format!("koda-paste-{stamp}.png"));
+        if clipboard_image(&dest).is_err() {
+            return false;
+        }
+        let kb = std::fs::metadata(&dest).map(|m| m.len() / 1024).unwrap_or(0);
+        self.editor.insert(&format!("@{} ", dest.display()));
+        self.note(format!(
+            "pasted image ({kb} KB) — it attaches when you send"
+        ));
+        true
+    }
+
     fn note(&mut self, msg: impl Into<String>) {
         self.transcript.notice(msg.into());
         self.follow = true;
@@ -878,6 +940,16 @@ impl App {
                 self.follow |= self.transcript.toggle_reasoning_pref();
                 let on = self.transcript.show_reasoning;
                 self.note(if on { "reasoning shown (stays until ctrl+t)" } else { "reasoning hidden" });
+            }
+            KeyCode::Char('v') if ctrl => {
+                // Images first: that is the case the terminal cannot deliver on
+                // its own. Text then behaves exactly as a bracketed paste would.
+                if !self.paste_clipboard_image() {
+                    match clipboard_text() {
+                        Some(t) => self.paste_text(&t),
+                        None => self.note("nothing on the clipboard"),
+                    }
+                }
             }
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
             KeyCode::Char('b') if alt => self.editor.word_left(),
@@ -1465,8 +1537,16 @@ impl App {
             self.pastes.clear();
         }
         if let Some(rest) = trimmed.strip_prefix('/') {
-            self.slash(rest);
-            return;
+            // ...unless it is a path. No command name contains a slash, while a
+            // pasted absolute path is nothing but slashes, and dispatching it
+            // threw the message away with "unknown command". Arguments may still
+            // contain slashes (`/url http://host/v1`), so only the command word
+            // is examined.
+            let word = rest.split_whitespace().next().unwrap_or("");
+            if !word.contains('/') {
+                self.slash(rest);
+                return;
+            }
         }
         // If the agent asked a question, this message is the answer, not a new
         // turn. Echo it and hand it to the waiting tool.
@@ -2085,6 +2165,139 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
         }
     }
     osc52(text)
+}
+
+/// A paste that is really a file path.
+///
+/// Several terminals answer an image paste by writing the image to a temp file
+/// and pasting *its path* as text — that is what koda actually receives, not
+/// image bytes. Left as literal text the path sits in the composer doing
+/// nothing, and an absolute one is then read as a slash command
+/// ("unknown command /var/folders/.../clipboard-....png"). Recognising it lets
+/// the existing `@path` attachment do the rest.
+fn paste_as_path(text: &str) -> Option<PathBuf> {
+    let t = text.trim();
+    if t.is_empty() || t.contains('\n') {
+        return None;
+    }
+    // Some terminals paste a percent-encoded file:// URL rather than a path.
+    let path = match t.strip_prefix("file://") {
+        Some(rest) => percent_decode(rest),
+        None => t.to_string(),
+    };
+    let p = Path::new(&path);
+    // Absolute and real: a bare word that happens to name something in the
+    // workspace is far more likely to be text the user meant to type.
+    (p.is_absolute() && p.is_file()).then(|| p.to_path_buf())
+}
+
+/// Decode `%XX` escapes in a file:// URL. Bytes are collected first so a
+/// multi-byte UTF-8 character split across escapes survives.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Pull an image off the system clipboard into `dest`.
+///
+/// Bracketed paste is a *text* channel. When the clipboard holds a screenshot
+/// there is nothing for the terminal to send, so koda never receives a paste
+/// event at all and the keystroke just looks broken. The bytes are sitting on
+/// the clipboard the whole time — they have to be fetched rather than waited
+/// for, which is what this does.
+fn clipboard_image(dest: &Path) -> Result<()> {
+    use std::process::{Command as Proc, Stdio};
+    let _ = std::fs::remove_file(dest);
+
+    #[cfg(target_os = "macos")]
+    {
+        // pbpaste is text-only and yields nothing for an image. osascript is the
+        // dependency-free way in, but `-e` mangles the «class PNGf» chevrons on
+        // their way through the shell, so the script goes over stdin instead.
+        let script = format!(
+            "set d to (the clipboard as «class PNGf»)\n\
+             set fh to open for access POSIX file \"{}\" with write permission\n\
+             set eof fh to 0\n\
+             write d to fh\n\
+             close access fh\n",
+            dest.display()
+        );
+        if let Ok(mut child) = Proc::new("osascript")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(si) = child.stdin.as_mut() {
+                let _ = si.write_all(script.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Wayland and X11 both hand the bytes back on stdout.
+        for (bin, args) in [
+            ("wl-paste", &["--type", "image/png"][..]),
+            ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+        ] {
+            if let Ok(out) = Proc::new(bin).args(args).stderr(Stdio::null()).output() {
+                if out.status.success() && !out.stdout.is_empty() {
+                    let _ = std::fs::write(dest, &out.stdout);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Every branch above is best-effort and stays quiet when it fails, so the
+    // file is the real test: no image on the clipboard leaves nothing behind,
+    // or an empty stub.
+    let ok = std::fs::read(dest)
+        .map(|b| b.len() > 8 && b.starts_with(&[0x89, b'P', b'N', b'G']))
+        .unwrap_or(false);
+    if !ok {
+        let _ = std::fs::remove_file(dest);
+        anyhow::bail!("no image on the clipboard");
+    }
+    Ok(())
+}
+
+/// The clipboard's text, for the ctrl+v path. The terminal delivers this by
+/// itself on a normal paste; this is only needed when koda asks.
+fn clipboard_text() -> Option<String> {
+    use std::process::{Command as Proc, Stdio};
+    for (bin, args) in [
+        ("pbpaste", &[][..]),
+        ("wl-paste", &["--no-newline"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+    ] {
+        if let Ok(out) = Proc::new(bin).args(args).stderr(Stdio::null()).output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `ESC ] 52 ; c ; <base64> BEL` — the terminal itself does the copying.
@@ -3856,6 +4069,56 @@ mod tests {
         assert_eq!(select_override_for("iTerm.app"), "hold \u{2325} option");
         assert_eq!(select_override_for("WezTerm"), "hold shift");
         assert_eq!(select_override_for(""), "hold shift");
+    }
+
+    /// The reported bug: terminals answer an image paste by writing a temp file
+    /// and pasting its path, so koda saw text beginning with "/" and reported
+    /// `unknown command /var/folders/.../clipboard-....png`.
+    #[test]
+    fn a_pasted_image_path_is_recognised() {
+        let dir = std::env::temp_dir().join(format!("koda-paste-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("clipboard-2026-09-02-232843-302d27eb.png");
+        std::fs::write(&img, [0x89, b'P', b'N', b'G', 0, 0, 0, 0, 1]).unwrap();
+
+        let got = paste_as_path(img.to_str().unwrap()).expect("an absolute path to a real file");
+        assert_eq!(got, img);
+        assert!(crate::tools::is_image_path(&got), "and it is an image");
+
+        // file:// URLs, percent-encoded, are the other form terminals send.
+        let spaced = dir.join("a shot.png");
+        std::fs::write(&spaced, b"x").unwrap();
+        let url = format!("file://{}", spaced.display().to_string().replace(' ', "%20"));
+        assert_eq!(paste_as_path(&url), Some(spaced));
+
+        // Ordinary text must not be mistaken for a path.
+        assert_eq!(paste_as_path("fix the login bug"), None);
+        assert_eq!(paste_as_path("/help"), None);
+        assert_eq!(paste_as_path(""), None);
+        assert_eq!(paste_as_path(&format!("{}\nsecond line", img.display())), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A slash command never has a slash in its name, but its arguments may.
+    /// That distinction is what keeps a pasted path from being swallowed by the
+    /// command dispatcher while `/url http://host/v1` still works.
+    #[test]
+    fn a_command_word_never_contains_a_slash() {
+        let word = |s: &str| s.split_whitespace().next().unwrap_or("").contains('/');
+        assert!(word("var/folders/xk/T/clipboard-1.png"), "a pasted path");
+        assert!(word("Users/sridhar/shot.png"), "any absolute path");
+        assert!(!word("help"), "a bare command");
+        assert!(!word("url http://localhost:11434/v1"), "slashes in an argument");
+        assert!(!word("learn accept 3"), "command with plain arguments");
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes_and_utf8() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("%E2%9C%93"), "\u{2713}");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
     }
 
     #[test]
