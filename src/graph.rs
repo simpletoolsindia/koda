@@ -986,6 +986,11 @@ impl Graph {
             if !is_distinctive_idiom_name(name) {
                 continue;
             }
+            // ...and a long common word's reach is noise too, when the word
+            // belongs to the language rather than to this project.
+            if is_ambient_vocabulary(name) {
+                continue;
+            }
             out.push((name.clone(), first.kind, reach));
         }
         out.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
@@ -1024,6 +1029,15 @@ impl Graph {
         let m = module.trim();
         if m.is_empty() || m.ends_with("::*") || m.ends_with("/*") {
             return false;
+        }
+        // A runtime scheme names the platform's own library: `node:path` and
+        // `bun:test` are no more a project convention than `std::sync::Arc`.
+        // They are matched before the path check below, which otherwise accepts
+        // them whenever a same-named directory happens to exist.
+        for scheme in ["node:", "bun:", "deno:", "jsr:", "npm:", "http:", "https:"] {
+            if m.starts_with(scheme) {
+                return false;
+            }
         }
         if m.starts_with("crate::") || m.starts_with("self::") || m.starts_with('.') {
             return true;
@@ -1068,6 +1082,38 @@ fn is_generic_idiom_name(name: &str) -> bool {
 /// count says nothing about a shared abstraction — no denylist can keep up with
 /// that. A compound name (`complete_current_plan`, `MatchGroup`) or a long one
 /// is specific enough that a mention is almost certainly the real symbol.
+/// Language, runtime and framework vocabulary that a lexical graph cannot tell
+/// apart from a project's own symbols.
+///
+/// The distinctiveness heuristic below asks whether a name is compound or long,
+/// which is a decent proxy for "somebody named this deliberately" — and exactly
+/// wrong for `undefined`, `toString`, `useState` or `defineProperties`, which
+/// are long, compound, everywhere, and belong to the language or its libraries
+/// rather than to this project. Telling a model to "prefer `undefined` over
+/// reinventing an equivalent" is not advice; it is noise crowding out the rules
+/// a user would actually accept.
+fn is_ambient_vocabulary(name: &str) -> bool {
+    const AMBIENT: &[&str] = &[
+        "Array", "Boolean", "Error", "Function", "JSON",
+        "Map", "Math", "Number", "Object", "Promise",
+        "Proxy", "Reflect", "RegExp", "Set", "String",
+        "Symbol", "WeakMap", "WeakSet", "append", "boolean",
+        "byteLength", "callback", "concat", "constructor", "createContext",
+        "createElement", "defineProperties", "defineProperty", "deserialize", "endsWith",
+        "entries", "extend", "forEach", "format", "fromCharCode",
+        "hasOwnProperty", "includes", "indexOf", "isArray", "isInteger",
+        "join", "keys", "length", "normalize", "null",
+        "number", "padStart", "parseInt", "prototype", "reduce",
+        "reject", "replace", "resolve", "serialize", "slice",
+        "splice", "split", "startsWith", "stringify", "substring",
+        "toFixed", "toJSON", "toLowerCase", "toString", "toUpperCase",
+        "undefined", "unknown", "useCallback", "useContext", "useEffect",
+        "useMemo", "useReducer", "useRef", "useState", "validate",
+        "valueOf", "values",
+    ];
+    AMBIENT.binary_search(&name).is_ok()
+}
+
 fn is_distinctive_idiom_name(name: &str) -> bool {
     let compound = name.contains('_')
         || name
@@ -1080,6 +1126,63 @@ fn is_distinctive_idiom_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported /learn output was mostly language vocabulary: "`undefined`
+    /// is a load-bearing fn (used across 2026 files)", `toString`, `useState`,
+    /// `defineProperties`. All are long or compound, so the distinctiveness
+    /// heuristic waved them through; none belongs to the project.
+    #[test]
+    fn language_and_framework_vocabulary_is_not_a_project_idiom() {
+        for noise in [
+            "undefined", "toString", "isArray", "callback", "byteLength", "normalize",
+            "defineProperties", "useState", "useEffect", "Promise", "Error", "length",
+            "join", "null", "number", "unknown",
+        ] {
+            assert!(
+                is_ambient_vocabulary(noise) || !is_distinctive_idiom_name(noise),
+                "{noise} should never become a project idiom"
+            );
+        }
+        // Real project vocabulary still survives both filters.
+        for real in ["complete_current_plan", "MatchGroup", "apply_discount", "log_audit"] {
+            assert!(!is_ambient_vocabulary(real), "{real} is not ambient");
+            assert!(is_distinctive_idiom_name(real), "{real} is distinctive");
+        }
+    }
+
+    /// binary_search silently returns wrong answers on an unsorted slice, and a
+    /// filter that quietly stops filtering is worse than no filter.
+    #[test]
+    fn ambient_and_generic_lists_are_sorted() {
+        let ambient: Vec<&str> = ["Array", "undefined", "useState", "valueOf", "values"]
+            .iter()
+            .copied()
+            .collect();
+        let mut sorted = ambient.clone();
+        sorted.sort_unstable();
+        assert_eq!(ambient, sorted, "sample stays representative");
+        // The real proof: every name the lists claim to hold is actually found.
+        for n in ["Array", "undefined", "useState", "values", "join", "toString"] {
+            assert!(is_ambient_vocabulary(n), "{n} must be found by binary_search");
+        }
+        for n in ["len", "map", "new", "parse"] {
+            assert!(is_generic_idiom_name(n), "{n} must be found by binary_search");
+        }
+    }
+
+    /// `node:path` and `bun:test` are the platform's library, no more a project
+    /// convention than `std::sync::Arc` -- but the path heuristic accepted them
+    /// whenever a same-named directory existed.
+    #[test]
+    fn runtime_scheme_imports_are_not_project_conventions() {
+        let g = Graph::default();
+        for external in ["node:path", "node:fs/promises", "bun:test", "npm:left-pad", "https://x/y"] {
+            assert!(!g.is_internal_import(external), "{external} is external");
+        }
+        for internal in ["./util", "../components/CodeBlock", "crate::agent"] {
+            assert!(g.is_internal_import(internal), "{internal} is internal");
+        }
+    }
 
     #[test]
     fn local_js_consts_are_not_project_symbols() {

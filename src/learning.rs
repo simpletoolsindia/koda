@@ -206,6 +206,10 @@ impl Learning {
     pub fn induce(&mut self) -> usize {
         let obs = self.observations();
         let mined = induce_rules(&obs);
+        // Same reasoning as induce_idioms: command rules are re-derived from the
+        // full observation log every time, so a candidate this run did not
+        // produce is one the current rules no longer justify.
+        self.retire_stale(&["cmd.use.", "cmd.avoid."], &mined);
         self.merge_candidates(mined)
     }
 
@@ -240,7 +244,32 @@ impl Learning {
                 accepted: false,
             });
         }
+        // Idiom mining is deterministic and re-runs from the whole graph, so
+        // this run's output is the complete truth about idioms. Anything left
+        // over under the same prefix was mined by an older, worse version of
+        // these heuristics and would otherwise sit in /learn for ever: the
+        // filters improve, the garbage never leaves. Accepted rules are the
+        // user's, and survive regardless.
+        self.retire_stale(&["idiom.symbol.", "idiom.import."], &mined);
         self.merge_candidates(mined)
+    }
+
+    /// Drop unaccepted candidates under `prefixes` that this mining run no
+    /// longer produces.
+    ///
+    /// Without it a rule is permanent once mined. Every fix to the miner leaves
+    /// its previous mistakes behind, and a user who has seen the same nonsense
+    /// in /learn twice stops reading the list — which costs far more than the
+    /// bad rules themselves.
+    fn retire_stale(&mut self, prefixes: &[&str], mined: &[Rule]) {
+        let before = self.rules.len();
+        self.rules.retain(|r| {
+            let ours = prefixes.iter().any(|p| r.key.starts_with(p));
+            !ours || r.accepted || mined.iter().any(|m| m.key == r.key)
+        });
+        if self.rules.len() != before {
+            self.dirty = true;
+        }
     }
 
     /// Fold freshly-mined candidates into the rule set: refresh known ones,
@@ -411,6 +440,9 @@ fn command_substitutions(obs: &[Observation]) -> Vec<Rule> {
         }
     }
     for (cmd, oks) in &ok {
+        if is_generic_command(cmd) {
+            continue;
+        }
         if *oks >= MIN_SUPPORT {
             out.push(Rule {
                 key: format!("cmd.use.{}", slug(cmd)),
@@ -722,6 +754,34 @@ fn command_head(cmd: &str) -> String {
         .join(" ")
 }
 
+/// Whether a command is ambient shell vocabulary rather than project knowledge.
+///
+/// "`cd /tmp` is the command that works here for that task" is not a lesson --
+/// it is a note that changing directory changes directory. The rule earns its
+/// place only when the command encodes something a newcomer to *this* project
+/// could not have guessed: a task runner, a test invocation, a build script.
+/// Navigation and inspection verbs never carry that, and every one of them that
+/// gets mined pushes a real rule further down the /learn list.
+fn is_generic_command(cmd: &str) -> bool {
+    const AMBIENT: &[&str] = &[
+        "awk", "cat", "cd", "chmod", "cp", "cut", "date", "df", "diff", "du", "echo",
+        "env", "export", "file", "find", "grep", "head", "hostname", "kill", "less",
+        "ln", "ls", "mkdir", "mv", "nano", "open", "printf", "ps", "pwd", "rg", "rm",
+        "sed", "sleep", "sort", "tail", "tee", "touch", "tr", "uniq", "vim", "wc",
+        "which", "who", "xargs",
+    ];
+    let Some(head) = cmd.split_whitespace().next() else {
+        return true;
+    };
+    if AMBIENT.binary_search(&head).is_ok() {
+        return true;
+    }
+    // A fetcher or VCS is only interesting together with the rest of the
+    // invocation; the bare verb plus a flag ("curl -s", "git status") is still
+    // the shell's vocabulary rather than this project's.
+    cmd.split_whitespace().count() <= 2 && matches!(head, "curl" | "wget" | "git")
+}
+
 fn slug(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
@@ -923,6 +983,66 @@ fn decode(line: &str) -> Option<Observation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported /learn list included "`cd /tmp` is the command that works
+    /// here for that task" -- a note that cd changes directory, taking up a slot
+    /// a real rule could have used.
+    #[test]
+    fn ambient_shell_verbs_do_not_become_project_rules() {
+        for noise in ["cd /tmp", "cd /Users/sridhar/research/OmniRoute", "curl -s",
+                      "grep -rE", "ls -la", "cat README.md", "git status"] {
+            assert!(is_generic_command(noise), "{noise} teaches nothing about the project");
+        }
+        // Project-specific invocations are exactly what this should keep.
+        for real in ["cargo test --all", "npm run build:release", "just migrate",
+                     "./install.sh --system", "curl -s localhost:20128/v1/models"] {
+            assert!(!is_generic_command(real), "{real} is worth remembering");
+        }
+    }
+
+    /// The structural gap: a candidate was permanent once mined, so every
+    /// improvement to the miner left its old mistakes sitting in /learn for
+    /// ever. Re-mining must retire what it no longer produces -- except what the
+    /// user has accepted, which is theirs.
+    #[test]
+    fn re_mining_retires_candidates_it_no_longer_produces() {
+        let dir = std::env::temp_dir().join(format!("koda-learn-stale-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut l = Learning::load(&dir);
+
+        let idioms = vec![("undefined".to_string(), "fn", 2026_usize)];
+        let imports: Vec<(String, usize)> = vec![];
+        assert_eq!(l.induce_idioms(&idioms, &imports), 1, "mined once");
+        assert!(l.candidates().iter().any(|r| r.text.contains("undefined")));
+
+        // A later run of a better miner no longer produces it.
+        assert_eq!(l.induce_idioms(&[], &imports), 0);
+        assert!(
+            !l.candidates().iter().any(|r| r.text.contains("undefined")),
+            "the stale candidate is gone: {:?}",
+            l.candidates().iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An accepted rule is a decision the user made; re-mining must not undo it.
+    #[test]
+    fn retiring_stale_candidates_leaves_accepted_rules_alone() {
+        let dir = std::env::temp_dir().join(format!("koda-learn-keep-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut l = Learning::load(&dir);
+
+        l.induce_idioms(&[("log_audit".to_string(), "fn", 9)], &[]);
+        l.accept(0).expect("accepted");
+        l.induce_idioms(&[], &[]);
+        assert!(
+            l.rules.iter().any(|r| r.accepted && r.text.contains("log_audit")),
+            "an accepted rule survives a run that would not re-mine it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("koda-learn-{tag}"));
