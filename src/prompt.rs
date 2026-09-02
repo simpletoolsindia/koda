@@ -19,6 +19,13 @@ Rules:
   where a subsystem lives, a naming or library convention, a project-specific \
   idiom — call `remember` with one plain sentence so the next session starts \
   knowing it. Only durable facts, not what you are doing right now.
+- When you work out a *procedure* that was not obvious and will come up again — \
+  how to run this repo's integration tests, how to add a subsystem end to end, a \
+  release checklist — call `manage_skill` to write it down as a skill: the steps, \
+  the exact commands, and what to check. Do it once the procedure has actually \
+  worked, not while you are still guessing. A fact is `remember`; a procedure is a \
+  skill. If a skill already covers the situation, read it and update it rather \
+  than adding a second one.
 - For anything outside the codebase — library docs, an unfamiliar error, an API or \
   version question you cannot answer from the repo — use `web_search` to find pages, \
   then `web_fetch` to read the most relevant one. If web search is unavailable or \

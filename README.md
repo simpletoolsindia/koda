@@ -224,7 +224,7 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `todo` | — | the plan you see in the transcript |
 | `remember` | — | durable facts, kept for next session |
 | `delegate` | — | hand a read-only investigation to a subagent |
-| `manage_agent` | asks | create/update a specialised role agent on the fly |
+| `manage_skill` | asks | write a procedure it worked out as a skill; with `role`, a delegatable agent |
 | `web_search` | — | SearXNG or DuckDuckGo, off by default |
 | `web_fetch` | — | GET a URL and read it as text, off by default |
 | `ask_user` | — | asks *you* a question mid-task; your reply is the answer |
@@ -445,14 +445,25 @@ The server has no extra dependencies (it is built on the async runtime koda
 already uses) and binds to localhost only, so nothing is exposed off your
 machine.
 
-## Dynamic role agents
+## Skills koda writes for itself
 
-Beyond hand-written role skills, the main agent can spin up a specialised agent
-for the task in front of it with the `manage_agent` tool — when a request implies
-repeated, distinct kinds of work (implement, then test, then review), it can
-create a `qa` or `reviewer` agent, then delegate to it. Dynamically created
-agents are ordinary skill files under `.koda/skills/`, so you can read, edit or
-delete them afterward. See [docs/extensions.md](docs/extensions.md).
+Skills are not only hand-written. When koda works out a procedure that was not
+obvious and will come up again — how to run this repo's integration suite, how to
+add a subsystem end to end, a release checklist — it calls `manage_skill` to write
+it down, so the next session starts with it instead of rediscovering it.
+
+The division is deliberate: a **fact** goes to `remember`, a **style rule** is
+learned and reviewed with `/learn`, and a **procedure** becomes a skill. Setting
+`role` makes the same file a delegatable agent (a role agent is just a skill with
+a role), which is how koda spins up a `qa` or `reviewer` agent for itself.
+
+Guards, because a directory full of near-duplicate skills is worse than none:
+writing one is approval-gated like any file write, a one-liner is refused as a
+fact rather than a procedure, an existing name must be updated explicitly, and a
+second skill claiming the same trigger is refused. Everything lands as an
+ordinary markdown file in `.koda/skills/`, so you can read, edit, commit or
+delete it — and `/skills` lists what koda has accumulated. See
+[docs/extensions.md](docs/extensions.md).
 
 ## Custom tools
 

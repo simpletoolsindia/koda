@@ -317,13 +317,15 @@ pub fn specs() -> Vec<Spec> {
             mutating: false,
         },
         Spec {
-            name: "manage_agent",
-            desc: "Create, update, or remove a specialised *role agent* on the fly, when the \
-                   task would benefit from a dedicated helper you can delegate to (e.g. a \
-                   'qa' agent to write tests, a 'reviewer' agent, a 'docs' agent). The agent \
-                   is saved as a project skill and can then be used with `delegate` (pass its \
-                   role) or /orc. Prefer this over doing every specialised subtask yourself \
-                   when the user's request implies repeated, distinct kinds of work.",
+            name: "manage_skill",
+            desc: "Write down a reusable procedure as a project skill, so this session's \
+                   hard-won knowledge is available next time. Use it when you worked out a \
+                   multi-step procedure that was NOT obvious, will come up again, and no \
+                   existing skill covers — e.g. how to run this repo's integration tests, \
+                   how to add a new tool end to end, the release checklist. Set `role` to \
+                   also make it a delegatable agent (`delegate` with that role, or /orc). \
+                   Not for one-off facts (use `remember`) or style rules (those are learned). \
+                   Re-run with action=\"update\" to revise one; action=\"delete\" to remove.",
             params: json!({
                 "type": "object",
                 "properties": {
@@ -332,11 +334,12 @@ pub fn specs() -> Vec<Spec> {
                         "enum": ["create", "update", "delete"],
                         "description": "create (default), update an existing one, or delete."
                     },
-                    "role": str_prop("Short role slug the agent is delegated by, e.g. \"qa\", \"reviewer\"."),
-                    "when": str_prop("One line: when this agent should be used."),
-                    "instructions": str_prop("The agent's operating brief — how it works, what it must do and check.")
+                    "name": str_prop("Skill slug, e.g. \"run-integration-tests\"."),
+                    "when": str_prop("One line: the situation this applies to, so it is found later."),
+                    "body": str_prop("The procedure: concrete steps, commands, and what to check."),
+                    "role": str_prop("Optional. Set to make it a delegatable role agent, e.g. \"qa\".")
                 },
-                "required": ["role"]
+                "required": ["name"]
             }),
             mutating: true,
         },

@@ -161,8 +161,8 @@ pub fn catalogue(skills: &[Skill]) -> String {
     }
     out.push_str(
         "\nWhen a request implies repeated, distinct kinds of work (e.g. implement + test + \
-         review), you may create a focused role agent with `manage_agent`, then delegate to \
-         it — rather than doing every specialised subtask yourself.\n",
+         review), you may create a focused role agent with `manage_skill` (set `role`), then \
+         delegate to it — rather than doing every specialised subtask yourself.\n",
     );
     out
 }

@@ -542,6 +542,34 @@ Skills are read from `~/.config/koda/skills/` (yours, every project) and
 skill overrides a personal one of the same name. Reload after editing with
 `/skills reload`.
 
+### Skills koda writes for itself
+
+You don't have to author them all. When koda works out a procedure that was not
+obvious and will come up again — how to run this repo's integration suite, how to
+add a subsystem end to end, a release checklist — it writes it down itself with
+the `manage_skill` tool, into `<project>/.koda/skills/<name>.md`. The next session
+starts with that procedure instead of rediscovering it.
+
+Three artifacts, kept separate on purpose:
+
+| You get | For | Reviewed with |
+| --- | --- | --- |
+| `remember` | a durable **fact** ("tests run with `cargo test -- --test-threads=1`") | `.koda/memory.md` |
+| a learned rule | a **style/convention** koda inferred from your corrections | `/learn` |
+| a **skill** | a **procedure**: steps, commands, what to check | `/skills`, the file itself |
+
+Adding a `role` makes the same file a delegatable agent — which is how koda spins
+up a `qa` or `reviewer` agent for itself mid-task. See
+[role agents](#role-agents-and-orchestration).
+
+It is deliberately hard to spam: writing a skill is a file write, so it is
+approval-gated like any other and appears in the transcript; a body too thin to be
+a procedure is refused as a fact; a vague `when` is refused because nothing would
+match it later; an existing name must be updated explicitly; and a second skill
+claiming a trigger an existing one already covers is refused. Everything is a
+plain markdown file, so you can read, edit, commit or delete whatever it wrote —
+`koda skills` shows what has accumulated and where each one came from.
+
 ---
 
 ## Memory and self-improvement

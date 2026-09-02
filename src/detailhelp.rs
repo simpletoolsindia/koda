@@ -18,7 +18,7 @@ const FEATURES: &[(&str, &str)] = &[
     ("Memory", "Durable facts and command outcomes are kept in .koda/memory.md, so the next session already knows your test runner."),
     ("Sessions", "Every conversation is saved. /resume reopens one, /search finds by text, /fork branches a copy."),
     ("Subagents & /orc", "Delegate wide read-only investigations to a child agent with its own context. /orc <task> runs it in vibe mode, which plans, delegates to role agents, and verifies the result."),
-    ("Dynamic agents", "The main agent can create specialised role agents (qa, reviewer, …) on the fly with manage_agent, then delegate to them."),
+    ("Self-authored skills", "koda writes down procedures it worked out with manage_skill, so the next session starts with them — a fact goes to remember, a procedure becomes a skill. Add a role and the same skill becomes a delegatable agent (qa, reviewer, …)."),
     ("Web search", "DuckDuckGo out of the box, or your own SearXNG. Toggle with /websearch; pick the backend in /settings."),
     ("Vision", "Attach an image with @screenshot.png for a vision-capable model."),
     ("Watch mode", "Aider-style: end a comment with AI! to implement it, or AI? to ask. koda acts when idle. Toggle with /watch."),

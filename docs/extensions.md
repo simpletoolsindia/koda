@@ -139,24 +139,37 @@ You are the QA agent. Given a change to test:
 
 Delegate to it explicitly, or let `/orc <task>` decompose work across roles.
 
-### Dynamic role agents (`manage_agent`)
+### Skills koda writes for itself (`manage_skill`)
 
-The main agent can also **create a role agent for itself at runtime** via the
-`manage_agent` tool, when your request implies repeated, distinct kinds of work
-(e.g. "build the feature, write tests, and review it" → it may spin up `qa` and
-`reviewer` agents). `manage_agent` supports:
+koda can **author skills at runtime**. When it works out a procedure that was not
+obvious and will recur, it calls `manage_skill` and writes it down; when your
+request implies repeated, distinct kinds of work ("build it, test it, review it")
+it can give the skill a `role` and delegate to it. `manage_skill` supports:
 
 - `action: create` (default) / `update` / `delete`
-- `role` — the slug used to delegate (e.g. `qa`)
-- `when` — one line: when to use it
-- `instructions` — the operating brief
+- `name` — the skill slug (e.g. `run-integration-tests`)
+- `when` — one line: the situation it applies to, so it is found later
+- `body` — the procedure: steps, exact commands, what to check
+- `role` — optional; set it to make the skill a delegatable agent (e.g. `qa`)
 
-It writes `<project>/.koda/skills/<role>-agent.md` (a normal, editable skill
-file), validates it, and reloads skills immediately. You can edit or delete that
-file by hand afterward — dynamically created agents are just skills.
+`manage_agent` is still accepted as the old name for this tool.
 
-`manage_agent` is only available to the top-level agent and only when
-`subagents = true`. A subagent cannot create more agents.
+What it refuses, so the directory stays useful: a body too thin to be a procedure
+(that is a fact — use `remember`), a `when` too vague to match later, creating
+over an existing name without `action: update`, and a second skill claiming a
+trigger an existing one already covers. Writing a skill is a file write, so it
+goes through the normal approval gate and shows up in the transcript.
+
+It writes `<project>/.koda/skills/<name>.md` (a normal, editable skill file),
+validates that it parses before persisting, and reloads skills immediately so the
+skill is usable in the same turn. You can edit, commit or delete that file by
+hand afterward — self-authored skills are just skills.
+
+`manage_skill` is available to the top-level agent only; a subagent works from a
+narrow slice of context and must not write half-learned procedures. It is a
+mutating tool, so plan mode does not offer it and every write is approval-gated.
+Adding a `role` needs `subagents = true` to be *delegatable*, but the skill is
+written and usable either way.
 
 ---
 

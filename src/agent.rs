@@ -1070,12 +1070,13 @@ impl Agent {
             let graph = list.remove(pos);
             list.insert(0, graph);
         }
-        // `manage_agent` creates delegatable role agents, so it only makes sense
-        // for the top-level agent when delegation is on. A subagent must not
-        // spawn more agents.
-        if self.depth != 0 || !self.cfg.subagents {
+        // Writing a skill is how the agent keeps what it worked out, so it is
+        // available whenever the top-level agent runs — with or without
+        // delegation. A subagent must not author skills: its context is narrow
+        // and it would write half-learned procedures.
+        if self.depth != 0 {
             list.retain(|t| {
-                t.pointer("/function/name").and_then(|n| n.as_str()) != Some("manage_agent")
+                t.pointer("/function/name").and_then(|n| n.as_str()) != Some("manage_skill")
             });
         }
         // User-defined tools (config `[[tools]]`). Only for the top-level agent
@@ -1554,7 +1555,10 @@ impl Agent {
             "remember" => self.remember(&args),
             "codegraph" => self.query_graph(&args).await,
             "skill" => self.read_skill(&args),
-            "manage_agent" => self.manage_agent(&args),
+            // `manage_agent` was the old name for this, when it could only make
+            // role agents; keep accepting it so a model that learned that name
+            // still works.
+            "manage_skill" | "manage_agent" => self.manage_skill(&args),
             "web_search" => self.web_search(&args).await,
             "web_fetch" => self.web_fetch(&args).await,
             "todo" => {
@@ -2147,7 +2151,15 @@ impl Agent {
     /// `delegate(role=...)` or orchestrated via `/orc`. This is how the main
     /// agent grows a specialised helper for the task at hand instead of the user
     /// having to hand-author a skill file.
-    fn manage_agent(&mut self, args: &Value) -> tools::Outcome {
+    /// Author a project skill: a reusable procedure the agent worked out, written
+    /// to `.koda/skills/<name>.md` so the next session starts with it. A skill
+    /// with a `role` is additionally delegatable, which is how role agents are
+    /// created — a role agent is just a skill with a role.
+    ///
+    /// Deliberately conservative: it refuses vague or near-empty skills, refuses
+    /// to silently shadow an existing one, and every write goes through the same
+    /// approval path as any other file write, so the user always sees it.
+    fn manage_skill(&mut self, args: &Value) -> tools::Outcome {
         let err = |msg: String, sum: String| tools::Outcome {
             ok: false,
             content: format!("ERROR: {msg}"),
@@ -2167,77 +2179,209 @@ impl Agent {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
-        if role.is_empty() || !role.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        // `name` is the skill's identity. A role-only call (the older
+        // `manage_agent` shape) still works: the role names the agent.
+        let raw_name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let name = if !raw_name.is_empty() {
+            raw_name
+        } else if !role.is_empty() {
+            format!("{role}-agent")
+        } else {
+            String::new()
+        };
+        let slug_ok = |s: &str| {
+            !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
+        if !slug_ok(&name) {
             return err(
-                "`role` is required and must be a short slug (letters, digits, - or _), e.g. \"qa\".".into(),
-                "manage_agent: bad role".into(),
+                "`name` is required and must be a short slug (letters, digits, - or _), \
+                 e.g. \"run-integration-tests\"."
+                    .into(),
+                "manage_skill: bad name".into(),
+            );
+        }
+        if !role.is_empty() && !slug_ok(&role) {
+            return err(
+                "`role` must be a short slug (letters, digits, - or _), e.g. \"qa\".".into(),
+                "manage_skill: bad role".into(),
             );
         }
 
         let dir = self.ctx.root.join(".koda").join("skills");
-        let path = dir.join(format!("{role}-agent.md"));
+        let path = dir.join(format!("{name}.md"));
+        // Role agents created before this tool was generalised used a
+        // `<role>-agent.md` filename; keep updating that file if it is the one
+        // that exists, so an update doesn't fork into a second copy.
+        let legacy = (!role.is_empty()).then(|| dir.join(format!("{role}-agent.md")));
+        let target = match &legacy {
+            Some(l) if l.exists() && !path.exists() => l.clone(),
+            _ => path.clone(),
+        };
 
         if action == "delete" || action == "remove" {
-            match std::fs::remove_file(&path) {
+            if !target.exists() {
+                return err(
+                    format!("no skill `{name}` to delete."),
+                    "manage_skill: not found".into(),
+                );
+            }
+            match std::fs::remove_file(&target) {
                 Ok(()) => {
                     let n = self.reload_skills();
                     return tools::Outcome {
                         ok: true,
-                        content: format!("Removed role agent `{role}`. {n} skills now loaded."),
-                        summary: format!("agent {role}: removed"),
+                        content: format!("Removed skill `{name}`. {n} skills now loaded."),
+                        summary: format!("skill {name}: removed"),
                         view: tools::ToolView::Plain,
                     };
                 }
-                Err(e) => return err(format!("could not remove `{role}`: {e}"), "manage_agent: remove failed".into()),
+                Err(e) => {
+                    return err(
+                        format!("could not remove `{name}`: {e}"),
+                        "manage_skill: remove failed".into(),
+                    )
+                }
             }
         }
 
-        // create / update
         let when = args
             .get("when")
             .and_then(|w| w.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
-        let instructions = args
-            .get("instructions")
+        // `instructions` is the name the role-agent form used.
+        let body = args
+            .get("body")
+            .or_else(|| args.get("instructions"))
             .and_then(|i| i.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
-        if when.is_empty() || instructions.is_empty() {
+        if when.is_empty() || body.is_empty() {
             return err(
-                "creating or updating an agent needs both `when` (one line: when to use it) and \
-                 `instructions` (the agent's operating brief).".into(),
-                "manage_agent: missing fields".into(),
+                "a skill needs both `when` (one line: the situation it applies to) and \
+                 `body` (the procedure itself)."
+                    .into(),
+                "manage_skill: missing fields".into(),
+            );
+        }
+        // A skill exists to save the next session real work. Judge substance by
+        // the artifact: a procedure needs steps, so it must have more than one
+        // line and some detail; a role agent's brief is prose and can be short
+        // while still being complete.
+        let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+        let (min_len, min_lines) = if role.is_empty() { (120, 2) } else { (80, 1) };
+        if body.len() < min_len || lines < min_lines {
+            return err(
+                format!(
+                    "this is too thin to be a {what} ({} chars, {lines} line(s)). {need} For a \
+                     single durable fact use `remember` instead.",
+                    body.len(),
+                    what = if role.is_empty() { "skill" } else { "role brief" },
+                    need = if role.is_empty() {
+                        "A skill is a procedure: the steps, the exact commands, and what to check."
+                    } else {
+                        "A role brief says how that agent works and what it must check."
+                    }
+                ),
+                "manage_skill: too thin".into(),
+            );
+        }
+        if when.split_whitespace().count() < 3 {
+            return err(
+                "`when` must describe the situation in a few words so the skill is found \
+                 later, e.g. \"before a release, to verify the TUI end to end\"."
+                    .into(),
+                "manage_skill: vague when".into(),
             );
         }
 
-        let existing = path.exists();
-        // Compose a valid skill file: frontmatter (name/role/when) + body.
-        let doc = format!(
-            "---\nname: {role}-agent\nrole: {role}\nwhen: {when}\n---\n\n{instructions}\n"
-        );
+        let existing = target.exists();
+        let updating = matches!(action.as_str(), "update" | "revise");
+        if existing && !updating {
+            return err(
+                format!(
+                    "skill `{name}` already exists. Read it with the `skill` tool first, then \
+                     call this again with action=\"update\" if it really needs revising."
+                ),
+                "manage_skill: already exists".into(),
+            );
+        }
+        // Near-duplicate guard: a different name with the same trigger line just
+        // splits the knowledge in two.
+        if !existing {
+            let same_when = self.skills.iter().find(|s| {
+                s.name != name && s.when.trim().eq_ignore_ascii_case(when.trim())
+            });
+            if let Some(dup) = same_when {
+                return err(
+                    format!(
+                        "skill `{}` already covers that exact situation. Update it instead of \
+                         adding a near-duplicate.",
+                        dup.name
+                    ),
+                    "manage_skill: duplicate".into(),
+                );
+            }
+        }
+
+        // Compose a valid skill file: frontmatter (name/role?/when) + body.
+        let front_role = if role.is_empty() {
+            String::new()
+        } else {
+            format!("role: {role}\n")
+        };
+        let doc = format!("---\nname: {name}\n{front_role}when: {when}\n---\n\n{body}\n");
         // Validate before writing so we never persist a skill that won't parse.
         if crate::skills::parse(&doc).is_none() {
-            return err("the composed agent skill did not parse; check the fields.".into(), "manage_agent: parse failed".into());
+            return err(
+                "the composed skill did not parse; check the fields.".into(),
+                "manage_skill: parse failed".into(),
+            );
         }
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            return err(format!("could not create {}: {e}", dir.display()), "manage_agent: mkdir failed".into());
+            return err(
+                format!("could not create {}: {e}", dir.display()),
+                "manage_skill: mkdir failed".into(),
+            );
         }
-        if let Err(e) = std::fs::write(&path, doc) {
-            return err(format!("could not write {}: {e}", path.display()), "manage_agent: write failed".into());
+        if let Err(e) = std::fs::write(&target, doc) {
+            return err(
+                format!("could not write {}: {e}", target.display()),
+                "manage_skill: write failed".into(),
+            );
         }
         let n = self.reload_skills();
         let verb = if existing { "Updated" } else { "Created" };
+        let mut content = format!(
+            "{verb} skill `{name}` at {}. It is loaded now and will be offered in future \
+             sessions when the situation matches. {n} skills loaded.",
+            target.display()
+        );
+        if !role.is_empty() {
+            if self.cfg.subagents {
+                let _ = write!(
+                    content,
+                    " Delegate to it with `delegate` (role=\"{role}\") or via /orc."
+                );
+            } else {
+                let _ = write!(
+                    content,
+                    " It carries role `{role}`, but delegation is off (subagents = false), so \
+                     nothing can delegate to it yet."
+                );
+            }
+        }
         tools::Outcome {
             ok: true,
-            content: format!(
-                "{verb} role agent `{role}` at {}. Delegate to it with `delegate` (role=\"{role}\") \
-                 or use it via /orc. {n} skills loaded.",
-                path.display()
-            ),
-            summary: format!("agent {role}: {}", verb.to_lowercase()),
+            content,
+            summary: format!("skill {name}: {}", verb.to_lowercase()),
             view: tools::ToolView::Plain,
         }
     }
@@ -3300,6 +3444,138 @@ mod tests {
         assert!(!looks_like_symbol_search("search", &serde_json::json!({"pattern": "error: connection reset"})));
         assert!(!looks_like_symbol_search("search", &serde_json::json!({"pattern": "foo.*bar"})));
         assert!(!looks_like_symbol_search("read_file", &serde_json::json!({"pattern": "compact"})));
+    }
+
+    /// A skill is how the agent keeps a procedure it worked out. The tool has to
+    /// accept a real one, refuse the things that would turn `.koda/skills` into
+    /// noise, and make a role agent just a skill that carries a role.
+    #[test]
+    fn the_agent_can_author_a_skill_and_refuses_junk() {
+        use serde_json::json;
+        let mut a = test_agent();
+        let dir = a.ctx.root.join(".koda").join("skills");
+        std::fs::remove_dir_all(&dir).ok();
+
+        let body = "1. Start the mock server: python3 tests/mock_server.py 8123\n\
+                    2. Run: BIN=./target/release/koda ./tests/e2e.sh\n\
+                    3. Every check must print ok; a FAIL blocks the release.\n";
+        let when = "before a release, to run the end-to-end suite";
+
+        // A real procedure is written, parses, and is loaded immediately.
+        let out = a.manage_skill(&json!({
+            "name": "run-e2e-suite", "when": when, "body": body
+        }));
+        assert!(out.ok, "{}", out.content);
+        let path = dir.join("run-e2e-suite.md");
+        assert!(path.exists(), "skill file missing: {}", path.display());
+        assert!(
+            a.skills.iter().any(|s| s.name == "run-e2e-suite"),
+            "skill should be loaded without a restart"
+        );
+        // No role means it is knowledge, not a delegatable agent.
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("role:"), "{saved}");
+
+        // Creating the same name again is refused: update it deliberately.
+        let dup = a.manage_skill(&json!({ "name": "run-e2e-suite", "when": when, "body": body }));
+        assert!(!dup.ok && dup.content.contains("already exists"), "{}", dup.content);
+        let upd = a.manage_skill(&json!({
+            "name": "run-e2e-suite", "action": "update", "when": when,
+            "body": format!("{body}4. Also run tests/tui_test.py for the TUI.\n")
+        }));
+        assert!(upd.ok, "{}", upd.content);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("tui_test.py"));
+
+        // A different name for the same situation splits the knowledge in two.
+        let near = a.manage_skill(&json!({ "name": "e2e-again", "when": when, "body": body }));
+        assert!(!near.ok && near.content.contains("already covers"), "{}", near.content);
+
+        // A one-liner is a fact, not a procedure.
+        let thin = a.manage_skill(&json!({
+            "name": "too-thin", "when": "when running tests", "body": "run cargo test"
+        }));
+        assert!(!thin.ok && thin.content.contains("too thin"), "{}", thin.content);
+        // A trigger nobody can match later is refused too.
+        let vague = a.manage_skill(&json!({
+            "name": "vague-one", "when": "tests", "body": body
+        }));
+        assert!(!vague.ok && vague.content.contains("`when`"), "{}", vague.content);
+        // And a name that isn't a slug can't become a filename.
+        let bad = a.manage_skill(&json!({
+            "name": "../escape", "when": when, "body": body
+        }));
+        assert!(!bad.ok && bad.content.contains("slug"), "{}", bad.content);
+        assert!(!dir.join("../escape.md").exists());
+
+        // A role turns the same mechanism into a delegatable agent.
+        let agent = a.manage_skill(&json!({
+            "name": "qa-agent", "role": "qa",
+            "when": "when the task needs tests written and run",
+            "body": "Write the failing test first, then make it pass, then run the suite \
+                     and report exactly which checks changed state.\n"
+        }));
+        assert!(agent.ok, "{}", agent.content);
+        assert!(std::fs::read_to_string(dir.join("qa-agent.md")).unwrap().contains("role: qa"));
+        assert!(
+            crate::skills::find_role(&a.skills, "qa").is_some(),
+            "a role skill must be delegatable"
+        );
+
+        // Deleting removes the file and unloads it.
+        let del = a.manage_skill(&json!({ "name": "run-e2e-suite", "action": "delete" }));
+        assert!(del.ok, "{}", del.content);
+        assert!(!path.exists());
+        assert!(!a.skills.iter().any(|s| s.name == "run-e2e-suite"));
+        let missing = a.manage_skill(&json!({ "name": "run-e2e-suite", "action": "delete" }));
+        assert!(!missing.ok && missing.content.contains("no skill"), "{}", missing.content);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The old role-agent call shape (`role` + `instructions`, no `name`) has to
+    /// keep working: a model may have learned it.
+    #[test]
+    fn the_legacy_role_agent_shape_still_works() {
+        use serde_json::json;
+        let mut a = test_agent();
+        let dir = a.ctx.root.join(".koda").join("skills");
+        std::fs::remove_dir_all(&dir).ok();
+        let out = a.manage_skill(&json!({
+            "role": "reviewer",
+            "when": "when a change needs reviewing before it ships",
+            "instructions": "Read the diff, check edge cases and tests, and list concrete \
+                             problems with file:line references rather than general advice.\n"
+        }));
+        assert!(out.ok, "{}", out.content);
+        assert!(dir.join("reviewer-agent.md").exists());
+        assert!(crate::skills::find_role(&a.skills, "reviewer").is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Authoring a skill is a file write, so it must be gated like one, and a
+    /// subagent must never do it.
+    #[test]
+    fn skill_authoring_is_approval_gated_and_top_level_only() {
+        assert!(
+            tools::is_mutating("manage_skill"),
+            "writing a skill must go through approval"
+        );
+        let a = test_agent();
+        let names = |list: Vec<serde_json::Value>| -> Vec<String> {
+            list.iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+        // Advertised to the top-level agent...
+        assert!(names(a.advertised_tools()).contains(&"manage_skill".to_string()));
+        // ...and never to a subagent.
+        let child = a.child();
+        assert!(!names(child.advertised_tools()).contains(&"manage_skill".to_string()));
+        // Plan mode is read-only, so the mutating tool is not offered there.
+        let mut planning = test_agent();
+        planning.set_mode(crate::config::Mode::Plan);
+        assert!(!names(planning.advertised_tools()).contains(&"manage_skill".to_string()));
     }
 
     #[test]
