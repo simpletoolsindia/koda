@@ -213,6 +213,14 @@ pub struct Config {
     /// and copy; you then scroll with the wheel-free keys (PageUp/PageDown).
     pub mouse_capture: bool,
 
+    /// Whether the model accepts images: "auto" | "on" | "off".
+    ///
+    /// "auto" guesses from the model name, which is all you can do for a plain
+    /// endpoint — and is exactly wrong behind a router, where the model is an
+    /// alias like `auto` or `best-coding` that no name heuristic can classify
+    /// and that `/v1/models` may not even list. Set it explicitly there.
+    pub vision: String,
+
     /// Palette name, or "auto"/"" for the terminal's own 16 colours.
     /// `NO_COLOR` and `TERM=dumb` force monochrome regardless.
     pub theme: String,
@@ -413,6 +421,7 @@ impl Default for Config {
             motion: true,
             reveal: true,
             mouse_capture: true,
+            vision: "auto".into(),
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,

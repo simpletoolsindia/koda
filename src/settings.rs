@@ -24,6 +24,7 @@ pub enum Row {
     Motion,
     Reveal,
     Mouse,
+    Vision,
     Sandbox,
     Sessions,
     Memory,
@@ -43,7 +44,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 22] = [
+    pub const ALL: [Row; 23] = [
         Row::Mode,
         Row::Autonomy,
         Row::Reasoning,
@@ -51,6 +52,7 @@ impl Row {
         Row::Motion,
         Row::Reveal,
         Row::Mouse,
+        Row::Vision,
         Row::Sandbox,
         Row::Sessions,
         Row::Memory,
@@ -77,6 +79,7 @@ impl Row {
             Row::Motion => "animation",
             Row::Reveal => "text reveal",
             Row::Mouse => "mouse capture",
+            Row::Vision => "image input",
             Row::Sandbox => "sandbox",
             Row::Sessions => "sessions",
             Row::Memory => "memory",
@@ -104,6 +107,7 @@ impl Row {
             Row::Motion => "spinners, gauges, and text reveal",
             Row::Reveal => "stream replies in progressively (needs animation)",
             Row::Mouse => "on: wheel scrolls · off: drag selects and copies",
+            Row::Vision => "auto (guess from name) · on · off — set on behind a router",
             Row::Sandbox => "confine file tools to the workspace",
             Row::Sessions => "record conversations to .koda/sessions",
             Row::Memory => "carry facts between sessions in .koda/memory.md",
@@ -224,6 +228,28 @@ impl Settings {
             Row::Motion => self.cfg.motion = !self.cfg.motion,
             Row::Reveal => self.cfg.reveal = !self.cfg.reveal,
             Row::Mouse => self.cfg.mouse_capture = !self.cfg.mouse_capture,
+            Row::Vision => {
+                // Normalized first: the setting is also hand-edited in TOML, and
+                // a value like "On" or "true" must still land somewhere in the
+                // cycle rather than falling through to a fixed branch.
+                let cur = self.cfg.vision.trim().to_ascii_lowercase();
+                let cur = match cur.as_str() {
+                    "on" | "true" | "yes" | "always" => "on",
+                    "off" | "false" | "no" | "never" => "off",
+                    _ => "auto",
+                };
+                self.cfg.vision = match (cur, forward) {
+                    ("auto", true) => "on",
+                    ("on", true) => "off",
+                    ("auto", false) => "off",
+                    ("on", false) => "auto",
+                    // "off" in both directions; the normalization above admits
+                    // no fourth value, but the match still has to be total.
+                    (_, true) => "auto",
+                    (_, false) => "on",
+                }
+                .into();
+            }
             Row::Sandbox => self.cfg.sandbox = !self.cfg.sandbox,
             Row::Sessions => self.cfg.sessions = !self.cfg.sessions,
             Row::Memory => self.cfg.memory = !self.cfg.memory,
@@ -325,6 +351,7 @@ impl Settings {
             Row::Motion => on(self.cfg.motion),
             Row::Reveal => on(self.cfg.reveal),
             Row::Mouse => on(self.cfg.mouse_capture),
+            Row::Vision => self.cfg.vision.to_lowercase(),
             Row::Sandbox => on(self.cfg.sandbox),
             Row::Sessions => on(self.cfg.sessions),
             Row::Memory => on(self.cfg.memory),
@@ -539,6 +566,32 @@ fn prev_tier(a: AutoTier) -> AutoTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The setting exists so a router alias can be told what its name cannot
+    /// say, so it has to be reachable from the settings page and cycle cleanly
+    /// in both directions -- including from a value typed by hand into the TOML.
+    #[test]
+    fn vision_row_cycles_through_all_three_states() {
+        let mut cfg = Config::default();
+        cfg.vision = "auto".into();
+        let mut s = Settings::new(&cfg);
+        s.sel = Row::ALL.iter().position(|r| *r == Row::Vision).expect("row exists");
+
+        s.change(true);
+        assert_eq!(s.cfg.vision, "on");
+        s.change(true);
+        assert_eq!(s.cfg.vision, "off");
+        s.change(true);
+        assert_eq!(s.cfg.vision, "auto", "forward wraps");
+
+        s.change(false);
+        assert_eq!(s.cfg.vision, "off", "and it goes backwards too");
+
+        // A hand-edited value still lands in the cycle instead of sticking.
+        s.cfg.vision = "TRUE".into();
+        s.change(true);
+        assert_eq!(s.cfg.vision, "off", "\"TRUE\" is normalized to on, then advances");
+    }
 
     fn settings() -> Settings {
         Settings::new(&Config::default())

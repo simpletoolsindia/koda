@@ -1318,6 +1318,7 @@ impl App {
             || cfg.searx_url != self.cfg.searx_url
             || cfg.web_fetch != self.cfg.web_fetch
             || cfg.ocr != self.cfg.ocr
+            || cfg.vision != self.cfg.vision
             || cfg.reasoning_effort != self.cfg.reasoning_effort
             || cfg.system_prompt != self.cfg.system_prompt
         {
