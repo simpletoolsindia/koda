@@ -106,7 +106,7 @@ impl Row {
             Row::Theme => "colour palette",
             Row::Motion => "spinners, gauges, and text reveal",
             Row::Reveal => "stream replies in progressively (needs animation)",
-            Row::Mouse => "on: wheel scrolls · off: drag selects and copies",
+            Row::Mouse => "on: wheel scrolls and drag selects · off: terminal does both",
             Row::Vision => "auto (guess from name) · on · off — set on behind a router",
             Row::Sandbox => "confine file tools to the workspace",
             Row::Sessions => "record conversations to .koda/sessions",

@@ -128,7 +128,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/tools", "list available tools"),
     ("/think", "show or hide model reasoning"),
     ("/motion", "turn animation on or off"),
-    ("/mouse", "toggle mouse capture (off = select & copy text)"),
+    ("/mouse", "toggle mouse capture (on = wheel scrolls + drag selects)"),
     ("/reveal", "toggle progressive text reveal"),
     ("/copy", "copy last reply to the clipboard"),
     ("/cwd", "show the workspace root"),
@@ -260,9 +260,14 @@ pub struct App {
     sync_output: bool,
     /// Whether the mouse is currently captured (wheel scroll vs native select).
     mouse_capture: bool,
-    /// Set once we have told the user how to select text, so a second
-    /// swallowed drag does not repeat the advice.
-    select_hinted: bool,
+    /// Where the transcript text is drawn, so a mouse position can be turned
+    /// back into a line and column. Filled in by `draw` each frame.
+    text_area: Rect,
+    /// An in-progress or finished drag selection, in absolute transcript
+    /// coordinates: ((anchor_line, anchor_col), (cursor_line, cursor_col)).
+    /// Absolute rather than screen-relative so scrolling mid-drag does not
+    /// smear the selection across whatever happens to be under the pointer.
+    selection: Option<((usize, usize), (usize, usize))>,
     /// Last size we drew at, to drop the duplicate resize events emulators send.
     last_size: (u16, u16),
     /// Set after a destructive key so a second press confirms.
@@ -389,6 +394,73 @@ impl App {
             "pasted image ({kb} KB) — it attaches when you send"
         ));
         true
+    }
+
+    /// Turn a mouse position into an absolute transcript coordinate.
+    ///
+    /// Returns None outside the transcript body, so a drag over the input line
+    /// or the status bar does not start a selection in the text above it.
+    fn point_at(&self, col: u16, row: u16) -> Option<(usize, usize)> {
+        let a = self.text_area;
+        if a.width == 0 || a.height == 0 {
+            return None;
+        }
+        if row < a.y || row >= a.y.saturating_add(a.height) || col < a.x {
+            return None;
+        }
+        let line = self.scroll + (row - a.y) as usize;
+        // Past the right edge counts as end-of-line rather than nothing, so
+        // dragging off the side selects to the end the way it does everywhere.
+        let col = (col - a.x) as usize;
+        Some((line, col.min(a.width as usize)))
+    }
+
+    /// The selection ordered start-before-end, whichever way it was dragged.
+    fn selection_range(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (a, b) = self.selection?;
+        if a == b {
+            return None; // a click, not a drag
+        }
+        Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// The selected text, taken from the same lines the renderer drew.
+    fn selected_text(&self) -> String {
+        let Some(range) = self.selection_range() else {
+            return String::new();
+        };
+        let (sl, el) = (range.0 .0, range.1 .0);
+        let lines = self.transcript.window(sl, el - sl + 1);
+        let mut out = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let chars: Vec<char> = text.chars().collect();
+            if let Some((from, to)) = line_span(sl + i, range, chars.len()) {
+                out.extend(&chars[from..to]);
+            }
+            if i + 1 < lines.len() {
+                out.push('\n');
+            }
+        }
+        // Trailing spaces come from the padded render, not from the text.
+        out.lines()
+            .map(|l| l.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Finish a drag: copy what was selected and say so.
+    fn finish_selection(&mut self) {
+        let text = self.selected_text();
+        self.selection = None;
+        if text.trim().is_empty() {
+            return;
+        }
+        let n = text.chars().count();
+        match copy_to_clipboard(&text) {
+            Ok(()) => self.note(format!("copied {n} characters")),
+            Err(e) => self.note(format!("copy failed: {e}")),
+        }
     }
 
     fn note(&mut self, msg: impl Into<String>) {
@@ -1931,12 +2003,13 @@ impl App {
                 let on = !self.mouse_capture;
                 self.set_mouse_capture(on);
                 if on {
+                    self.note("mouse capture on — the wheel scrolls, drag selects and copies");
+                } else {
                     self.note(format!(
-                        "mouse capture on — the wheel scrolls; {} to select text",
+                        "mouse capture off — the terminal handles selection; \
+                         pgup/pgdn scrolls ({} no longer needed)",
                         select_override()
                     ));
-                } else {
-                    self.note("mouse capture off — drag to select and copy; pgup/pgdn scrolls");
                 }
                 // Unlike the other toggles this one is a persisted preference:
                 // someone who wants to select text wants it in every session,
@@ -2187,6 +2260,59 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     osc52(text)
 }
 
+/// The half-open character range of line `abs` that a selection covers, or None
+/// when the line is outside it.
+///
+/// Shared by the renderer and the extractor: if they disagreed by one character
+/// the user would copy something other than what they saw highlighted.
+fn line_span(
+    abs: usize,
+    ((sl, sc), (el, ec)): ((usize, usize), (usize, usize)),
+    len: usize,
+) -> Option<(usize, usize)> {
+    if abs < sl || abs > el {
+        return None;
+    }
+    let (from, to) = match (abs == sl, abs == el) {
+        (true, true) => (sc.min(len), ec.min(len)),
+        (true, false) => (sc.min(len), len),
+        (false, true) => (0, ec.min(len)),
+        (false, false) => (0, len),
+    };
+    (from < to).then_some((from, to))
+}
+
+/// Paint the selected range over the already-rendered window.
+///
+/// The lines are restyled rather than re-rendered: they are what the transcript
+/// actually drew, so a selection can never disagree with what is on screen.
+fn highlight_selection(
+    lines: &mut [Line<'static>],
+    scroll: usize,
+    range: ((usize, usize), (usize, usize)),
+    theme: &Theme,
+) {
+    for (i, line) in lines.iter_mut().enumerate() {
+        let abs = scroll + i;
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let chars: Vec<char> = text.chars().collect();
+        let Some((from, to)) = line_span(abs, range, chars.len()) else {
+            continue;
+        };
+        // Rebuilt as three spans so the highlight lands on exactly the selected
+        // characters; the original styling of the rest is not preserved, which
+        // is the trade for keeping this a plain slice of the rendered text.
+        let head: String = chars[..from].iter().collect();
+        let mid: String = chars[from..to].iter().collect();
+        let tail: String = chars[to..].iter().collect();
+        *line = Line::from(vec![
+            Span::styled(head, theme.body()),
+            Span::styled(mid, theme.body().add_modifier(Modifier::REVERSED)),
+            Span::styled(tail, theme.body()),
+        ]);
+    }
+}
+
 /// A paste that is really a file path.
 ///
 /// Several terminals answer an image paste by writing the image to a temp file
@@ -2434,16 +2560,18 @@ fn draw(f: &mut Frame, app: &mut App) {
         height: body.height,
     };
     app.body_h = text_area.height as usize;
+    app.text_area = text_area;
     let max_scroll = total.saturating_sub(app.body_h);
     if app.follow {
         app.scroll = max_scroll;
     } else {
         app.scroll = app.scroll.min(max_scroll);
     }
-    f.render_widget(
-        Paragraph::new(app.transcript.window(app.scroll, app.body_h)),
-        text_area,
-    );
+    let mut window = app.transcript.window(app.scroll, app.body_h);
+    if let Some(range) = app.selection_range() {
+        highlight_selection(&mut window, app.scroll, range, &app.theme);
+    }
+    f.render_widget(Paragraph::new(window), text_area);
     // Brief entrance shimmer over the banner: while the welcome animation window
     // is open and we are scrolled to the top, sweep a bright band across the six
     // art rows. It repaints only those rows (over identical content), so when it
@@ -3740,7 +3868,8 @@ pub async fn run(
         // the frame budget derive from this one capability-aware flag.
         sync_output: cfg.sync_output && anim::sync_trustworthy(),
         mouse_capture: cfg.mouse_capture,
-        select_hinted: false,
+        text_area: Rect::new(0, 0, 0, 0),
+        selection: None,
         last_size: (0, 0),
         confirm: None,
         files: FileIndex::new(),
@@ -4019,22 +4148,28 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
                 app.scroll_by(3);
                 true
             }
-            // A left-drag only reaches us because capture took it from the
-            // terminal — which is to say, because a selection just failed. That
-            // is the moment the user decides copying is broken, so it is the
-            // moment to say how to get it back. Once per session: the second
-            // failed drag does not need telling twice.
+            // Capture takes click-drag away from the terminal, so koda has to do
+            // the selecting itself or nobody does. It has the drag events
+            // already; this turns them into the selection the user expected.
+            MouseEventKind::Down(MouseButton::Left) => {
+                app.selection = app.point_at(m.column, m.row).map(|p| (p, p));
+                true
+            }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if app.select_hinted {
-                    false
-                } else {
-                    app.select_hinted = true;
-                    app.note(format!(
-                        "to select text: {} while dragging, or /mouse to hand the mouse back for good",
-                        select_override()
-                    ));
-                    true
+                if let (Some((anchor, _)), Some(p)) =
+                    (app.selection, app.point_at(m.column, m.row))
+                {
+                    app.selection = Some((anchor, p));
+                    return true;
                 }
+                false
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if app.selection.is_some() {
+                    app.finish_selection();
+                    return true;
+                }
+                false
             }
             _ => false,
         },
@@ -4139,6 +4274,80 @@ mod tests {
         assert_eq!(percent_decode("%E2%9C%93"), "\u{2713}");
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    /// The renderer and the extractor both ask this what is selected on a line.
+    /// If they could disagree, the user would copy something other than what
+    /// they saw highlighted -- so there is one answer, and this is it.
+    #[test]
+    fn line_span_bounds_each_line_of_a_selection() {
+        let sel = ((2, 3), (4, 5));
+        assert_eq!(line_span(1, sel, 10), None, "before the selection");
+        assert_eq!(line_span(5, sel, 10), None, "after it");
+        assert_eq!(line_span(2, sel, 10), Some((3, 10)), "first line runs to its end");
+        assert_eq!(line_span(3, sel, 10), Some((0, 10)), "middle lines are whole");
+        assert_eq!(line_span(4, sel, 10), Some((0, 5)), "last line stops at the cursor");
+
+        // One line, bounded at both ends.
+        assert_eq!(line_span(2, ((2, 1), (2, 4)), 10), Some((1, 4)));
+        // Dragging past the right edge clamps to the text rather than panicking.
+        assert_eq!(line_span(2, ((2, 1), (2, 99)), 10), Some((1, 10)));
+        // An empty range selects nothing.
+        assert_eq!(line_span(2, ((2, 4), (2, 4)), 10), None);
+        // A short line inside a multi-line selection.
+        assert_eq!(line_span(3, sel, 0), None, "nothing to take from a blank line");
+    }
+
+    /// Dragging up the screen has to select the same text as dragging down it.
+    #[test]
+    fn a_backwards_drag_selects_the_same_range() {
+        let order = |a: (usize, usize), b: (usize, usize)| {
+            if a == b {
+                None
+            } else if a <= b {
+                Some((a, b))
+            } else {
+                Some((b, a))
+            }
+        };
+        assert_eq!(order((2, 3), (4, 5)), Some(((2, 3), (4, 5))));
+        assert_eq!(order((4, 5), (2, 3)), Some(((2, 3), (4, 5))), "same range, dragged up");
+        assert_eq!(order((2, 3), (2, 3)), None, "a click is not a selection");
+    }
+
+    /// The highlight must land on exactly the selected characters -- the point
+    /// of restyling the rendered line rather than re-rendering it.
+    #[test]
+    fn highlight_marks_only_the_selected_characters() {
+        let theme = crate::theme::resolve("auto");
+        let mut lines = vec![
+            Line::from("hello world".to_string()),
+            Line::from("second line".to_string()),
+        ];
+        highlight_selection(&mut lines, 0, ((0, 6), (1, 6)), &theme);
+
+        // Line 0: "hello " plain, "world" reversed, nothing after.
+        let rev: String = lines[0]
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(rev, "world");
+
+        // Line 1 is the last: selected up to column 6.
+        let rev1: String = lines[1]
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(rev1, "second");
+
+        // A line outside the range is untouched.
+        let mut other = vec![Line::from("untouched".to_string())];
+        highlight_selection(&mut other, 9, ((0, 0), (1, 1)), &theme);
+        assert_eq!(other[0].spans.len(), 1, "left exactly as it was drawn");
     }
 
     #[test]

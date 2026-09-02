@@ -184,11 +184,20 @@ impl Setup {
     }
 
     /// Apply to a config and persist. Returns the file written.
-    pub fn save(&self, cfg: &mut Config) -> anyhow::Result<std::path::PathBuf> {
+    /// Copy the page's fields into a config, without touching the disk.
+    ///
+    /// Split out from `save` so it can be tested: `save` writes to the real
+    /// user config, and a test that called it clobbered the developer's own
+    /// endpoint, key and model with defaults.
+    pub fn apply(&self, cfg: &mut Config) {
         cfg.base_url = self.url.buf.trim().to_string();
         cfg.model = self.model.buf.trim().to_string();
         cfg.api_key = self.key.buf.trim().to_string();
         cfg.vision = normalize_vision(&self.vision.buf).to_string();
+    }
+
+    pub fn save(&self, cfg: &mut Config) -> anyhow::Result<std::path::PathBuf> {
+        self.apply(cfg);
         crate::config::save(cfg)
     }
 }
@@ -417,10 +426,11 @@ mod tests {
         // Saving puts it where the agent reads it.
         s.cycle_vision(false);
         assert_eq!(s.value(Field::Vision), "on");
+        // apply, not save: save writes the real user config, and a test that
+        // reaches the developer's own machine is a bug in the test.
         let mut out = Config::default();
-        out.base_url = "x".into();
-        let _ = s.save(&mut out);
-        assert_eq!(out.vision, "on", "save carries the choice into the config");
+        s.apply(&mut out);
+        assert_eq!(out.vision, "on", "the choice reaches the config");
     }
 
     /// Tab order has to include the new field, in both directions.

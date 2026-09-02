@@ -258,7 +258,7 @@ These are the exact command names koda recognizes. Type `/` to see them all;
 | `/tools` | List available tools. |
 | `/think` | Show or hide model reasoning. |
 | `/motion` | Turn animation on or off. |
-| `/mouse` (`/select`) | Toggle mouse capture. Off = select & copy text with the mouse. Saved to config. |
+| `/mouse` (`/select`) | Toggle mouse capture. On, the wheel scrolls and dragging selects. Saved to config. |
 | `/reveal` | Toggle progressive text reveal. |
 | `/copy` | Copy the last reply to the clipboard. |
 | `/cwd` (`/pwd`) | Show the workspace root. |
@@ -675,13 +675,13 @@ Other appearance controls:
   toggle is saved to the config, and the same switch sits on the `/settings`
   page as **mouse capture**.
 - **Selecting text while capture is on.** An application reading the mouse takes
-  click-drag away from the terminal, so a plain drag selects nothing. Hold the
-  emulator's override modifier and the drag goes back to the terminal: `shift`
-  in most (WezTerm, kitty, Alacritty, GNOME Terminal, Konsole, xterm, Windows
-  Terminal), `⌥ option` in Apple Terminal and iTerm2. koda only asks for the
-  tracking modes it actually reads — button, drag, and SGR coordinates — and
-  deliberately not any-event tracking (`?1003`), which is what stops many
-  terminals honouring that override. The first drag koda swallows prints a
-  one-time note naming the right modifier for your terminal.
+  click-drag away from the terminal, so koda does the selecting itself: drag
+  across the transcript to highlight, release to copy. The wheel keeps
+  scrolling, so you no longer have to choose between the two. koda asks only for
+  the tracking modes it actually reads — button, drag, and SGR coordinates — and
+  deliberately not any-event tracking (`?1003`), which floods the event loop and
+  stops many terminals honouring their own selection override.
+- Prefer your terminal's native selection? `/mouse` turns capture off and hands
+  the mouse back; scrolling is then `pgup`/`pgdn`.
 - `sync_output` (DEC 2026 synchronized updates) presents each frame atomically
   to stop tearing.

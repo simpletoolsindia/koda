@@ -169,7 +169,7 @@ contents.
 | `/settings` | interactive settings page for everything below |
 | `/think` | show or hide model reasoning |
 | `/motion` `/reveal` | animation on/off · progressive text reveal on/off |
-| `/mouse` | toggle mouse capture — off lets you select & copy text with the mouse (remembered) |
+| `/mouse` | toggle mouse capture — on, the wheel scrolls and dragging selects & copies (remembered) |
 | `/undo` | put back the files the agent changed in the last turn |
 | `/keys` `/tools` `/copy` `/clear` `/cwd` `/help` `/quit` | |
 
@@ -602,7 +602,7 @@ theme = "auto"             # auto resolves to the neon palette
 icons = "auto"
 motion = true              # animation; toggle with /motion
 reveal = true              # progressive text reveal; toggle with /reveal
-mouse_capture = true       # off (/mouse) = drag to select & copy; on = shift/⌥-drag
+mouse_capture = true       # on: wheel scrolls, drag selects; off: the terminal does both
 sync_output = true         # atomic frames (DEC 2026)
 shell = "/bin/sh"
 command_timeout_ms = 120000
