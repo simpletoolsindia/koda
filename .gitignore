@@ -11,6 +11,9 @@ tests/visual/playwright-report/
 
 # Local session data (per-project, not source)
 .koda/sessions/
+# Learned-rule candidates are mined from however this checkout is used; they are
+# local state, not part of the project.
+.koda/learning/
 
 # Built docs-site output
 docs-site/dist/

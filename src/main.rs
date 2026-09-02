@@ -21,6 +21,7 @@ mod settings;
 mod setup;
 mod skills;
 mod tools;
+mod trace;
 mod tui;
 mod watch;
 mod web;
@@ -217,6 +218,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     debug::set_enabled(cfg.debug);
     // Optional local web UI for live logs and debugging (127.0.0.1 only).
     if cfg.web_ui && !cli.print {
+        // The trace ring only pays for itself when something can display it.
+        trace::set_enabled(true);
         if let Some(addr) =
             webui::start(root.clone(), cfg.web_ui_port, cfg.ui_detail.clone()).await
         {

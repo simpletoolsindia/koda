@@ -12,6 +12,9 @@ ROWS, COLS = 40, 100
 BIN = os.environ.get("BIN", "./target/release/koda")
 PORT = os.environ.get("PORT", "8123")
 URL = f"http://127.0.0.1:{PORT}/v1"
+# Overridable so a probe can drive a real backend (e.g. OmniRoute) instead of
+# the mock server.
+MODEL = os.environ.get("MODEL", "mock-coder")
 
 passed = failed = 0
 def check(name, cond, extra=""):
@@ -34,6 +37,16 @@ class Screen:
                 m=self.CSI.match(data,i)
                 if m: self.csi(m.group(1),m.group(2)); i=m.end(); continue
                 if i+1>=len(data): self.pending=data[i:]; return
+                # OSC (koda posts OSC 9 notifications, OSC 52 clipboard): skip to
+                # BEL/ST rather than painting the payload into the grid.
+                if data[i+1]=="]":
+                    end=data.find("\x07",i); st=data.find("\x1b\\",i)
+                    if end==-1 and st==-1: self.pending=data[i:]; return
+                    i=(st+2) if (end==-1 or (st!=-1 and st<end)) else (end+1)
+                    continue
+                # A CSI split across two reads must be held, not skipped.
+                if data[i+1]=="[" and self.CSI.match(data,i) is None:
+                    self.pending=data[i:]; return
                 i+=2; continue
             if ch=="\r": self.c=0
             elif ch=="\n": self.nl()
@@ -75,7 +88,7 @@ class Tui:
         self.master, slave = pty.openpty()
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         env = dict(os.environ, TERM="xterm-256color", COLUMNS=str(COLS), LINES=str(ROWS))
-        self.proc = subprocess.Popen([BIN,"-C",ws,"-u",URL,"-m","mock-coder","-y"],
+        self.proc = subprocess.Popen([BIN,"-C",ws,"-u",URL,"-m",MODEL,"-y"],
             stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)
         os.close(slave); self.vt=Screen(ROWS,COLS); self.history=[]
     def read(self, sec, until=None):

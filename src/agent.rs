@@ -120,6 +120,11 @@ pub enum Command {
     UpdateConfig(Box<crate::config::Config>),
     /// Self-improvement: review/accept/reject learned rule candidates (`/learn`).
     Learn(LearnAction),
+    /// Add a durable project note (the web control rail's memory editor). Goes
+    /// through the agent so the live system prompt picks it up immediately.
+    RememberNote(String),
+    /// Drop notes matching a substring.
+    ForgetNote(String),
     Quit,
 }
 
@@ -216,6 +221,11 @@ struct StepAcc {
     scan: TextScan,
     text: String,
     reasoning_len: usize,
+    /// The reasoning text itself, for the trace. Bounded by the trace's own cap
+    /// when the step closes.
+    reasoning: String,
+    /// Why the model stopped, when the server says.
+    finish_reason: Option<String>,
     /// index -> (id, name, partial arguments JSON)
     partials: BTreeMap<usize, (Option<String>, String, String)>,
     /// Completed `<tool_call>` payloads from the text protocol.
@@ -287,6 +297,12 @@ pub struct Agent {
     /// step, keyed by call id, so `execute` can reuse them instead of re-running
     /// the work serially. Drained as the step's calls are processed.
     prefetched: std::collections::HashMap<String, tools::Outcome>,
+    /// The trace turn currently open (top-level agent only). `None` when
+    /// tracing is off, which makes every trace call a no-op.
+    trace_turn: Option<u64>,
+    /// How the last tool call was approved, so the trace can show whether the
+    /// user was asked. Set by `approve`, consumed by `execute`.
+    last_approval: Option<crate::trace::Approval>,
 }
 
 /// One reversible file change. `before: None` means the file did not exist, so
@@ -376,9 +392,10 @@ impl Agent {
             used_codegraph_this_turn: false,
             codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
+            trace_turn: None,
+            last_approval: None,
         })
     }
-
     /// Adopt a saved conversation. The transcript the user sees is rebuilt
     /// separately by the UI from the same messages.
     pub fn resume(&mut self, path: std::path::PathBuf, messages: Vec<Message>) {
@@ -456,6 +473,10 @@ impl Agent {
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
             mode: self.mode,
+            // A subagent's work is attributed to the parent turn's tool step;
+            // it never opens a turn of its own.
+            trace_turn: None,
+            last_approval: None,
         }
     }
 
@@ -697,6 +718,30 @@ impl Agent {
                 let _ = self.learning.save();
                 let _ = tx.send(Event::Notice(msg));
             }
+            Command::RememberNote(note) => {
+                if !self.cfg.memory {
+                    let _ = tx.send(Event::Notice(
+                        "memory is off — set `memory = true` in config or /settings".into(),
+                    ));
+                    return;
+                }
+                let added = self.memory.remember(note.trim());
+                let _ = self.memory.save(&self.ctx.root);
+                // The prompt carries memory, so it has to be rebuilt for the
+                // note to affect this turn rather than the next session.
+                self.rebuild_system();
+                let _ = tx.send(Event::Notice(if added {
+                    format!("remembered: {}", note.trim())
+                } else {
+                    "already remembered".to_string()
+                }));
+            }
+            Command::ForgetNote(needle) => {
+                let n = self.memory.forget(needle.trim());
+                let _ = self.memory.save(&self.ctx.root);
+                self.rebuild_system();
+                let _ = tx.send(Event::Notice(format!("forgot {n} note(s)")));
+            }
             Command::Quit => {}
         }
     }
@@ -709,16 +754,27 @@ impl Agent {
             self.empty_replies = 0;
             self.used_codegraph_this_turn = false;
             self.codegraph_hint_sent = false;
+            self.trace_turn = crate::trace::begin_turn(
+                &self.mode.to_string(),
+                &self.model,
+                &self.endpoint,
+                &input,
+            );
             let _ = tx.send(Event::TurnStart);
         }
         self.history.push(self.user_message(&input, tx));
 
         self.auto_compact(tx).await;
 
+        // What the trace will record for this turn. Set at each exit so a
+        // cancelled or failed turn is not reported as a clean one.
+        let mut status = crate::trace::Status::Ok;
+        let mut reply = String::new();
         let mut steps = 0usize;
         loop {
             if self.cancelled() {
                 let _ = tx.send(Event::Notice("cancelled".into()));
+                status = crate::trace::Status::Cancelled;
                 break;
             }
             if steps >= self.cfg.max_steps {
@@ -748,15 +804,18 @@ impl Agent {
                         continue;
                     }
                     let _ = tx.send(Event::Error(msg));
+                    status = crate::trace::Status::Error;
                     break;
                 }
             };
 
             if result.cancelled {
                 if !result.text.trim().is_empty() {
+                    reply = result.text.clone();
                     self.history.push(Message::assistant(result.text));
                 }
                 let _ = tx.send(Event::Notice("cancelled".into()));
+                status = crate::trace::Status::Cancelled;
                 break;
             }
 
@@ -782,9 +841,11 @@ impl Agent {
                     }
                     // Second empty reply in a row: stop the loop deterministically.
                     let _ = tx.send(Event::Error(self.empty_reply_hint(result.reasoning_len)));
+                    status = crate::trace::Status::Error;
                     break;
                 }
                 self.empty_replies = 0;
+                reply = result.text.clone();
                 self.history.push(Message::assistant(result.text));
                 break;
             }
@@ -953,6 +1014,8 @@ impl Agent {
             let _ = tx.send(Event::TurnEnd {
                 history_tokens: self.history_tokens(),
             });
+            crate::trace::end_turn(self.trace_turn, status, &reply, self.history_tokens());
+            self.trace_turn = None;
         }
     }
 
@@ -1088,15 +1151,26 @@ impl Agent {
             let _ = tx.send(Event::Tokens(self.history_tokens()));
         }
 
+        // Trace this call: the request goes in now (so a stalled call is
+        // visible), the raw SSE streams in from the HTTP layer, and the parsed
+        // result is attached when the step closes.
+        let step = crate::trace::open_step(self.trace_turn, crate::trace::StepKind::Model, &self.model);
+        let request_json = step
+            .is_some()
+            .then(|| serde_json::to_string_pretty(&req.to_json()).unwrap_or_default())
+            .unwrap_or_default();
+        let prompt_tokens = self.history_tokens();
+
         let (stx, mut srx) = mpsc::unbounded_channel::<StreamEvent>();
         // Clone so the in-flight future doesn't hold a borrow on `self`.
         let client = self.client.clone();
-        let stream = client.stream_with_retry(&req, &stx, self.cfg.max_retries);
+        let stream = client.stream_traced(&req, &stx, self.cfg.max_retries, step);
         tokio::pin!(stream);
 
         let mut acc = StepAcc::default();
         let mut cancelled = false;
         let mut stream_err = None;
+        let mut stream_error: Option<String> = None;
 
         loop {
             tokio::select! {
@@ -1131,16 +1205,30 @@ impl Agent {
             mut scan,
             mut text,
             reasoning_len,
+            reasoning,
+            finish_reason,
             partials,
             text_calls,
         } = acc;
 
         if let Some(e) = stream_err {
             if text.trim().is_empty() {
+                crate::trace::finish_model(
+                    step,
+                    crate::trace::ModelCall {
+                        request: request_json,
+                        reasoning,
+                        finish_reason,
+                        prompt_tokens,
+                        error: Some(format!("{e:#}")),
+                        ..Default::default()
+                    },
+                );
                 return Err(e);
             }
             // Partial output is still useful; report the error as a notice.
             let _ = tx.send(Event::Error(format!("{e:#}")));
+            stream_error = Some(format!("{e:#}"));
         }
 
         let leftover = scan.finish();
@@ -1171,6 +1259,21 @@ impl Agent {
                 calls.push(c);
             }
         }
+
+        crate::trace::finish_model(
+            step,
+            crate::trace::ModelCall {
+                request: request_json,
+                reasoning,
+                text: text.clone(),
+                finish_reason,
+                prompt_tokens,
+                completion_tokens: (text.len() + reasoning_len) / 4,
+                tool_calls: calls.iter().map(|c| c.function.name.clone()).collect(),
+                error: stream_error,
+                ..Default::default()
+            },
+        );
 
         Ok(StreamResult {
             text,
@@ -1272,7 +1375,43 @@ impl Agent {
         crate::tel_debug!("agent", "parallel prefetch", "count" => self.prefetched.len());
     }
 
+    /// Run one tool call, recording it as a step in the turn's trace: the
+    /// arguments, the outcome, whether the user was asked, and — for a write —
+    /// the diff that was applied.
     async fn execute(&mut self, call: &ToolCall, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
+        let step = crate::trace::open_step(
+            self.trace_turn,
+            crate::trace::StepKind::Tool,
+            &call.function.name,
+        );
+        self.last_approval = None;
+        // The preview is the same diff the approval prompt shows. Only computed
+        // when tracing, and only for writes, so it costs nothing otherwise.
+        let diff = if step.is_some()
+            && matches!(call.function.name.as_str(), "write_file" | "edit_file")
+        {
+            tools::preview(&call.function.name, &call.args(), &self.ctx)
+        } else {
+            None
+        };
+        let outcome = self.execute_inner(call, tx).await;
+        crate::trace::finish_tool(
+            step,
+            crate::trace::ToolStep {
+                name: call.function.name.clone(),
+                args: serde_json::to_string_pretty(&call.args())
+                    .unwrap_or_else(|_| call.function.arguments.clone()),
+                ok: outcome.ok,
+                summary: outcome.summary.clone(),
+                detail: outcome.content.clone(),
+                approval: self.last_approval.take(),
+                diff,
+            },
+        );
+        outcome
+    }
+
+    async fn execute_inner(&mut self, call: &ToolCall, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
         let name = call.function.name.clone();
         let args = call.args();
         if args.is_null() {
@@ -2516,6 +2655,8 @@ impl Agent {
             || self.auto_tier.auto_allows(name)
             || self.always.contains(name)
         {
+            // Not gated: nothing was asked of the user.
+            self.last_approval = Some(crate::trace::Approval::Auto);
             return true;
         }
         let (reply, rx) = oneshot::channel();
@@ -2526,12 +2667,19 @@ impl Agent {
             reply,
         });
         match rx.await {
-            Ok(Approval::Once) => true,
-            Ok(Approval::AlwaysThisTool) => {
-                self.always.insert(name.to_string());
+            Ok(Approval::Once) => {
+                self.last_approval = Some(crate::trace::Approval::Approved);
                 true
             }
-            _ => false,
+            Ok(Approval::AlwaysThisTool) => {
+                self.always.insert(name.to_string());
+                self.last_approval = Some(crate::trace::Approval::Approved);
+                true
+            }
+            _ => {
+                self.last_approval = Some(crate::trace::Approval::Denied);
+                false
+            }
         }
     }
 
@@ -2558,6 +2706,37 @@ impl Agent {
             return;
         }
         let before = self.history_tokens();
+        // Compaction is where context is lost, so it belongs in the trace. A
+        // manual /compact has no turn open, so it gets one of its own.
+        let own_turn = self.trace_turn.is_none();
+        if own_turn {
+            self.trace_turn = crate::trace::begin_turn(
+                &self.mode.to_string(),
+                &self.model,
+                &self.endpoint,
+                "/compact",
+            );
+        }
+        let trace_step = crate::trace::open_step(
+            self.trace_turn,
+            crate::trace::StepKind::Compaction,
+            "compaction",
+        );
+        // Whatever happens below, the step and (if we made one) the turn close.
+        macro_rules! close_trace {
+            ($after:expr) => {{
+                crate::trace::finish_compaction(trace_step, before, $after);
+                if own_turn {
+                    crate::trace::end_turn(
+                        self.trace_turn,
+                        crate::trace::Status::Ok,
+                        "",
+                        $after,
+                    );
+                    self.trace_turn = None;
+                }
+            }};
+        }
         // Tell the UI we've started so it can animate and hold input; the
         // matching Compacted event below is emitted on *every* exit path so the
         // prompt can never get stuck "compacting".
@@ -2610,6 +2789,7 @@ impl Agent {
             self.cancel.store(false, Ordering::Relaxed);
             let _ = tx.send(Event::Notice("compaction cancelled".into()));
             let _ = tx.send(Event::Compacted { before, after: before });
+            close_trace!(before);
             return;
         }
         match res {
@@ -2659,14 +2839,17 @@ impl Agent {
                 let after = self.history_tokens();
                 let _ = tx.send(Event::Notice(format!("compacted {before} → {after} tokens")));
                 let _ = tx.send(Event::Compacted { before, after });
+                close_trace!(after);
             }
             Ok(_) => {
                 let _ = tx.send(Event::Error("compaction produced no summary".into()));
                 let _ = tx.send(Event::Compacted { before, after: before });
+                close_trace!(before);
             }
             Err(e) => {
                 let _ = tx.send(Event::Error(format!("compaction failed: {e:#}")));
                 let _ = tx.send(Event::Compacted { before, after: before });
+                close_trace!(before);
             }
         }
     }
@@ -2870,6 +3053,11 @@ fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>,
         }
         StreamEvent::Reasoning(chunk) => {
             acc.reasoning_len += chunk.len();
+            // Kept for the trace. Bounded here as well as at the trace cap so a
+            // very long thinking stream can't balloon this accumulator.
+            if acc.reasoning.len() < 64 * 1024 {
+                acc.reasoning.push_str(&chunk);
+            }
             if !quiet {
                 let _ = tx.send(Event::Reasoning(chunk));
             } else {
@@ -2892,6 +3080,7 @@ fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>,
             slot.2.push_str(&args);
         }
         StreamEvent::Finish(reason) => {
+            acc.finish_reason = reason.clone();
             if reason.as_deref() == Some("length") && !quiet {
                 let _ = tx.send(Event::Notice(
                     "the model hit its output limit; raise max_tokens if replies look cut off"

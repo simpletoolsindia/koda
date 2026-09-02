@@ -1431,63 +1431,959 @@ function SystemPrompt({ data, loading, error, onRefresh, pushToast }) {
     </div>
   );
 }
-// App.jsx — workspace shell, data polling, toasts, and section routing
+// TraceRail.jsx — reverse-chronological turn list; the live turn pins to the top.
+
+// Status colour is semantic only: it never encodes anything you can't also read.
+const TURN_STATUS = {
+  running: { dot: 'bg-indigo-400', text: 'text-indigo-300', label: 'running' },
+  ok: { dot: 'bg-emerald-400', text: 'text-emerald-300', label: 'ok' },
+  error: { dot: 'bg-rose-400', text: 'text-rose-300', label: 'error' },
+  cancelled: { dot: 'bg-amber-400', text: 'text-amber-300', label: 'cancelled' },
+};
+
+function fmtMs(ms) {
+  if (ms == null) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+  const m = Math.floor(ms / 60000);
+  return `${m}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+
+function fmtClock(at) {
+  // `at` is seconds since koda started, which is what the log view shows too.
+  const total = Math.max(0, at || 0);
+  const m = Math.floor(total / 60);
+  const s = (total % 60).toFixed(1).padStart(4, '0');
+  return `${String(m).padStart(2, '0')}:${s}`;
+}
+
+function TraceRail({ turns, selectedId, onSelect, loading }) {
+  const [query, setQuery] = React.useState('');
+  const filtered = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return turns;
+    return turns.filter(t =>
+      (t.input || '').toLowerCase().includes(q) ||
+      (t.reply || '').toLowerCase().includes(q) ||
+      (t.model || '').toLowerCase().includes(q));
+  }, [turns, query]);
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="shrink-0 px-3 py-2.5 border-b border-line">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">Turns</span>
+          <span className="text-[10px] text-subtle tabular-nums">{turns.length}</span>
+        </div>
+        <input type="search" value={query} onChange={e => setQuery(e.target.value)}
+          placeholder="Filter turns…" aria-label="Filter turns"
+          className="form-input mt-2 !min-h-[30px] !py-1 text-[12px]" />
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto" role="listbox" aria-label="Agent turns">
+        {filtered.length === 0 && (
+          <div className="p-4">
+            <div className="empty-state px-4 py-6 text-center">
+              <div className="text-[13px] font-medium text-zinc-200">
+                {loading ? 'Loading trace…' : turns.length === 0 ? 'No turns yet' : 'No turns match'}
+              </div>
+              <p className="mt-1.5 text-[11.5px] leading-5 text-subtle">
+                {turns.length === 0
+                  ? 'Send a message in koda and the turn appears here as it runs.'
+                  : 'Clear the filter to see the full history.'}
+              </p>
+            </div>
+          </div>
+        )}
+        {filtered.map(t => {
+          const st = TURN_STATUS[t.status] || TURN_STATUS.ok;
+          const active = t.id === selectedId;
+          return (
+            <button key={t.id} type="button" role="option" aria-selected={active}
+              onClick={() => onSelect(t.id)}
+              className={`w-full text-left px-3 py-2.5 border-b border-white/[0.04] transition-colors ${
+                active ? 'bg-accent-soft' : 'hover:bg-white/[0.03]'
+              }`}>
+              <div className="flex items-center gap-2">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${st.dot} ${t.running ? 'animate-pulse' : ''}`} />
+                <span className="text-[10px] font-mono text-subtle tabular-nums">#{t.id}</span>
+                <span className={`text-[10px] font-medium ${st.text}`}>{st.label}</span>
+                <span className="ml-auto text-[10px] font-mono text-subtle tabular-nums">{fmtMs(t.ms)}</span>
+              </div>
+              <div className={`mt-1 text-[12.5px] leading-[17px] line-clamp-2 ${active ? 'text-zinc-100' : 'text-zinc-300'}`}>
+                {t.input || <span className="text-subtle italic">no input</span>}
+              </div>
+              <div className="mt-1 flex items-center gap-2 text-[10px] text-subtle font-mono">
+                <span className="uppercase">{t.mode}</span>
+                <span aria-hidden="true">·</span>
+                <span>{t.model_calls} model</span>
+                <span aria-hidden="true">·</span>
+                <span>{t.tool_calls} tools</span>
+                {t.tokens > 0 && <><span aria-hidden="true">·</span><span>{t.tokens} tok</span></>}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+// TraceWaterfall.jsx — the steps of one turn as a timeline with duration bars.
+
+const STEP_STYLE = {
+  model: { bar: 'bg-indigo-500/70', ring: 'border-indigo-500/40', chip: 'text-indigo-300 bg-indigo-500/10 border-indigo-500/25', kind: 'model' },
+  tool: { bar: 'bg-emerald-500/70', ring: 'border-emerald-500/40', chip: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/25', kind: 'tool' },
+  compaction: { bar: 'bg-amber-500/70', ring: 'border-amber-500/40', chip: 'text-amber-300 bg-amber-500/10 border-amber-500/25', kind: 'compaction' },
+};
+
+function stepFailed(step) {
+  if (step.kind === 'tool') return step.tool ? !step.tool.ok : false;
+  if (step.kind === 'model') return !!(step.model && step.model.error);
+  return false;
+}
+
+function stepSubtitle(step) {
+  if (step.kind === 'model' && step.model) {
+    const m = step.model;
+    const bits = [];
+    if (m.tool_calls && m.tool_calls.length) bits.push(`asked for ${m.tool_calls.join(', ')}`);
+    else if (m.text) bits.push(m.text.trim().split('\n')[0].slice(0, 120));
+    if (m.finish_reason) bits.push(`finish: ${m.finish_reason}`);
+    if (m.error) bits.push(m.error);
+    return bits.join(' · ');
+  }
+  if (step.kind === 'tool' && step.tool) return step.tool.summary || '';
+  if (step.kind === 'compaction') return step.note || 'compacting context';
+  return step.running ? 'in flight…' : '';
+}
+
+function TraceWaterfall({ turn, selectedSeq, onSelect }) {
+  const steps = (turn && turn.steps) || [];
+  // Bars are laid out against the turn's own span, so a row's offset and width
+  // mean the same thing in every turn.
+  const span = React.useMemo(() => {
+    if (steps.length === 0) return { t0: 0, total: 1 };
+    const t0 = turn.started != null ? turn.started : steps[0].started;
+    const ends = steps.map(s => s.started + (s.ms || 0) / 1000);
+    const t1 = Math.max(turn.ended != null ? turn.ended : 0, ...ends, t0 + 0.001);
+    return { t0, total: Math.max(t1 - t0, 0.001) };
+  }, [turn, steps]);
+
+  const bottomRef = React.useRef(null);
+  const follow = turn && turn.status === 'running';
+  React.useEffect(() => {
+    if (follow && bottomRef.current) bottomRef.current.scrollIntoView({ block: 'end', behavior: 'smooth' });
+  }, [steps.length, follow]);
+
+  // A running turn has no end yet, so its elapsed time comes from the furthest
+  // step end rather than a bogus subtraction against null.
+  const turnMs = React.useMemo(() => {
+    if (!turn) return 0;
+    if (turn.ms != null) return turn.ms;
+    if (turn.ended != null) return (turn.ended - turn.started) * 1000;
+    const last = steps.reduce((acc, s) => Math.max(acc, s.started + (s.ms || 0) / 1000), turn.started);
+    return (last - turn.started) * 1000;
+  }, [turn, steps]);
+
+  if (!turn) {
+    return (
+      <div className="h-full flex items-center justify-center p-8">
+        <div className="empty-state max-w-md w-full px-6 py-8 text-center">
+          <div className="mx-auto mb-3 w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-300 font-mono text-sm">⟶</div>
+          <div className="text-sm font-medium text-zinc-200">Pick a turn to trace it</div>
+          <p className="mt-1.5 text-[12px] leading-5 text-subtle">
+            Every model call, tool call, and compaction in that turn appears here in order, with timings.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="shrink-0 px-4 py-3 border-b border-line">
+        <div className="flex items-start gap-3">
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium text-zinc-100 break-words">
+              {turn.input || <span className="italic text-subtle">no input</span>}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10.5px] font-mono text-subtle">
+              <span>#{turn.id}</span>
+              <span className="uppercase">{turn.mode}</span>
+              <span>{turn.model}</span>
+              <span>{turn.status === 'running' ? `${fmtMs(turnMs)} so far` : fmtMs(turnMs)}</span>
+              {turn.tokens > 0 && <span>{turn.tokens} tok context</span>}
+              <span className="truncate max-w-[220px]">{turn.endpoint}</span>
+            </div>
+          </div>
+          <span className={`ml-auto shrink-0 inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+            turn.status === 'running' ? 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300' :
+            turn.status === 'error' ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' :
+            turn.status === 'cancelled' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' :
+            'border-emerald-500/25 bg-emerald-500/10 text-emerald-300'}`}>
+            {turn.status === 'running' && <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+            {turn.status}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto px-2 py-2" role="list" aria-label="Turn steps">
+        {steps.length === 0 && (
+          <div className="p-6 text-center text-[12px] text-subtle">
+            {turn.status === 'running' ? 'Waiting for the first model call…' : 'This turn ran no steps.'}
+          </div>
+        )}
+        {steps.map(step => {
+          const style = STEP_STYLE[step.kind] || STEP_STYLE.model;
+          const failed = stepFailed(step);
+          const active = step.seq === selectedSeq;
+          const offset = Math.max(0, Math.min(100, ((step.started - span.t0) / span.total) * 100));
+          const width = Math.max(1.2, Math.min(100 - offset, ((step.ms || 0) / 1000 / span.total) * 100));
+          const approval = step.tool && step.tool.approval;
+          return (
+            <button key={step.seq} type="button" role="listitem"
+              aria-current={active} onClick={() => onSelect(step.seq)}
+              aria-label={`step ${step.seq}: ${step.kind} ${step.label}`}
+              className={`w-full text-left mb-1 px-2.5 py-2 rounded-lg border transition-colors ${
+                active ? 'bg-accent-soft border-line-strong' : 'border-transparent hover:bg-white/[0.03]'
+              }`}>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono text-subtle tabular-nums w-5 shrink-0">{step.seq}</span>
+                <span className={`shrink-0 inline-flex items-center rounded border px-1.5 py-[1px] text-[9.5px] font-semibold uppercase tracking-wide ${style.chip}`}>
+                  {style.kind}
+                </span>
+                <span className={`text-[12.5px] font-medium truncate ${failed ? 'text-rose-300' : 'text-zinc-200'}`}>
+                  {step.label}
+                </span>
+                {step.running && (
+                  <span className="shrink-0 inline-flex items-center gap-1 text-[10px] text-indigo-300">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />live
+                  </span>
+                )}
+                {failed && <span className="shrink-0 text-[10px] font-medium text-rose-300">failed</span>}
+                {approval === 'denied' && <span className="shrink-0 text-[10px] font-medium text-amber-300">denied</span>}
+                {approval === 'approved' && <span className="shrink-0 text-[10px] text-emerald-300">approved</span>}
+                {step.model && step.model.retries > 0 && (
+                  <span className="shrink-0 text-[10px] text-amber-300">{step.model.retries} retr{step.model.retries === 1 ? 'y' : 'ies'}</span>
+                )}
+                <span className="ml-auto shrink-0 text-[10px] font-mono text-subtle tabular-nums">
+                  {step.running ? '…' : fmtMs(step.ms)}
+                </span>
+              </div>
+
+              {/* Duration bar: offset = when it started, width = how long it took. */}
+              <div className="mt-1.5 h-1.5 rounded-full bg-white/[0.04] overflow-hidden" aria-hidden="true">
+                <div className={`h-full rounded-full ${failed ? 'bg-rose-500/70' : style.bar} ${step.running ? 'animate-pulse' : ''}`}
+                  style={{ marginLeft: `${offset}%`, width: `${width}%` }} />
+              </div>
+
+              {stepSubtitle(step) && (
+                <div className="mt-1 text-[11px] leading-4 text-subtle line-clamp-2 font-mono">{stepSubtitle(step)}</div>
+              )}
+            </button>
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+// TraceInspector.jsx — the payloads behind one step, plus what changed in the
+// prompt since the previous model call (which is how compaction and newly
+// learned rules become visible instead of silent).
+
+// A minimal LCS diff over arrays of strings. The inputs here are message lists
+// and prompt lines — small enough that clarity beats cleverness.
+function lineDiff(a, b) {
+  const n = a.length, m = b.length;
+  if (n * m > 400000) {
+    // Pathological input: fall back to a coarse report rather than hanging.
+    return [{ op: 'note', text: `payload too large to diff (${n} vs ${m} lines)` }];
+  }
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ op: 'same', text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ op: 'del', text: a[i] }); i++; }
+    else { out.push({ op: 'add', text: b[j] }); j++; }
+  }
+  while (i < n) { out.push({ op: 'del', text: a[i++] }); }
+  while (j < m) { out.push({ op: 'add', text: b[j++] }); }
+  return out;
+}
+
+function safeParse(raw) {
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// One line per message, so a diff shows structural change (a message dropped by
+// compaction) rather than noise.
+function messageLines(request) {
+  const body = safeParse(request);
+  if (!body || !Array.isArray(body.messages)) return [];
+  return body.messages.map((m, i) => {
+    const text = typeof m.content === 'string'
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content.map(p => p.text || `[${p.type}]`).join(' ')
+        : m.tool_calls ? m.tool_calls.map(c => `${c.function.name}(${c.function.arguments})`).join(' ') : '';
+    const head = (text || '').replace(/\s+/g, ' ').trim().slice(0, 150);
+    return `${String(i).padStart(2, '0')} ${m.role}: ${head}`;
+  });
+}
+
+function systemPromptOf(request) {
+  const body = safeParse(request);
+  if (!body || !Array.isArray(body.messages)) return '';
+  const sys = body.messages.find(m => m.role === 'system');
+  return sys && typeof sys.content === 'string' ? sys.content : '';
+}
+
+function Payload({ text, empty, mono = true }) {
+  if (!text) return <div className="p-4 text-[12px] text-subtle">{empty}</div>;
+  return (
+    <pre className={`p-3 text-[11.5px] leading-[18px] whitespace-pre-wrap break-words text-zinc-300 ${mono ? 'font-mono' : ''}`}>
+      {text}
+    </pre>
+  );
+}
+
+function DiffView({ ops }) {
+  if (!ops || ops.length === 0) {
+    return <div className="p-4 text-[12px] text-subtle">No previous model call in this turn to compare against.</div>;
+  }
+  const changed = ops.some(o => o.op === 'add' || o.op === 'del');
+  return (
+    <div className="p-2">
+      {!changed && (
+        <div className="mb-2 px-2 py-1.5 rounded-md border border-line bg-surface text-[11.5px] text-subtle">
+          The prompt is unchanged apart from the appended turn.
+        </div>
+      )}
+      <pre className="text-[11px] leading-[17px] font-mono whitespace-pre-wrap break-words">
+        {ops.map((o, i) => (
+          <div key={i} className={
+            o.op === 'add' ? 'text-emerald-300 bg-emerald-500/[0.07]' :
+            o.op === 'del' ? 'text-rose-300 bg-rose-500/[0.07]' :
+            o.op === 'note' ? 'text-amber-300' : 'text-zinc-500'}>
+            {o.op === 'add' ? '+ ' : o.op === 'del' ? '- ' : o.op === 'note' ? '! ' : '  '}{o.text}
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
+}
+
+function TraceInspector({ turn, step, prevModelStep }) {
+  const [tab, setTab] = React.useState('request');
+
+  const model = step && step.model;
+  const tool = step && step.tool;
+
+  const tabs = React.useMemo(() => {
+    if (!step) return [];
+    if (step.kind === 'tool') {
+      const t = [{ id: 'tool', label: 'Tool' }, { id: 'result', label: 'Result' }];
+      if (tool && tool.diff) t.push({ id: 'diff', label: 'Change' });
+      return t;
+    }
+    if (step.kind === 'compaction') return [{ id: 'result', label: 'Compaction' }];
+    return [
+      { id: 'request', label: 'Request' },
+      { id: 'response', label: 'Response' },
+      { id: 'reasoning', label: 'Reasoning' },
+      { id: 'promptdiff', label: 'Prompt Δ' },
+    ];
+  }, [step, tool]);
+
+  // Keep the selected tab valid as the selection moves between step kinds.
+  React.useEffect(() => {
+    if (tabs.length > 0 && !tabs.some(t => t.id === tab)) setTab(tabs[0].id);
+  }, [tabs, tab]);
+
+  const promptOps = React.useMemo(() => {
+    if (!model || !prevModelStep || !prevModelStep.model) return [];
+    const prev = prevModelStep.model.request;
+    const cur = model.request;
+    const sysPrev = systemPromptOf(prev), sysCur = systemPromptOf(cur);
+    const ops = [];
+    if (sysPrev !== sysCur) {
+      ops.push({ op: 'note', text: 'system prompt changed' });
+      ops.push(...lineDiff(sysPrev.split('\n'), sysCur.split('\n')));
+      ops.push({ op: 'note', text: 'conversation' });
+    }
+    ops.push(...lineDiff(messageLines(prev), messageLines(cur)));
+    return ops;
+  }, [model, prevModelStep]);
+
+  if (!step) {
+    return (
+      <div className="h-full flex items-center justify-center p-6">
+        <div className="empty-state w-full px-4 py-6 text-center">
+          <div className="text-[13px] font-medium text-zinc-200">Nothing selected</div>
+          <p className="mt-1.5 text-[11.5px] leading-5 text-subtle">
+            Click a step in the waterfall to see the exact request, response, and tool payload.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const copyText =
+    tab === 'request' ? (model && model.request) :
+    tab === 'response' ? (model && model.response) :
+    tab === 'reasoning' ? (model && model.reasoning) :
+    tab === 'tool' ? (tool && tool.args) :
+    tab === 'result' ? (tool ? tool.detail : step.note) :
+    tab === 'diff' ? (tool && tool.diff) : '';
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="shrink-0 px-3 py-2 border-b border-line">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">Step {step.seq}</span>
+          <span className="text-[11px] text-zinc-300 truncate">{step.label}</span>
+          <span className="ml-auto shrink-0"><CopyButton text={copyText} /></span>
+        </div>
+        <div className="mt-1.5 flex items-center gap-1 overflow-x-auto" role="tablist" aria-label="Step payloads">
+          {tabs.map(t => (
+            <button key={t.id} type="button" role="tab" aria-selected={tab === t.id}
+              onClick={() => setTab(t.id)}
+              className={`shrink-0 px-2 py-1 rounded-md text-[11.5px] font-medium transition-colors ${
+                tab === t.id ? 'bg-accent-soft text-indigo-200' : 'text-muted hover:text-ink hover:bg-white/[0.04]'
+              }`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-auto">
+        {step.kind === 'model' && (
+          <>
+            {tab === 'request' && (
+              <>
+                <div className="px-3 pt-2.5 flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] font-mono text-subtle">
+                  <span>{model && model.prompt_tokens} prompt tok (est)</span>
+                  <span>{model && model.completion_tokens} completion tok (est)</span>
+                  {model && model.retries > 0 && <span className="text-amber-300">{model.retries} retries</span>}
+                  {model && model.finish_reason && <span>finish: {model.finish_reason}</span>}
+                </div>
+                <Payload text={model && model.request} empty="No request captured for this step." />
+              </>
+            )}
+            {tab === 'response' && (
+              <>
+                {model && model.error && (
+                  <div className="m-3 px-3 py-2 rounded-md border border-rose-500/30 bg-rose-500/[0.08] text-[11.5px] text-rose-200">
+                    {model.error}
+                  </div>
+                )}
+                {model && model.text && (
+                  <div className="px-3 pt-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-subtle">Assistant text</div>
+                    <pre className="mt-1 text-[12px] leading-[19px] whitespace-pre-wrap break-words text-zinc-200">{model.text}</pre>
+                  </div>
+                )}
+                <div className="px-3 pt-3 text-[10px] font-semibold uppercase tracking-wider text-subtle">Raw stream</div>
+                <Payload text={model && model.response} empty="No response bytes captured." />
+              </>
+            )}
+            {tab === 'reasoning' && (
+              <Payload text={model && model.reasoning} mono={false}
+                empty="This model sent no reasoning for this call." />
+            )}
+            {tab === 'promptdiff' && <DiffView ops={promptOps} />}
+          </>
+        )}
+
+        {step.kind === 'tool' && (
+          <>
+            {tab === 'tool' && (
+              <>
+                <div className="px-3 pt-2.5 flex flex-wrap gap-x-3 gap-y-1 text-[10.5px] font-mono text-subtle">
+                  <span className={tool && tool.ok ? 'text-emerald-300' : 'text-rose-300'}>{tool && tool.ok ? 'ok' : 'failed'}</span>
+                  {tool && tool.approval && <span>approval: {tool.approval}</span>}
+                  <span>{fmtMs(step.ms)}</span>
+                </div>
+                <Payload text={tool && tool.args} empty="This call took no arguments." />
+              </>
+            )}
+            {tab === 'result' && (
+              <>
+                {tool && tool.summary && (
+                  <div className="px-3 pt-3 text-[12px] text-zinc-200">{tool.summary}</div>
+                )}
+                <Payload text={tool && tool.detail} empty="The tool returned no detail." />
+              </>
+            )}
+            {tab === 'diff' && <Payload text={tool && tool.diff} empty="No change preview for this call." />}
+          </>
+        )}
+
+        {step.kind === 'compaction' && (
+          <div className="p-4">
+            <div className="text-[12.5px] text-zinc-200">Context was compacted here.</div>
+            <div className="mt-1 text-[12px] font-mono text-amber-300">{step.note || 'no token counts recorded'}</div>
+            <p className="mt-3 text-[11.5px] leading-5 text-subtle">
+              Everything before this point was replaced by a hand-off note. Compare the prompt on the next
+              model call to see exactly what the agent kept.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+// ControlRail.jsx — run koda from the browser: model, mode, autonomy, feature
+// toggles, project memory, learned rules, and saved sessions.
+
+function CtlSection({ title, hint, children, action }) {
+  return (
+    <section className="px-3 py-3 border-b border-line">
+      <div className="flex items-center gap-2">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-subtle">{title}</h3>
+        {action}
+      </div>
+      {hint && <p className="mt-1 text-[11px] leading-4 text-subtle">{hint}</p>}
+      <div className="mt-2 space-y-2">{children}</div>
+    </section>
+  );
+}
+
+function CtlField({ label, children }) {
+  return (
+    <label className="block">
+      <span className="block mb-1 text-[11px] text-muted">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function CtlToggle({ label, checked, onChange, disabled }) {
+  return (
+    <button type="button" role="switch" aria-checked={!!checked} disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-md border border-line bg-surface hover:border-line-strong transition-colors disabled:opacity-50">
+      <span className="text-[12px] text-zinc-300">{label}</span>
+      <span className={`relative w-8 h-[18px] rounded-full transition-colors ${checked ? 'bg-indigo-500' : 'bg-zinc-700'}`}>
+        <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-all ${checked ? 'left-[16px]' : 'left-[2px]'}`} />
+      </span>
+    </button>
+  );
+}
+
+const TOGGLE_LABELS = [
+  ['learning', 'Self-learning'],
+  ['memory', 'Project memory'],
+  ['codegraph', 'Code graph'],
+  ['web_search', 'Web search'],
+  ['web_fetch', 'Web fetch'],
+  ['subagents', 'Subagents'],
+  ['sessions', 'Save sessions'],
+  ['watch', 'Watch mode'],
+  ['debug', 'Debug capture'],
+];
+
+function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemory, onLearning, onSession, busy }) {
+  const [draft, setDraft] = React.useState(null);
+  const [note, setNote] = React.useState('');
+
+  // Adopt server state, but never stomp an edit in progress.
+  React.useEffect(() => {
+    if (config && !draft) setDraft(config);
+  }, [config, draft]);
+
+  if (!config) {
+    return <div className="p-4 text-[12px] text-subtle">Loading controls…</div>;
+  }
+  const cur = draft || config;
+  const dirty = JSON.stringify(cur) !== JSON.stringify(config);
+
+  const patch = (fields) => setDraft({ ...cur, ...fields });
+  const patchToggle = (key, value) => setDraft({ ...cur, toggles: { ...cur.toggles, [key]: value } });
+
+  const submit = () => {
+    onSaveConfig({
+      model: cur.model,
+      base_url: cur.base_url,
+      mode: cur.mode,
+      auto_tier: cur.auto_tier,
+      reasoning_effort: cur.reasoning_effort,
+      temperature: Number(cur.temperature),
+      max_steps: Number(cur.max_steps),
+      toggles: cur.toggles,
+    });
+  };
+
+  return (
+    <div className="h-full min-h-0 overflow-y-auto">
+      <CtlSection title="Model"
+        action={dirty ? <span className="ml-auto text-[10px] text-amber-300">unsaved</span> : null}>
+        <CtlField label="Model id">
+          <input className="form-input !min-h-[32px] !py-1 text-[12px]" value={cur.model}
+            onChange={e => patch({ model: e.target.value })} aria-label="Model id" />
+        </CtlField>
+        <CtlField label="Endpoint">
+          <input className="form-input !min-h-[32px] !py-1 text-[12px] font-mono" value={cur.base_url}
+            onChange={e => patch({ base_url: e.target.value })} aria-label="Endpoint base URL" />
+        </CtlField>
+        <div className="grid grid-cols-2 gap-2">
+          <CtlField label="Mode">
+            <select className="control w-full px-2 text-[12px]" value={cur.mode}
+              onChange={e => patch({ mode: e.target.value })} aria-label="Mode">
+              {(cur.modes || ['plan', 'execute', 'vibe']).map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </CtlField>
+          <CtlField label="Autonomy">
+            <select className="control w-full px-2 text-[12px]" value={cur.auto_tier}
+              onChange={e => patch({ auto_tier: e.target.value })} aria-label="Autonomy tier">
+              {(cur.tiers || ['ask', 'write', 'full']).map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </CtlField>
+          <CtlField label="Reasoning">
+            <select className="control w-full px-2 text-[12px]" value={cur.reasoning_effort}
+              onChange={e => patch({ reasoning_effort: e.target.value })} aria-label="Reasoning effort">
+              {(cur.efforts || ['off', 'low', 'medium', 'high']).map(x => <option key={x} value={x}>{x}</option>)}
+            </select>
+          </CtlField>
+          <CtlField label="Max steps">
+            <input type="number" min="1" max="500" className="form-input !min-h-[32px] !py-1 text-[12px]"
+              value={cur.max_steps} onChange={e => patch({ max_steps: e.target.value })} aria-label="Max steps" />
+          </CtlField>
+        </div>
+        <div className="flex items-center gap-2 pt-1">
+          <button type="button" onClick={submit} disabled={!dirty || busy}
+            className="primary-button px-3 text-[12px] font-medium disabled:opacity-50">
+            Apply
+          </button>
+          {dirty && (
+            <button type="button" onClick={() => setDraft(config)} className="control px-3 text-[12px]">
+              Reset
+            </button>
+          )}
+          <span className="ml-auto text-[10px] text-subtle">
+            {cur.has_api_key ? 'API key set' : 'no API key'}
+          </span>
+        </div>
+      </CtlSection>
+
+      <CtlSection title="Features" hint="Applied to the running session immediately.">
+        <div className="space-y-1.5">
+          {TOGGLE_LABELS.map(([key, label]) => (
+            <CtlToggle key={key} label={label} checked={cur.toggles && cur.toggles[key]}
+              onChange={v => patchToggle(key, v)} />
+          ))}
+        </div>
+      </CtlSection>
+
+      <CtlSection title="Memory" hint={memory ? `${(memory.notes || []).length} note(s)` : 'Loading…'}>
+        <div className="flex gap-1.5">
+          <input className="form-input !min-h-[32px] !py-1 text-[12px]" value={note} placeholder="Remember a project fact…"
+            onChange={e => setNote(e.target.value)} aria-label="New memory note"
+            onKeyDown={e => { if (e.key === 'Enter' && note.trim()) { onMemory({ remember: note.trim() }); setNote(''); } }} />
+          <button type="button" className="control px-2.5 text-[12px] shrink-0" disabled={!note.trim()}
+            onClick={() => { onMemory({ remember: note.trim() }); setNote(''); }}>Add</button>
+        </div>
+        <ul className="space-y-1">
+          {(memory && memory.notes || []).slice(-12).reverse().map((n, i) => (
+            <li key={i} className="group flex items-start gap-2 px-2 py-1.5 rounded-md border border-line bg-surface">
+              <span className="text-[11.5px] leading-4 text-zinc-300 break-words">{n}</span>
+              <button type="button" aria-label={`Forget: ${n}`} title="Forget this note"
+                onClick={() => onMemory({ forget: n })}
+                className="ml-auto shrink-0 text-[10px] text-subtle hover:text-rose-300">✕</button>
+            </li>
+          ))}
+          {memory && (memory.notes || []).length === 0 && (
+            <li className="text-[11px] text-subtle">Nothing remembered yet.</li>
+          )}
+        </ul>
+        {memory && (memory.commands || []).length > 0 && (
+          <div className="pt-1">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-subtle">Known commands</div>
+            <ul className="mt-1 space-y-0.5">
+              {memory.commands.slice(0, 6).map((c, i) => (
+                <li key={i} className="flex items-center gap-2 text-[11px] font-mono">
+                  <span className="truncate text-zinc-400">{c.command}</span>
+                  <span className="ml-auto shrink-0 text-emerald-400">{c.ok}✓</span>
+                  {c.failed > 0 && <span className="shrink-0 text-rose-400">{c.failed}✗</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </CtlSection>
+
+      <CtlSection title="Learned rules"
+        hint={learning ? `${(learning.accepted || []).length} accepted · ${(learning.candidates || []).length} pending` : 'Loading…'}
+        action={learning && (learning.candidates || []).length > 0 ? (
+          <button type="button" onClick={() => onLearning({ accept: 'all' })}
+            className="ml-auto text-[10.5px] text-indigo-300 hover:text-indigo-200">Accept all</button>
+        ) : null}>
+        <ul className="space-y-1" aria-label="Rule candidates">
+          {(learning && learning.candidates || []).map((r, i) => (
+            <li key={r.key} className="px-2 py-1.5 rounded-md border border-line bg-surface">
+              <div className="text-[11.5px] leading-4 text-zinc-300">{r.text}</div>
+              <div className="mt-1 flex items-center gap-2">
+                <span className="text-[10px] text-subtle font-mono">support {r.support}</span>
+                <button type="button" onClick={() => onLearning({ accept: i + 1 })}
+                  className="ml-auto text-[10.5px] text-emerald-300 hover:text-emerald-200">Accept</button>
+                <button type="button" onClick={() => onLearning({ reject: i + 1 })}
+                  className="text-[10.5px] text-rose-300 hover:text-rose-200">Reject</button>
+              </div>
+            </li>
+          ))}
+          {learning && (learning.candidates || []).length === 0 && (
+            <li className="text-[11px] text-subtle">No pending candidates. koda proposes rules as you work.</li>
+          )}
+        </ul>
+        {learning && (learning.accepted || []).length > 0 && (
+          <details className="pt-1">
+            <summary className="text-[10.5px] text-subtle cursor-pointer hover:text-muted">
+              {learning.accepted.length} accepted rule(s)
+            </summary>
+            <ul className="mt-1 space-y-0.5">
+              {learning.accepted.map(r => (
+                <li key={r.key} className="text-[11px] leading-4 text-zinc-400">• {r.text}</li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </CtlSection>
+
+      <CtlSection title="Sessions" hint="Resume swaps the live conversation; fork copies it first.">
+        <ul className="space-y-1">
+          {(sessions && sessions.sessions || []).slice(0, 10).map(s => (
+            <li key={s.id} className="px-2 py-1.5 rounded-md border border-line bg-surface">
+              <div className="text-[11.5px] leading-4 text-zinc-300 line-clamp-2">{s.title || s.id}</div>
+              <div className="mt-1 flex items-center gap-2 text-[10px] font-mono text-subtle">
+                <span>{s.messages} msg</span>
+                <span aria-hidden="true">·</span>
+                <span>{s.ago}</span>
+                <button type="button" onClick={() => onSession(s.id, 'resume')}
+                  className="ml-auto text-[10.5px] font-sans text-indigo-300 hover:text-indigo-200">Resume</button>
+                <button type="button" onClick={() => onSession(s.id, 'fork')}
+                  className="text-[10.5px] font-sans text-muted hover:text-ink">Fork</button>
+              </div>
+            </li>
+          ))}
+          {sessions && (sessions.sessions || []).length === 0 && (
+            <li className="text-[11px] text-subtle">No saved sessions in this project.</li>
+          )}
+        </ul>
+      </CtlSection>
+
+      <div className="px-3 py-3 text-[10px] font-mono text-subtle break-all">{config.config_path}</div>
+    </div>
+  );
+}
+// CommandPalette.jsx — Cmd+K: jump to a turn, switch model/mode, toggle a
+// feature, query a symbol, export the trace.
+
+function CommandPalette({ open, onClose, actions, onSymbolQuery }) {
+  const [query, setQuery] = React.useState('');
+  const [cursor, setCursor] = React.useState(0);
+  const [symbol, setSymbol] = React.useState(null);
+  const inputRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (open) {
+      setQuery(''); setCursor(0); setSymbol(null);
+      // Focus after paint so the keystroke that opened it isn't captured here.
+      setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
+    }
+  }, [open]);
+
+  const matches = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return actions.slice(0, 40);
+    // Subsequence match, so "smem" finds "Show memory".
+    const score = (label) => {
+      const s = label.toLowerCase();
+      if (s.includes(q)) return 0;
+      let i = 0;
+      for (const ch of q) {
+        i = s.indexOf(ch, i);
+        if (i === -1) return null;
+        i++;
+      }
+      return 1;
+    };
+    return actions
+      .map(a => ({ a, s: score(`${a.group} ${a.label}`) }))
+      .filter(x => x.s !== null)
+      .sort((x, y) => x.s - y.s)
+      .map(x => x.a)
+      .slice(0, 40);
+  }, [actions, query]);
+
+  React.useEffect(() => { setCursor(0); }, [query]);
+
+  const runSymbol = async () => {
+    const name = query.replace(/^[>@]/, '').trim();
+    if (!name) return;
+    setSymbol({ loading: true, name });
+    try {
+      const res = await fetch(`/api/codegraph/symbol?name=${encodeURIComponent(name)}`);
+      setSymbol({ ...(await res.json()), loading: false });
+    } catch (e) {
+      setSymbol({ ok: false, error: String(e), loading: false, name });
+    }
+  };
+
+  if (!open) return null;
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setCursor(c => Math.min(c + 1, matches.length - 1)); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); setCursor(c => Math.max(c - 1, 0)); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey || query.startsWith('@')) { runSymbol(); return; }
+      const pick = matches[cursor];
+      if (pick) { pick.run(); if (!pick.keepOpen) onClose(); }
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4 bg-black/60"
+      role="dialog" aria-modal="true" aria-label="Command palette" onClick={onClose}>
+      <div className="w-full max-w-xl rounded-xl border border-line-strong bg-overlay shadow-popover overflow-hidden animate-fade-in"
+        onClick={e => e.stopPropagation()}>
+        <input ref={inputRef} type="text" value={query} onChange={e => setQuery(e.target.value)}
+          onKeyDown={onKeyDown} placeholder="Run a command, or @symbol to look one up…"
+          aria-label="Command or symbol"
+          className="w-full px-4 py-3 bg-transparent text-[13.5px] text-ink placeholder:text-subtle border-b border-line focus:outline-none" />
+
+        {symbol ? (
+          <div className="max-h-[46vh] overflow-y-auto p-3">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">Symbol</span>
+              <span className="text-[12px] font-mono text-zinc-200">{symbol.name}</span>
+              <button type="button" onClick={() => setSymbol(null)}
+                className="ml-auto text-[11px] text-muted hover:text-ink">back to commands</button>
+            </div>
+            {symbol.loading && <div className="mt-2 text-[12px] text-subtle">Looking it up…</div>}
+            {!symbol.loading && (
+              <pre className="mt-2 text-[11.5px] leading-[18px] font-mono whitespace-pre-wrap break-words text-zinc-300">
+                {symbol.report || symbol.error || 'Nothing found.'}
+              </pre>
+            )}
+          </div>
+        ) : (
+          <ul className="max-h-[46vh] overflow-y-auto py-1" role="listbox" aria-label="Commands">
+            {matches.length === 0 && (
+              <li className="px-4 py-3 text-[12px] text-subtle">
+                No command matches. Press Shift+Enter to look “{query.trim()}” up in the code graph.
+              </li>
+            )}
+            {matches.map((a, i) => (
+              <li key={a.id} role="option" aria-selected={i === cursor}>
+                <button type="button" onMouseEnter={() => setCursor(i)}
+                  onClick={() => { a.run(); if (!a.keepOpen) onClose(); }}
+                  className={`w-full text-left px-4 py-2 flex items-center gap-3 ${i === cursor ? 'bg-accent-soft' : 'hover:bg-white/[0.03]'}`}>
+                  <span className="text-[10px] font-mono uppercase tracking-wide text-subtle w-[54px] shrink-0">{a.group}</span>
+                  <span className="text-[12.5px] text-zinc-200 truncate">{a.label}</span>
+                  {a.hint && <span className="ml-auto shrink-0 text-[10.5px] font-mono text-subtle">{a.hint}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="px-4 py-2 border-t border-line flex items-center gap-3 text-[10px] text-subtle">
+          <span>↑↓ navigate</span><span>↵ run</span><span>⇧↵ symbol lookup</span><span>esc close</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+// App.jsx — koda web control center: one page that traces every turn end to end
+// and drives the running session from the same surface.
 async function fetchJson(path) {
   const res = await fetch(path);
   if (res.status === 404) {
-    throw new Error(`${path} is missing — your running koda is older than this UI. Rebuild and restart koda (cargo build --release) to enable this tab.`);
+    throw new Error(`${path} is missing — your running koda is older than this UI. Rebuild and restart koda (cargo build --release) to enable this.`);
   }
   if (!res.ok) throw new Error(`${path} returned ${res.status}`);
   return res.json();
 }
 
-const WORKSPACE_TABS = [
-  {
-    id: 'logs', label: 'Live Logs', short: 'Logs', key: '1',
-    description: 'Inspect runtime events, tool activity, retries, and failures as they happen.',
-    icon: 'M4 6h16M4 12h16M4 18h10',
-  },
-  {
-    id: 'debug', label: 'LLM Debug', short: 'LLM', key: '2',
-    description: 'See the exact prompt, streaming response, reasoning, and tool calls for each turn.',
-    icon: 'M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z',
-  },
-  {
-    id: 'graph', label: 'Code Graph', short: 'Graph', key: '3',
-    description: 'Explore indexed symbols, definitions, references, and file relationships.',
-    icon: 'M8 6a2 2 0 11-4 0 2 2 0 014 0zm12 0a2 2 0 11-4 0 2 2 0 014 0zM14 18a2 2 0 11-4 0 2 2 0 014 0zM7.7 7.2l3.1 8.1m5.5-8.1l-3.1 8.1M8 6h8',
-  },
-  {
-    id: 'skills', label: 'Agents & Skills', short: 'Skills', key: '4',
-    description: 'Manage reusable project knowledge and specialized delegation roles.',
-    icon: 'M12 3l2.1 4.26L19 8l-3.5 3.4.83 4.8L12 14l-4.33 2.2.83-4.8L5 8l4.9-.74L12 3z',
-  },
-  {
-    id: 'system', label: 'System Prompt', short: 'Prompt', key: '5',
-    description: 'Review and tune the operating instructions applied to every koda session.',
-    icon: 'M9 5h6M9 9h6m-6 4h4m5 8H6a2 2 0 01-2-2V3h16v16a2 2 0 01-2 2z',
-  },
+async function postJson(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (res.status === 404) {
+    throw new Error(`${path} is missing — restart koda after rebuilding to enable this control.`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.error || `${path} returned ${res.status}`);
+  return data;
+}
+
+const MANAGE_TABS = [
+  { id: 'graph', label: 'Code Graph' },
+  { id: 'skills', label: 'Agents & Skills' },
+  { id: 'prompt', label: 'System Prompt' },
+  { id: 'debug', label: 'Raw Captures' },
 ];
 
+function downloadJson(name, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function App() {
-  const [tab, setTab] = React.useState('logs');
+  // ---- live streams ----
   const [logs, setLogs] = React.useState([]);
-  const [version, setVersion] = React.useState(0);
+  const [logVersion, setLogVersion] = React.useState(0);
   const [connected, setConnected] = React.useState(false);
+  const [trace, setTrace] = React.useState(null);
+  const [traceError, setTraceError] = React.useState(null);
+
+  // ---- selection ----
+  const [selectedId, setSelectedId] = React.useState(null);
+  const [detail, setDetail] = React.useState(null);
+  const [selectedSeq, setSelectedSeq] = React.useState(null);
+  const [pinLive, setPinLive] = React.useState(true);
+
+  // ---- panes ----
+  const [rightTab, setRightTab] = React.useState('inspect');
+  const [mobilePane, setMobilePane] = React.useState('trace');
+  const [showLogs, setShowLogs] = React.useState(false);
+  const [manage, setManage] = React.useState(null);
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
   const [toasts, setToasts] = React.useState([]);
 
-  const [debug, setDebug] = React.useState(null);
-  const [debugLoading, setDebugLoading] = React.useState(false);
-  const [debugError, setDebugError] = React.useState(null);
+  // ---- control data ----
+  const [config, setConfig] = React.useState(null);
+  const [memory, setMemory] = React.useState(null);
+  const [learning, setLearning] = React.useState(null);
+  const [sessions, setSessions] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  // ---- manage data (lazy) ----
   const [graph, setGraph] = React.useState(null);
-  const [graphLoading, setGraphLoading] = React.useState(false);
-  const [graphError, setGraphError] = React.useState(null);
+  const [graphState, setGraphState] = React.useState({ loading: false, error: null });
   const [skills, setSkills] = React.useState(null);
-  const [skillsLoading, setSkillsLoading] = React.useState(false);
-  const [skillsError, setSkillsError] = React.useState(null);
+  const [skillsState, setSkillsState] = React.useState({ loading: false, error: null });
   const [settings, setSettings] = React.useState(null);
-  const [settingsLoading, setSettingsLoading] = React.useState(false);
-  const [settingsError, setSettingsError] = React.useState(null);
+  const [settingsState, setSettingsState] = React.useState({ loading: false, error: null });
+  const [debugData, setDebugData] = React.useState(null);
+  const [debugState, setDebugState] = React.useState({ loading: false, error: null });
 
   const seenSeqRef = React.useRef(-1);
   const logsRef = React.useRef([]);
@@ -1495,12 +2391,12 @@ function App() {
   const pushToast = React.useCallback((message, kind = 'info') => {
     const id = Math.random().toString(36).slice(2);
     setToasts(items => [...items, { id, message, kind }]);
-    setTimeout(() => setToasts(items => items.filter(item => item.id !== id)), 4000);
+    setTimeout(() => setToasts(items => items.filter(i => i.id !== id)), 4200);
   }, []);
 
   const mergeLogs = React.useCallback((data) => {
     if (!data) return;
-    if (typeof data.version === 'number') setVersion(data.version);
+    if (typeof data.version === 'number') setLogVersion(data.version);
     const entries = data.entries || [];
     if (entries.length === 0) return;
     let maxSeq = seenSeqRef.current;
@@ -1518,6 +2414,7 @@ function App() {
     }
   }, []);
 
+  // Logs: poll + SSE, exactly as before.
   React.useEffect(() => {
     let alive = true;
     const poll = async () => {
@@ -1541,175 +2438,357 @@ function App() {
     let source;
     try {
       source = new EventSource('/api/events');
-      source.addEventListener('logs', event => {
-        try { setConnected(true); mergeLogs(JSON.parse(event.data)); } catch (_) {}
-      });
+      source.addEventListener('logs', e => { try { setConnected(true); mergeLogs(JSON.parse(e.data)); } catch (_) {} });
+      source.addEventListener('trace', e => { try { setTrace(JSON.parse(e.data)); } catch (_) {} });
       source.onerror = () => {};
     } catch (_) {}
     return () => { if (source) source.close(); };
   }, [mergeLogs]);
 
-  const loadDebug = React.useCallback(async () => {
-    setDebugLoading(true); setDebugError(null);
-    try { setDebug(await fetchJson('/api/debug')); }
-    catch (error) { setDebugError(error.message); }
-    finally { setDebugLoading(false); }
-  }, []);
-  const loadGraph = React.useCallback(async () => {
-    setGraphLoading(true); setGraphError(null);
-    try { setGraph(await fetchJson('/api/codegraph')); }
-    catch (error) { setGraphError(error.message); }
-    finally { setGraphLoading(false); }
-  }, []);
-  const loadSkills = React.useCallback(async () => {
-    setSkillsLoading(true); setSkillsError(null);
-    try { setSkills(await fetchJson('/api/skills')); }
-    catch (error) { setSkillsError(error.message); }
-    finally { setSkillsLoading(false); }
-  }, []);
-  const loadSettings = React.useCallback(async () => {
-    setSettingsLoading(true); setSettingsError(null);
-    try { setSettings(await fetchJson('/api/settings')); }
-    catch (error) { setSettingsError(error.message); }
-    finally { setSettingsLoading(false); }
-  }, []);
-
+  // Trace: poll while anything can change. 1s is fast enough to feel live and
+  // cheap enough for a summary payload.
   React.useEffect(() => {
-    if (tab === 'debug' && !debug) loadDebug();
-    if (tab === 'graph' && !graph) loadGraph();
-    if (tab === 'skills' && !skills) loadSkills();
-    if (tab === 'system' && !settings) loadSettings();
-  }, [tab, debug, graph, skills, settings, loadDebug, loadGraph, loadSkills, loadSettings]);
+    let alive = true;
+    const poll = async () => {
+      try {
+        const data = await fetchJson('/api/trace');
+        if (!alive) return;
+        setTrace(data); setTraceError(null);
+      } catch (e) {
+        if (alive) setTraceError(e.message);
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 1000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
-  const refreshDebugQuiet = React.useCallback(async () => {
+  const turns = (trace && trace.turns) || [];
+  const live = trace && trace.live;
+
+  // Follow the live turn unless the user has deliberately picked another.
+  React.useEffect(() => {
+    if (pinLive && live && live.id !== selectedId) { setSelectedId(live.id); setSelectedSeq(null); }
+    else if (selectedId == null && turns.length > 0) setSelectedId(turns[0].id);
+  }, [pinLive, live, turns, selectedId]);
+
+  // Detail for the selected turn: the live turn already arrives in full, so only
+  // a finished turn needs fetching.
+  React.useEffect(() => {
+    if (selectedId == null) { setDetail(null); return; }
+    if (live && live.id === selectedId) { setDetail(live); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const data = await fetchJson(`/api/trace/${selectedId}`);
+        if (alive) setDetail(data);
+      } catch (e) {
+        if (alive) { setDetail(null); pushToast(e.message, 'error'); }
+      }
+    })();
+    return () => { alive = false; };
+  }, [selectedId, live, pushToast]);
+
+  const selectTurn = (id) => {
+    setSelectedId(id);
+    setSelectedSeq(null);
+    setPinLive(!!(live && live.id === id));
+    setMobilePane('trace');
+  };
+
+  const steps = (detail && detail.steps) || [];
+  const step = selectedSeq == null ? null : steps.find(s => s.seq === selectedSeq);
+  // The previous model call, for the prompt diff.
+  const prevModelStep = React.useMemo(() => {
+    if (!step || step.kind !== 'model') return null;
+    let prev = null;
+    for (const s of steps) {
+      if (s.seq >= step.seq) break;
+      if (s.kind === 'model') prev = s;
+    }
+    return prev;
+  }, [step, steps]);
+
+  // ---- control data loading ----
+  const loadControl = React.useCallback(async (quiet) => {
     try {
-      const res = await fetch('/api/debug');
-      if (res.ok) setDebug(await res.json());
-    } catch (_) {}
-  }, []);
+      const [cfg, mem, learn, sess] = await Promise.all([
+        fetchJson('/api/config'), fetchJson('/api/memory'),
+        fetchJson('/api/learning'), fetchJson('/api/sessions'),
+      ]);
+      setConfig(cfg); setMemory(mem); setLearning(learn); setSessions(sess);
+    } catch (e) {
+      if (!quiet) pushToast(e.message, 'error');
+    }
+  }, [pushToast]);
+
+  React.useEffect(() => { loadControl(true); }, [loadControl]);
   React.useEffect(() => {
-    if (tab !== 'debug') return;
-    const timer = setInterval(refreshDebugQuiet, 1000);
+    // Refresh while the control rail is on screen; the agent applies changes on
+    // its own loop, so the truth lives server-side.
+    if (rightTab !== 'control' && mobilePane !== 'control') return;
+    const timer = setInterval(() => loadControl(true), 3000);
     return () => clearInterval(timer);
-  }, [tab, refreshDebugQuiet]);
+  }, [rightTab, mobilePane, loadControl]);
+
+  const saveConfig = async (payload) => {
+    setBusy(true);
+    try {
+      await postJson('/api/config', payload);
+      pushToast('Settings applied to the running session', 'success');
+      setConfig(null);
+      await loadControl(true);
+    } catch (e) { pushToast(e.message, 'error'); }
+    finally { setBusy(false); }
+  };
+  const sendMemory = async (payload) => {
+    try {
+      await postJson('/api/memory', payload);
+      pushToast(payload.remember ? 'Remembered' : 'Forgotten', 'success');
+      setTimeout(() => loadControl(true), 900);
+    } catch (e) { pushToast(e.message, 'error'); }
+  };
+  const sendLearning = async (payload) => {
+    try {
+      await postJson('/api/learning', payload);
+      pushToast('Sent to koda', 'success');
+      setTimeout(() => loadControl(true), 900);
+    } catch (e) { pushToast(e.message, 'error'); }
+  };
+  const sendSession = async (id, action) => {
+    try {
+      await postJson(`/api/sessions/${encodeURIComponent(id)}/${action}`, {});
+      pushToast(action === 'fork' ? `Forked ${id}` : `Resumed ${id}`, 'success');
+      setTimeout(() => loadControl(true), 900);
+    } catch (e) { pushToast(e.message, 'error'); }
+  };
+
+  // ---- manage panel loading ----
+  const openManage = React.useCallback(async (tab) => {
+    setManage(tab);
+    if (tab === 'graph' && !graph) {
+      setGraphState({ loading: true, error: null });
+      try { setGraph(await fetchJson('/api/codegraph')); setGraphState({ loading: false, error: null }); }
+      catch (e) { setGraphState({ loading: false, error: e.message }); }
+    }
+    if (tab === 'skills' && !skills) {
+      setSkillsState({ loading: true, error: null });
+      try { setSkills(await fetchJson('/api/skills')); setSkillsState({ loading: false, error: null }); }
+      catch (e) { setSkillsState({ loading: false, error: e.message }); }
+    }
+    if (tab === 'prompt' && !settings) {
+      setSettingsState({ loading: true, error: null });
+      try { setSettings(await fetchJson('/api/settings')); setSettingsState({ loading: false, error: null }); }
+      catch (e) { setSettingsState({ loading: false, error: e.message }); }
+    }
+    if (tab === 'debug') {
+      setDebugState({ loading: true, error: null });
+      try { setDebugData(await fetchJson('/api/debug')); setDebugState({ loading: false, error: null }); }
+      catch (e) { setDebugState({ loading: false, error: e.message }); }
+    }
+  }, [graph, skills, settings]);
+
+  const reloadSkills = React.useCallback(async () => {
+    setSkillsState({ loading: true, error: null });
+    try { setSkills(await fetchJson('/api/skills')); setSkillsState({ loading: false, error: null }); }
+    catch (e) { setSkillsState({ loading: false, error: e.message }); }
+  }, []);
+  const reloadSettings = React.useCallback(async () => {
+    setSettingsState({ loading: true, error: null });
+    try { setSettings(await fetchJson('/api/settings')); setSettingsState({ loading: false, error: null }); }
+    catch (e) { setSettingsState({ loading: false, error: e.message }); }
+  }, []);
+
+  // ---- command palette ----
+  const paletteActions = React.useMemo(() => {
+    const out = [];
+    turns.slice(0, 12).forEach(t => out.push({
+      id: `turn-${t.id}`, group: 'turn', label: `#${t.id} ${t.input || '(no input)'}`,
+      hint: t.status, run: () => selectTurn(t.id),
+    }));
+    (config && config.modes || []).forEach(m => out.push({
+      id: `mode-${m}`, group: 'mode', label: `Switch mode to ${m}`,
+      run: () => saveConfig({ mode: m }),
+    }));
+    (config && config.tiers || []).forEach(t => out.push({
+      id: `tier-${t}`, group: 'auto', label: `Set autonomy to ${t}`,
+      run: () => saveConfig({ auto_tier: t }),
+    }));
+    if (config && config.toggles) {
+      Object.keys(config.toggles).forEach(key => out.push({
+        id: `toggle-${key}`, group: 'toggle',
+        label: `${config.toggles[key] ? 'Disable' : 'Enable'} ${key.replace(/_/g, ' ')}`,
+        run: () => saveConfig({ toggles: { [key]: !config.toggles[key] } }),
+      }));
+    }
+    out.push({ id: 'logs', group: 'view', label: showLogs ? 'Hide live logs' : 'Show live logs', hint: 'L', run: () => setShowLogs(v => !v) });
+    out.push({ id: 'control', group: 'view', label: 'Show control rail', run: () => { setRightTab('control'); setMobilePane('control'); } });
+    out.push({ id: 'inspect', group: 'view', label: 'Show inspector', run: () => { setRightTab('inspect'); setMobilePane('inspect'); } });
+    MANAGE_TABS.forEach(t => out.push({ id: `manage-${t.id}`, group: 'manage', label: `Open ${t.label}`, run: () => openManage(t.id) }));
+    out.push({
+      id: 'export-turn', group: 'export', label: 'Export this turn as JSON',
+      run: () => detail ? downloadJson(`koda-turn-${detail.id}.json`, detail) : pushToast('No turn selected', 'error'),
+    });
+    out.push({
+      id: 'export-all', group: 'export', label: 'Export all turn summaries',
+      run: () => downloadJson('koda-trace.json', turns),
+    });
+    out.push({
+      id: 'clear-trace', group: 'trace', label: 'Clear the trace ring',
+      run: async () => {
+        try { await fetch('/api/trace', { method: 'DELETE' }); setSelectedId(null); setDetail(null); pushToast('Trace cleared', 'success'); }
+        catch (e) { pushToast(String(e), 'error'); }
+      },
+    });
+    return out;
+  }, [turns, config, showLogs, detail, openManage, pushToast]);
 
   React.useEffect(() => {
-    const handler = event => {
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
-      const target = WORKSPACE_TABS.find(item => item.key === event.key);
-      if (target) setTab(target.id);
+    const handler = (e) => {
+      const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault(); setPaletteOpen(v => !v); return;
+      }
+      if (typing) return;
+      if (e.key === 'l' || e.key === 'L') { setShowLogs(v => !v); }
+      if (e.key === 'Escape') { setManage(null); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
-  const active = WORKSPACE_TABS.find(item => item.id === tab) || WORKSPACE_TABS[0];
-  const refreshCurrent = () => {
-    if (tab === 'debug') loadDebug();
-    if (tab === 'graph') loadGraph();
-    if (tab === 'skills') loadSkills();
-    if (tab === 'system') loadSettings();
-  };
+  const liveBadge = live ? `#${live.id} running` : 'idle';
+  const modeChip = config ? config.mode : '';
+  const modelChip = config ? config.model : '';
 
   return (
-    <div className="flex h-screen overflow-hidden bg-canvas text-ink">
-      <aside className="app-sidebar fixed z-40 bottom-0 inset-x-0 h-16 border-t md:static md:w-[236px] md:h-full md:border-t-0 md:border-r flex md:flex-col shrink-0">
-        <div className="hidden md:flex items-center gap-3 h-[76px] px-4 border-b border-line">
-          <div className="w-9 h-9 rounded-[10px] bg-indigo-500 flex items-center justify-center shadow-lg shadow-indigo-950/30">
-            <span className="text-white font-semibold text-[15px] tracking-tight">K</span>
-          </div>
-          <div className="min-w-0">
-            <div className="text-[14px] font-semibold tracking-tight text-zinc-100">koda</div>
-            <div className="text-[11px] text-subtle">observability workspace</div>
-          </div>
-        </div>
-
-        <nav className="flex flex-1 md:flex-none md:block items-stretch justify-around md:px-2.5 md:py-3 md:space-y-1" role="tablist" aria-label="Workspace sections">
-          {WORKSPACE_TABS.map(item => (
-            <button key={item.id} id={`tab-${item.id}`} type="button"
-              role="tab" aria-selected={tab === item.id} aria-controls="workspace-panel"
-              aria-label={item.label} data-active={tab === item.id}
-              onClick={() => setTab(item.id)}
-              className="nav-item group relative flex flex-col md:flex-row items-center justify-center md:justify-start gap-1 md:gap-2.5 flex-1 md:w-full md:h-10 px-1 md:px-2.5 rounded-none md:rounded-lg text-[10px] md:text-[13px] font-medium transition-colors">
-              <svg className="w-[18px] h-[18px] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d={item.icon} />
-              </svg>
-              <span className="md:hidden">{item.short}</span>
-              <span className="hidden md:inline truncate">{item.label}</span>
-              <kbd className="nav-key hidden md:inline-flex ml-auto min-w-[21px] h-5 px-1 items-center justify-center rounded text-[10px] font-mono">{item.key}</kbd>
-            </button>
-          ))}
-        </nav>
-
-        <div className="hidden md:block mt-auto p-3">
-          <div className="rounded-xl border border-line bg-surface p-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className={`w-2 h-2 shrink-0 rounded-full ${connected ? 'bg-emerald-400 status-dot' : 'bg-rose-400'}`} />
-                <span className="text-[12px] font-medium text-zinc-300">{connected ? 'Runtime live' : 'Reconnecting'}</span>
-              </div>
-              <span className="text-[10px] text-subtle font-mono tabular-nums">v{version}</span>
-            </div>
-            <div className="mt-2 text-[11px] leading-4 text-subtle">
-              {connected ? `${logs.length} events in this view` : 'Waiting for the local koda server'}
-            </div>
+    <div className="flex flex-col h-screen overflow-hidden bg-canvas text-ink">
+      <header className="topbar shrink-0 min-h-[58px] border-b px-3 md:px-4 flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center text-white text-[13px] font-semibold shrink-0">K</div>
+        <div className="min-w-0">
+          <div className="text-[14px] font-semibold tracking-tight text-zinc-100">koda · control center</div>
+          <div className="hidden sm:flex items-center gap-2 text-[11px] text-subtle font-mono">
+            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+            <span>{connected ? 'runtime live' : 'reconnecting'}</span>
+            <span aria-hidden="true">·</span>
+            <span className={live ? 'text-indigo-300' : ''}>{liveBadge}</span>
+            {modeChip && <><span aria-hidden="true">·</span><span className="uppercase">{modeChip}</span></>}
+            {modelChip && <><span aria-hidden="true">·</span><span className="truncate max-w-[180px]">{modelChip}</span></>}
           </div>
         </div>
-      </aside>
 
-      <section className="min-w-0 flex-1 flex flex-col pb-16 md:pb-0">
-        <header className="topbar shrink-0 min-h-[76px] border-b px-4 md:px-6 flex items-center gap-4">
-          <div className="md:hidden w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center text-white text-sm font-semibold">K</div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <div className="text-[15px] md:text-[16px] leading-5 font-semibold tracking-tight text-zinc-100 truncate">{active.label}</div>
-              {tab === 'logs' && (
-                <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/[0.08] px-2 py-0.5 text-[10px] font-medium text-emerald-300">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />live tail
-                </span>
-              )}
-            </div>
-            <p className="hidden sm:block mt-0.5 max-w-2xl text-[12px] leading-4 text-subtle truncate">{active.description}</p>
-          </div>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button type="button" onClick={() => setPaletteOpen(true)}
+            className="control inline-flex items-center gap-2 px-2.5 text-[12px]" title="Command palette">
+            <span className="hidden sm:inline">Commands</span>
+            <kbd className="nav-key inline-flex h-5 px-1.5 items-center rounded text-[10px] font-mono">⌘K</kbd>
+          </button>
+          <button type="button" onClick={() => setShowLogs(v => !v)} aria-pressed={showLogs}
+            className="control px-2.5 text-[12px]" title="Toggle live logs (L)">Logs</button>
+          <button type="button" onClick={() => openManage('graph')}
+            className="control px-2.5 text-[12px]" title="Graph, skills, prompt, raw captures">Manage</button>
+        </div>
+      </header>
 
-          <div className="ml-auto flex items-center gap-2">
-            <div className="md:hidden flex items-center gap-1.5 px-2 text-[11px] text-muted">
-              <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-              <span className="hidden sm:inline">{connected ? 'Live' : 'Offline'}</span>
-            </div>
-            {tab !== 'logs' && (
-              <button type="button" onClick={refreshCurrent}
-                className="control inline-flex items-center gap-2 px-3 text-[12px] font-medium"
-                aria-label="Refresh data" title="Refresh this view">
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M20 11a8.1 8.1 0 00-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0015.5 2M20 20v-5h-5" />
-                </svg>
-                <span className="hidden sm:inline">Refresh</span>
+      {traceError && (
+        <div className="shrink-0 px-4 py-2 border-b border-rose-500/25 bg-rose-500/[0.08] text-[12px] text-rose-200">
+          {traceError}
+        </div>
+      )}
+
+      {/* Mobile pane switcher: one region at a time, no horizontal scrolling. */}
+      <div className="md:hidden shrink-0 flex border-b border-line" role="tablist" aria-label="Panes">
+        {[['turns', 'Turns'], ['trace', 'Trace'], ['inspect', 'Inspect'], ['control', 'Control']].map(([id, label]) => (
+          <button key={id} type="button" role="tab" aria-selected={mobilePane === id}
+            onClick={() => { setMobilePane(id); if (id === 'inspect' || id === 'control') setRightTab(id); }}
+            className={`flex-1 py-2 text-[12px] font-medium ${mobilePane === id ? 'text-indigo-200 bg-accent-soft' : 'text-muted'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <main className="flex-1 min-h-0 flex overflow-hidden">
+        <aside className={`${mobilePane === 'turns' ? 'flex' : 'hidden'} md:flex flex-col w-full md:w-[268px] shrink-0 border-r border-line min-h-0`}>
+          <TraceRail turns={turns} selectedId={selectedId} onSelect={selectTurn} loading={!trace} />
+        </aside>
+
+        <section className={`${mobilePane === 'trace' ? 'flex' : 'hidden'} md:flex flex-col flex-1 min-w-0 min-h-0`}>
+          <TraceWaterfall turn={detail} selectedSeq={selectedSeq}
+            onSelect={seq => { setSelectedSeq(seq); setRightTab('inspect'); setMobilePane('inspect'); }} />
+        </section>
+
+        <aside className={`${(mobilePane === 'inspect' || mobilePane === 'control') ? 'flex' : 'hidden'} md:flex flex-col w-full md:w-[380px] shrink-0 border-l border-line min-h-0`}>
+          <div className="hidden md:flex shrink-0 border-b border-line" role="tablist" aria-label="Right pane">
+            {[['inspect', 'Inspector'], ['control', 'Control']].map(([id, label]) => (
+              <button key={id} type="button" role="tab" aria-selected={rightTab === id}
+                onClick={() => { setRightTab(id); setMobilePane(id); }}
+                className={`flex-1 py-2 text-[12px] font-medium ${rightTab === id ? 'text-indigo-200 bg-accent-soft' : 'text-muted hover:text-ink'}`}>
+                {label}
               </button>
+            ))}
+          </div>
+          <div className="flex-1 min-h-0">
+            {rightTab === 'control' ? (
+              <ControlRail config={config} memory={memory} learning={learning} sessions={sessions}
+                onSaveConfig={saveConfig} onMemory={sendMemory} onLearning={sendLearning}
+                onSession={sendSession} busy={busy} />
+            ) : (
+              <TraceInspector turn={detail} step={step} prevModelStep={prevModelStep} />
             )}
           </div>
-        </header>
+        </aside>
+      </main>
 
-        <main id="workspace-panel" className="relative flex-1 min-h-0 overflow-hidden" role="tabpanel" aria-labelledby={`tab-${tab}`}>
-          <div className={tab === 'logs' ? 'h-full' : 'hidden'}>
-            <LiveLogs logs={logs} version={version} connected={connected} />
+      {showLogs && (
+        <div className="shrink-0 h-[38vh] border-t border-line flex flex-col min-h-0">
+          <div className="shrink-0 px-3 py-1.5 flex items-center gap-2 border-b border-line">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">Live logs</span>
+            <span className="text-[10px] text-subtle font-mono">v{logVersion}</span>
+            <button type="button" onClick={() => setShowLogs(false)}
+              className="ml-auto text-[11px] text-muted hover:text-ink" aria-label="Hide logs">close</button>
           </div>
-          {tab === 'debug' && <LlmDebug debug={debug} loading={debugLoading} error={debugError} />}
-          {tab === 'graph' && <CodeGraph graph={graph} loading={graphLoading} error={graphError} />}
-          {tab === 'skills' && <AgentsSkills skills={skills} loading={skillsLoading} error={skillsError} onRefresh={loadSkills} pushToast={pushToast} />}
-          {tab === 'system' && <SystemPrompt data={settings} loading={settingsLoading} error={settingsError} onRefresh={loadSettings} pushToast={pushToast} />}
-        </main>
-      </section>
+          <div className="flex-1 min-h-0">
+            <LiveLogs logs={logs} version={logVersion} connected={connected} />
+          </div>
+        </div>
+      )}
 
-      <div className="fixed z-50 bottom-20 md:bottom-5 right-4 md:right-5 flex flex-col gap-2 items-end pointer-events-none" aria-live="polite">
-        {toasts.map(toast => (
-          <div key={toast.id} role={toast.kind === 'error' ? 'alert' : 'status'}
+      {manage && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center p-3 md:p-8 bg-black/60"
+          role="dialog" aria-modal="true" aria-label="Manage" onClick={() => setManage(null)}>
+          <div className="w-full max-w-5xl h-full max-h-[86vh] rounded-xl border border-line-strong bg-canvas shadow-popover flex flex-col overflow-hidden"
+            onClick={e => e.stopPropagation()}>
+            <div className="shrink-0 flex items-center gap-1 px-3 py-2 border-b border-line" role="tablist" aria-label="Manage sections">
+              {MANAGE_TABS.map(t => (
+                <button key={t.id} type="button" role="tab" aria-selected={manage === t.id}
+                  onClick={() => openManage(t.id)}
+                  className={`px-2.5 py-1.5 rounded-md text-[12px] font-medium ${manage === t.id ? 'bg-accent-soft text-indigo-200' : 'text-muted hover:text-ink hover:bg-white/[0.04]'}`}>
+                  {t.label}
+                </button>
+              ))}
+              <button type="button" onClick={() => setManage(null)}
+                className="ml-auto control px-2.5 text-[12px]" aria-label="Close manage">Close</button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} />}
+              {manage === 'skills' && <AgentsSkills skills={skills} loading={skillsState.loading} error={skillsState.error} onRefresh={reloadSkills} pushToast={pushToast} />}
+              {manage === 'prompt' && <SystemPrompt data={settings} loading={settingsState.loading} error={settingsState.error} onRefresh={reloadSettings} pushToast={pushToast} />}
+              {manage === 'debug' && <LlmDebug debug={debugData} loading={debugState.loading} error={debugState.error} />}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} actions={paletteActions} />
+
+      <div className="fixed z-50 bottom-4 right-4 flex flex-col gap-2 items-end pointer-events-none" aria-live="polite">
+        {toasts.map(t => (
+          <div key={t.id} role={t.kind === 'error' ? 'alert' : 'status'}
             className={`pointer-events-auto max-w-sm px-3.5 py-2.5 rounded-lg shadow-popover border text-[12px] font-medium animate-toast-in ${
-              toast.kind === 'success' ? 'bg-[#102019] border-emerald-500/30 text-emerald-200' :
-              toast.kind === 'error' ? 'bg-[#241216] border-rose-500/30 text-rose-200' :
-              'bg-overlay border-line-strong text-zinc-200'
-            }`}>
-            {toast.message}
+              t.kind === 'success' ? 'bg-[#102019] border-emerald-500/30 text-emerald-200' :
+              t.kind === 'error' ? 'bg-[#241216] border-rose-500/30 text-rose-200' :
+              'bg-overlay border-line-strong text-zinc-200'}`}>
+            {t.message}
           </div>
         ))}
       </div>

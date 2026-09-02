@@ -1174,6 +1174,13 @@ impl App {
     /// so a change is visible immediately rather than only after close.
     fn apply_settings(&mut self) {
         let Some(cfg) = self.settings.as_ref().map(|s| s.cfg.clone()) else { return };
+        self.adopt_config(cfg);
+    }
+
+    /// Adopt an edited config into the live app and agent. Shared by the
+    /// settings overlay and the web control rail, so both routes behave
+    /// identically.
+    fn adopt_config(&mut self, cfg: crate::config::Config) {
         // Theme.
         if cfg.theme != self.cfg.theme {
             let th = theme::resolve(&cfg.theme);
@@ -1189,6 +1196,14 @@ impl App {
         // Mode + autonomy: mirror into app state and tell the agent.
         if cfg.mode != self.mode {
             self.set_mode(cfg.mode);
+        }
+        // Model / endpoint: the agent holds its own copies, so they need telling.
+        if cfg.model != self.cfg.model {
+            self.model = cfg.model.clone();
+            self.send(Command::SetModel(cfg.model.clone()));
+        }
+        if cfg.base_url != self.cfg.base_url {
+            self.send(Command::SetEndpoint(cfg.endpoint()));
         }
         if cfg.auto_tier != self.auto_tier {
             self.auto_tier = cfg.auto_tier;
@@ -1209,6 +1224,50 @@ impl App {
             self.send(Command::UpdateConfig(Box::new(cfg.clone())));
         }
         self.cfg = cfg;
+    }
+
+    /// Apply everything the web control center has asked for since the last
+    /// poll. The browser can only queue requests; this is where they become real
+    /// changes, on the same thread as every other state change, so there is one
+    /// path into the live session rather than two.
+    fn drain_web_control(&mut self) -> bool {
+        if !crate::webui::has_control() {
+            return false;
+        }
+        let mut changed = false;
+        for c in crate::webui::take_control() {
+            changed = true;
+            match c {
+                crate::webui::Control::Config(cfg) => {
+                    self.adopt_config(*cfg);
+                    self.note("web: settings applied");
+                }
+                crate::webui::Control::Learn(action) => {
+                    self.send(Command::Learn(action));
+                }
+                crate::webui::Control::Remember(note) => {
+                    self.send(Command::RememberNote(note));
+                }
+                crate::webui::Control::Forget(needle) => {
+                    self.send(Command::ForgetNote(needle));
+                }
+                crate::webui::Control::Resume(path) => {
+                    // Rebuild the visible transcript from the file, exactly as
+                    // the session picker does, so the UI matches the agent.
+                    match crate::session::read(&path) {
+                        Ok((header, messages)) => {
+                            self.transcript.restore(&messages);
+                            self.scroll = 0;
+                            self.follow = true;
+                            self.send(Command::Resume(path));
+                            self.note(format!("web: resumed session {}", header.id));
+                        }
+                        Err(e) => self.transcript.error(format!("could not read that session: {e}")),
+                    }
+                }
+            }
+        }
+        changed
     }
 
     /// Returns true when the key belonged to the log overlay.
@@ -3436,6 +3495,13 @@ pub async fn run(
     ));
     watch_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // The web control center queues requests from the browser; drain them here
+    // so they are applied on the UI thread like any other change. Only armed
+    // when the web UI is actually serving.
+    let mut web_tick = tokio::time::interval(std::time::Duration::from_millis(400));
+    web_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let web_ui = cfg.web_ui;
+
     let result = loop {
         if dirty {
             // One atomic presentation per frame: without this the terminal can
@@ -3493,6 +3559,17 @@ pub async fn run(
                     app.files_ready = indexed;
                     dirty = true;
                 }
+            }
+            _ = web_tick.tick(), if web_ui => {
+                // Tell the browser what this session is actually using, then
+                // apply anything it asked for.
+                crate::webui::publish_runtime(
+                    &app.model,
+                    &app.cfg.endpoint(),
+                    &app.mode.to_string(),
+                    &app.auto_tier.to_string(),
+                );
+                dirty |= app.drain_web_control();
             }
             _ = watch_tick.tick() => {
                 // Apply any /watch @file additions or /unwatch clears queued by

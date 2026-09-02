@@ -393,21 +393,27 @@ oh-my-pi's request-debug. Files land in `~/.local/state/koda/debug/` as
 `rr-session-N.json` (the request) and `rr-session-N.res.log` (the raw SSE),
 which is enough to reproduce a bad turn. `/debug` prints where they are.
 
-## Web UI
+## Web control center
 
-An optional local web UI for live observability and debugging, served on
-`127.0.0.1` (localhost only). Open the URL koda prints at startup to get, in a
-modern React interface:
+An optional local page — served on `127.0.0.1` only — that traces every turn end
+to end and drives the running session. Open the URL koda prints at startup.
 
-- **Live logs** — auto-tailing, filterable by level and area, with a
-  simple/medium/high detail control (`ui_detail`).
-- **LLM debug** — for each captured turn, our request (model, messages, tools)
-  and the reconstructed response: assistant text, reasoning, and the tools it
-  called with their arguments.
-- **Code graph** — the project's symbol graph as an interactive force-directed
-  diagram (zoom, pan, search, hover for a symbol's file and reference count).
-- **Agents & skills** — browse, create and edit skills and role agents from the
-  browser.
+- **Turn rail** — every turn, newest first, with status, duration, step and token
+  counts. The running turn is followed live.
+- **Trace waterfall** — that turn's steps in order with duration bars: model
+  calls, tool calls and compactions, with retries, failures and denied approvals
+  marked inline.
+- **Inspector** — the payloads behind a step: the exact request body sent, the raw
+  SSE stream received, the model's reasoning, and a tool's arguments, result and
+  diff. **Prompt Δ** diffs the prompt against the previous model call, so what
+  compaction dropped (or a learned rule added) is visible rather than silent.
+- **Control rail** — model, endpoint, mode, autonomy tier, reasoning effort, max
+  steps, feature toggles, project memory, learned-rule candidates, and saved
+  sessions (resume/fork). Edits apply to the *running* koda, not just to disk.
+- **Logs drawer** (`L`) and a **Manage** panel for the code graph, skills and role
+  agents, the system prompt, and raw request/response captures.
+- **`⌘K`** command palette: jump to a turn, switch model or mode, toggle a
+  feature, export a trace, or `@symbol` + `Shift+Enter` to query the code graph.
 
 ### How to run it
 
@@ -422,20 +428,18 @@ modern React interface:
 
    The settings toggle is remembered; koda starts the server on the next launch.
 
-2. **See the LLM debug data.** The LLM debug tab needs capture on, so also enable
-   debug — `/debug` in koda, `debug = true`, or launch with `KODA_DEBUG=1`. Logs
-   and the code graph work without it.
-
-3. **Start koda.** On launch it prints the address:
+2. **Start koda.** On launch it prints the address:
 
    ```
    koda: web UI at http://127.0.0.1:7717
    ```
 
-4. **Open that URL** in your browser. The four tabs — Live Logs, LLM Debug, Code
-   Graph, Agents & Skills — update live while you work in the terminal. Run koda
-   from the repo root so it serves the full React app from `web-ui/dist/`; from
-   anywhere else it serves a built-in fallback log viewer with the same data.
+3. **Open that URL.** Turn tracing is on whenever the web UI is (`KODA_TRACE=1`
+   forces it on otherwise). The last 50 turns are kept in memory with truncated
+   payloads, so a long session stays bounded.
+
+Raw request/response *files* are separate: enable `/debug` (or `debug = true`,
+`KODA_DEBUG=1`) for the Manage panel's Raw Captures. The trace does not need it.
 
 The server has no extra dependencies (it is built on the async runtime koda
 already uses) and binds to localhost only, so nothing is exposed off your

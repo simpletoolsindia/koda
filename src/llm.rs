@@ -232,7 +232,9 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    fn to_json(&self) -> Value {
+    /// The exact wire body. `pub(crate)` so the trace can record what was sent,
+    /// byte for byte, rather than a reconstruction of it.
+    pub(crate) fn to_json(&self) -> Value {
         // Expand any image-bearing user message into OpenAI's multimodal
         // `content` array (text part + image_url parts). Messages without images
         // serialize exactly as before, so this is invisible to text-only models.
@@ -476,12 +478,26 @@ impl Client {
         tx: &UnboundedSender<StreamEvent>,
         attempts: u32,
     ) -> Result<()> {
+        self.stream_traced(req, tx, attempts, None).await
+    }
+
+    /// As `stream_with_retry`, but mirroring the raw response bytes and the
+    /// retry count into an open trace step so the web UI can show exactly what
+    /// came back off the wire.
+    pub async fn stream_traced(
+        &self,
+        req: &ChatRequest,
+        tx: &UnboundedSender<StreamEvent>,
+        attempts: u32,
+        trace: Option<crate::trace::StepRef>,
+    ) -> Result<()> {
         let attempts = attempts.max(1);
         let mut last: Option<anyhow::Error> = None;
 
         for attempt in 0..attempts {
             if attempt > 0 {
                 let wait = backoff(attempt - 1);
+                crate::trace::set_retries(trace, attempt);
                 tel_warn!(
                     "http",
                     "retrying request",
@@ -509,7 +525,7 @@ impl Client {
                 })
             };
             let started = std::time::Instant::now();
-            let result = self.stream_once(req, &probe_tx).await;
+            let result = self.stream_once(req, &probe_tx, trace).await;
             drop(probe_tx);
             let _ = forwarder.await;
             let emitted = counter.load(Ordering::Relaxed);
@@ -582,7 +598,12 @@ impl Client {
         }))
     }
 
-    async fn stream_once(&self, req: &ChatRequest, tx: &UnboundedSender<StreamEvent>) -> Result<()> {
+    async fn stream_once(
+        &self,
+        req: &ChatRequest,
+        tx: &UnboundedSender<StreamEvent>,
+        trace: Option<crate::trace::StepRef>,
+    ) -> Result<()> {
         let body = req.to_json();
         // Developer debug: record the exact request body and, below, the raw
         // response bytes. `None` (and zero cost) unless debug mode is on.
@@ -597,9 +618,11 @@ impl Client {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            let framed = format!("HTTP {status}\n{body}");
             if let Some(cap) = &capture {
-                cap.write_chunk(format!("HTTP {status}\n{body}").as_bytes());
+                cap.write_chunk(framed.as_bytes());
             }
+            crate::trace::append_sse(trace, framed.as_bytes());
             return Err(classify_status(status, &body, &req.model).into());
         }
 
@@ -625,6 +648,7 @@ impl Client {
             if let Some(cap) = &capture {
                 cap.write_chunk(&bytes);
             }
+            crate::trace::append_sse(trace, &bytes);
             buf.push_str(&String::from_utf8_lossy(&bytes));
 
             // SSE frames are newline-delimited; process complete lines only.

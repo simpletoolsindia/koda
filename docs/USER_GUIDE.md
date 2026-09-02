@@ -307,16 +307,43 @@ acts when it is idle — no turn running, nothing queued, no prompt open.
 `/debug` toggles raw request/response capture (also `debug = true` or launching
 with `KODA_DEBUG=1`). While on, koda writes each turn's exact request body and
 raw streamed response to `~/.local/state/koda/debug/rr-session-N.json` and
-`rr-session-N.res.log`. `/debug` prints the directory. This is what the web UI's
-LLM Debug tab reads.
+`rr-session-N.res.log`. `/debug` prints the directory. This is what the web
+control center's **Raw Captures** panel reads. (The turn trace below does not
+need it — tracing is always on when the web UI is.)
 
-## Web UI (live logs, LLM debug, code graph, agents)
+## Web control center (trace + control)
 
-koda can serve a local React web UI on `127.0.0.1` for live observability. It has
-four tabs: **Live Logs**, **LLM Debug** (our request + the model's response,
-reasoning and tool calls), **Code Graph** (an interactive force-directed diagram
-of the project's symbols), and **Agents & Skills** (browse and edit skills/role
-agents).
+koda can serve a local React page on `127.0.0.1` that traces every turn end to
+end and lets you drive the running session from the browser. One page, three
+regions:
+
+- **Turn rail (left)** — every turn, newest first, with status, duration, step
+  and token counts. The turn that is running is followed automatically.
+- **Trace waterfall (centre)** — that turn's steps in order, as a timeline with
+  duration bars: each model call, each tool call, and each compaction. Retries,
+  failures and denied approvals are called out inline. A live turn streams new
+  steps in as they happen.
+- **Inspector + control rail (right)** — two tabs. *Inspector* shows the payloads
+  behind the selected step: the exact request body koda sent, the raw SSE stream
+  that came back, the model's reasoning, and, for a tool, its arguments, result
+  and applied diff. It also shows a **Prompt Δ** — a diff against the previous
+  model call, which is how you see exactly what compaction dropped or what a
+  newly learned rule added. *Control* is the live session: model, endpoint, mode,
+  autonomy tier, reasoning effort, max steps, feature toggles, project memory,
+  learned-rule candidates (accept/reject), and saved sessions (resume/fork).
+
+Two more surfaces sit alongside it: a **Logs** drawer (the live event log, press
+`L`) and a **Manage** panel with the code graph, skills/role-agent editor, system
+prompt editor and raw captures.
+
+`⌘K` / `Ctrl+K` opens a command palette: jump to a turn, switch model or mode,
+toggle a feature, export a trace, or type `@name` and press `Shift+Enter` to look
+a symbol up in the code graph.
+
+Changes made in the browser are applied to the *running* koda, not just written
+to disk: the control rail queues a request, the TUI picks it up within a fraction
+of a second, and the terminal shows the same notice it would for `/mode`,
+`/remember` or `/learn`.
 
 To run it:
 
@@ -325,17 +352,17 @@ To run it:
    ```toml
    web_ui = true
    web_ui_port = 7717     # optional, the default
-   ui_detail = "medium"   # simple | medium | high — how much the log tab shows
+   ui_detail = "medium"   # simple | medium | high — how much the log drawer shows
    ```
 
-2. For the LLM Debug tab, also enable capture: `/debug`, `debug = true`, or
-   `KODA_DEBUG=1`. (Logs and the code graph work without it.)
+2. Start koda. It prints the address, e.g. `koda: web UI at http://127.0.0.1:7717`.
 
-3. Start koda. It prints the address, e.g. `koda: web UI at http://127.0.0.1:7717`.
+3. Open that URL. The server binds to localhost only. Tracing keeps the last 50
+   turns in memory with truncated payloads, so a long session stays bounded; the
+   palette's *Clear the trace ring* drops them.
 
-4. Open that URL. Run koda from the repo root to serve the full React app from
-   `web-ui/dist/`; from elsewhere koda serves a built-in fallback log viewer that
-   uses the same API. The server binds to localhost only.
+`KODA_TRACE=1` forces tracing on even without the web UI (useful when you want
+the ring populated for a later look).
 
 ---
 

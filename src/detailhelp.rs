@@ -23,7 +23,7 @@ const FEATURES: &[(&str, &str)] = &[
     ("Vision", "Attach an image with @screenshot.png for a vision-capable model."),
     ("Watch mode", "Aider-style: end a comment with AI! to implement it, or AI? to ask. koda acts when idle. Toggle with /watch."),
     ("Debug capture", "/debug records the exact request and raw response of each turn to ~/.local/state/koda/debug for inspection."),
-    ("Web UI", "A live browser dashboard: logs, an LLM request/response/reasoning/tools inspector, an interactive code graph, and a skills editor. Enable in /settings."),
+    ("Web UI", "A live browser control center: every turn traced end to end (model calls, tool calls, compaction) with the exact request, raw response and reasoning behind each step — plus live control of model, mode, autonomy, toggles, memory, learned rules and sessions. Enable in /settings."),
     ("Custom tools", "Add your own shell-backed tools in config with [[tools]] — the agent calls them like built-ins."),
     ("System prompt", "Override the built-in prompt (and per-tool prompts) right in /settings."),
     ("Themes", "neon, tokyo-night, dracula, gruvbox, nord and more — switch live with /theme."),
