@@ -85,6 +85,10 @@ impl Field {
 
 pub struct Setup {
     pub focus: Field,
+    /// True when the page was opened to add a provider rather than edit the
+    /// current settings. Only changes what the page says, so an empty name is
+    /// still just "edit the top-level settings".
+    pub adding: bool,
     name: Editor,
     url: Editor,
     model: Editor,
@@ -101,6 +105,7 @@ impl Setup {
     pub fn new(cfg: &Config) -> Self {
         let mut s = Self {
             focus: Field::Name,
+            adding: false,
             name: Editor::default(),
             url: Editor::default(),
             model: Editor::default(),
@@ -114,6 +119,23 @@ impl Setup {
         s.model.insert(&cfg.model);
         s.key.insert(&cfg.api_key);
         s.vision.insert(normalize_vision(&cfg.vision));
+        s
+    }
+
+    /// The same page, opened to add a *new* provider rather than edit the one
+    /// in use.
+    ///
+    /// The difference is only the name: `new` seeds it from the active
+    /// provider, so saving updates that provider — which meant there was no way
+    /// to add a second one from the UI at all. The endpoint and key are still
+    /// carried over, because a second provider is usually a near neighbour of
+    /// the first and retyping a URL and a key to change a model is a poor way
+    /// to spend somebody's attention.
+    pub fn new_provider(cfg: &Config) -> Self {
+        let mut s = Self::new(cfg);
+        s.name = Editor::default();
+        s.focus = Field::Name;
+        s.adding = true;
         s
     }
 
@@ -298,10 +320,17 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
     // for the value text is a little narrower than the inner width.
     let field_w = inner_w.saturating_sub(3).max(1);
 
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        " Point koda at a model server.",
-        t.dim(),
-    ))];
+    // Say which of the two jobs this page is doing. Without it an "add" and an
+    // "edit" look identical, and the only difference — whether the name field
+    // was pre-filled — is exactly what someone would not notice.
+    let heading = if s.adding {
+        " Add a provider. Give it a name to save it alongside the others."
+    } else if s.name.buf.trim().is_empty() {
+        " Point koda at a model server. Name it to save it as a provider."
+    } else {
+        " Editing this provider. Change the name to save it as a new one."
+    };
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(heading, t.dim()))];
 
     // Where to place the real terminal caret for the focused field, filled in
     // as we lay out its value line below.
@@ -420,6 +449,55 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported gap: /setup could only ever configure one provider. `new`
+    /// seeds the name from the active provider, so saving updated *that* one --
+    /// there was no path from the UI to a second.
+    #[test]
+    fn adding_a_provider_starts_from_a_blank_name() {
+        let mut cfg = Config {
+            base_url: "http://localhost:20128/v1".into(),
+            api_key: "sk-shared".into(),
+            ..Config::default()
+        };
+        cfg.upsert_provider(crate::config::Provider {
+            name: "omniroute".into(),
+            base_url: "http://localhost:20128/v1".into(),
+            api_key: "sk-shared".into(),
+            model: "auto".into(),
+            vision: String::new(),
+        });
+
+        // Editing pre-fills the name, so saving updates that provider.
+        let edit = Setup::new(&cfg);
+        assert_eq!(edit.value(Field::Name), "omniroute");
+        assert!(!edit.adding);
+
+        // Adding starts blank, so a new name makes a new entry -- while the
+        // endpoint and key carry over, since a second provider is usually a
+        // near neighbour of the first.
+        let mut add = Setup::new_provider(&cfg);
+        assert_eq!(add.value(Field::Name), "", "the name is cleared");
+        assert!(add.adding);
+        assert_eq!(
+            add.value(Field::Url),
+            "http://localhost:20128/v1",
+            "url carried over"
+        );
+        assert_eq!(add.value(Field::Key), "sk-shared", "key carried over");
+        assert_eq!(add.focus, Field::Name, "and the caret starts there");
+
+        // Name it and save: two providers, the new one selected.
+        add.focused().insert("ollama");
+        let mut out = cfg.clone();
+        add.apply(&mut out);
+        assert_eq!(out.providers.len(), 2, "added rather than overwrote");
+        assert_eq!(out.active_provider, "ollama");
+        assert!(
+            out.providers.iter().any(|p| p.name == "omniroute"),
+            "the first survives"
+        );
+    }
 
     /// The name lands in a TOML key, in `/provider <name>`, and in the status
     /// bar, so it cannot carry whitespace or separators into any of them.
