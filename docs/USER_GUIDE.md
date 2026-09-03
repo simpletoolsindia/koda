@@ -223,6 +223,33 @@ next message is treated as the answer, not a new turn.
 
 ---
 
+## Watching files for `AI!` comments
+
+`/watch` scans for comments ending in a trigger and acts on them when koda is
+idle — the same idea as aider's watch mode.
+
+| | |
+| --- | --- |
+| `/watch` | Watch the whole workspace. |
+| `/watch calc.py` | Watch just those files (`@` prefix optional). |
+| `/unwatch` | Stop, and clear the watched list. |
+
+```python
+def main():
+    pass
+
+# implement sum of digits AI!
+```
+
+Save the file and koda picks it up: `AI!` means *do this*, `AI?` means *answer
+this*. The trigger has to end the line, and koda acts only when it is idle and
+nothing is waiting on you, so triggers never interrupt a running turn or an
+approval prompt.
+
+**`AI!` needs execute mode.** Plan mode cannot edit files, so an `AI!` trigger
+there comes back as a plan rather than code. koda says so when it happens.
+Press `ctrl+p`, or set `mode = "execute"` in your config.
+
 ## Multiple providers
 
 koda can hold several named endpoints and switch between them in a word. A

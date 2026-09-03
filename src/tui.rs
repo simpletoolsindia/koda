@@ -4700,6 +4700,17 @@ pub async fn run(
                         let rel = t.path.strip_prefix(&app.root).unwrap_or(&t.path).display();
                         let tok = match t.kind { crate::watch::Kind::Do => "AI!", _ => "AI?" };
                         app.note(format!("watch: {tok} in {rel}:{} → {}", t.line, t.instruction));
+                        // `AI!` means "do this", and plan mode cannot. The turn
+                        // still runs and produces a plan, but say why that is
+                        // what came back: a plan when you asked for code, with
+                        // nothing explaining the gap, reads as watch being
+                        // broken rather than as the mode it is.
+                        if matches!(t.kind, crate::watch::Kind::Do) && app.mode.read_only() {
+                            app.note(
+                                "…but plan mode cannot edit files — press ctrl+p for execute \
+                                 mode, or use AI? to ask a question instead",
+                            );
+                        }
                         app.transcript.user(text.clone());
                         app.send(Command::User(text));
                         dirty = true;
