@@ -268,6 +268,43 @@ can name just a model and inherit the rest. Note that TOML binds a bare key to
 whatever table precedes it: keep `active_provider` and the other top-level
 settings **above** the first `[[provider]]` block. koda writes them that way.
 
+## Internal servers with a private CA
+
+An endpoint behind a corporate proxy that re-signs TLS with a CA your machine
+does not trust will fail to connect. The right fix is installing that CA. When
+you cannot, `insecure_tls` accepts the certificate anyway:
+
+```toml
+insecure_tls = true          # global
+
+[[provider]]
+name = "internal"
+base_url = "https://llm.internal.corp/v1"
+insecure_tls = true          # or just this one endpoint
+```
+
+It is also the **tls** field on `/setup`, toggled with `←`/`→`.
+
+This turns off the check that the server is who it claims to be, so anything
+able to sit in the path can read and alter the traffic — your API key and your
+source included. koda prints a warning at startup whenever it is on. Set it per
+provider rather than globally where you can: a provider may relax TLS for
+itself and can never relax it for another, so trusting one internal host cannot
+quietly weaken your connection to a public API in the same config.
+
+## Context budget
+
+`context_tokens` is the history budget: koda trims older turns to stay under it.
+It defaults to **110000**, and is the **context** field on `/setup`. A provider
+can carry its own, since context size belongs to the model behind the endpoint —
+a local 8k model and a hosted 200k one should not share a number:
+
+```toml
+[[provider]]
+name = "local"
+context_tokens = 8000        # 0 or omitted inherits the global value
+```
+
 ## Agents with their own model
 
 A role skill defines an agent you can delegate to. It can now name the model it

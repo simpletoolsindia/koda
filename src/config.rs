@@ -178,6 +178,20 @@ pub struct Provider {
     /// to the global setting, since most providers do not need their own.
     #[serde(default)]
     pub vision: String,
+    /// History budget for this provider. 0 inherits the global setting, since
+    /// context size is a property of the model behind the endpoint and differs
+    /// wildly between a local 8k model and a hosted 200k one.
+    #[serde(default)]
+    pub context_tokens: usize,
+    /// Skip TLS certificate verification for this endpoint only.
+    ///
+    /// For an internal server behind a corporate proxy that re-signs traffic
+    /// with a private CA. Deliberately per-provider and one-way: a provider can
+    /// turn it on for itself, and can never turn it off for anything else, so
+    /// trusting one internal host cannot quietly weaken the connection to a
+    /// public API in the same config.
+    #[serde(default)]
+    pub insecure_tls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +252,18 @@ pub struct Config {
     /// list) means the top-level fields.
     #[serde(default)]
     pub active_provider: String,
+
+    /// Accept TLS certificates koda cannot verify.
+    ///
+    /// Off by default and it should stay off. It exists for one situation: an
+    /// internal endpoint behind a proxy that re-signs TLS with a private CA
+    /// your machine does not trust, where the alternative is not using koda at
+    /// all. It disables the check that the server is who it claims to be, so
+    /// anything able to sit in the path can read and alter the traffic --
+    /// including your API key and your source. Prefer installing the CA
+    /// certificate; use this when you cannot.
+    #[serde(default)]
+    pub insecure_tls: bool,
 
     /// Whether the model accepts images: "auto" | "on" | "off".
     ///
@@ -440,7 +466,10 @@ impl Default for Config {
             temperature: 0.2,
             top_p: 0.95,
             max_tokens: 0,
-            context_tokens: 16_000,
+            // Room for a real conversation on a modern model. Small local
+            // models still trim to whatever they actually accept; the budget
+            // only decides when koda starts dropping history.
+            context_tokens: 110_000,
             tool_protocol: ToolProtocol::Auto,
             max_steps: 24,
             auto_approve: false,
@@ -459,6 +488,7 @@ impl Default for Config {
             vision: "auto".into(),
             providers: Vec::new(),
             active_provider: String::new(),
+            insecure_tls: false,
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,
@@ -659,6 +689,14 @@ impl Config {
         }
         if !p.vision.trim().is_empty() {
             out.vision = p.vision.clone();
+        }
+        if p.context_tokens > 0 {
+            out.context_tokens = p.context_tokens;
+        }
+        // One-way on purpose: a provider may relax TLS for itself, never
+        // tighten it away from a global setting and never relax it for others.
+        if p.insecure_tls {
+            out.insecure_tls = true;
         }
         out
     }
@@ -893,6 +931,62 @@ watch_interval_ms = 1500
 mod tests {
     use super::*;
 
+    /// TLS trust is per-endpoint on purpose: relaxing it for an internal host
+    /// must never relax it for a public API sitting in the same config.
+    #[test]
+    fn a_provider_may_relax_tls_for_itself_only() {
+        let mut cfg = Config::default();
+        assert!(!cfg.insecure_tls, "off by default, and it stays off");
+        cfg.upsert_provider(Provider {
+            name: "internal".into(),
+            base_url: "https://internal.corp/v1".into(),
+            insecure_tls: true,
+            ..Provider::default()
+        });
+        assert!(cfg.resolved().insecure_tls, "the internal host may opt in");
+
+        // A provider that says nothing cannot switch it back off globally.
+        let mut strict = Config {
+            insecure_tls: true,
+            ..Config::default()
+        };
+        strict.upsert_provider(Provider {
+            name: "public".into(),
+            insecure_tls: false,
+            ..Provider::default()
+        });
+        assert!(
+            strict.resolved().insecure_tls,
+            "a provider cannot tighten away from the global setting either -- \
+             the flag is one-way, so the direction is always explicit"
+        );
+    }
+
+    /// Context is a property of the model behind the endpoint, so a provider
+    /// carries its own; 0 means "whatever the global budget is".
+    #[test]
+    fn a_provider_may_set_its_own_context_budget() {
+        assert_eq!(
+            Config::default().context_tokens,
+            110_000,
+            "a modern default"
+        );
+        let mut cfg = Config::default();
+        cfg.upsert_provider(Provider {
+            name: "tiny".into(),
+            context_tokens: 8_000,
+            ..Provider::default()
+        });
+        assert_eq!(cfg.resolved().context_tokens, 8_000);
+
+        cfg.upsert_provider(Provider {
+            name: "inherit".into(),
+            context_tokens: 0,
+            ..Provider::default()
+        });
+        assert_eq!(cfg.resolved().context_tokens, 110_000, "0 inherits");
+    }
+
     /// TOML puts bare keys under whatever table precedes them, so a scalar
     /// written after `[[provider]]` is read back as a field *of that provider*.
     /// If koda ever emits its config in that order it writes a file it cannot
@@ -963,6 +1057,8 @@ mod tests {
             api_key: String::new(), // inherit
             model: "auto".into(),
             vision: "on".into(),
+            context_tokens: 0,
+            insecure_tls: false,
         });
         let r = cfg.resolved();
         assert_eq!(r.base_url, "http://localhost:20128/v1");
@@ -1006,6 +1102,8 @@ mod tests {
             api_key: "sk-x".into(),
             model: "auto".into(),
             vision: String::new(),
+            context_tokens: 0,
+            insecure_tls: false,
         });
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(

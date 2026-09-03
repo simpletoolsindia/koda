@@ -1401,13 +1401,22 @@ impl App {
         // would otherwise be saved and read back as "auto".
         if let Some(s) = self.setup.as_mut() {
             if s.focus.is_toggle() {
+                let tls = s.focus == setup::Field::Insecure;
                 match key.code {
                     KeyCode::Left => {
-                        s.cycle_vision(false);
+                        if tls {
+                            s.cycle_insecure()
+                        } else {
+                            s.cycle_vision(false)
+                        }
                         return;
                     }
                     KeyCode::Right | KeyCode::Char(' ') => {
-                        s.cycle_vision(true);
+                        if tls {
+                            s.cycle_insecure()
+                        } else {
+                            s.cycle_vision(true)
+                        }
                         return;
                     }
                     KeyCode::Char(_) if !ctrl => return,
@@ -4538,6 +4547,17 @@ pub async fn run(
     // expensive. Say it out loud.
     if let Some(msg) = oversized_prompt_warning(&cfg.system_prompt) {
         app.transcript.error(msg);
+    }
+    // Never let this be quiet. It turns off the check that the server is who it
+    // claims to be, and a setting that weakens security while looking exactly
+    // like one that does not is how it ends up switched on everywhere.
+    if cfg.insecure_tls {
+        app.transcript.error(
+            "insecure_tls is on — TLS certificates are not verified, so anything \
+             between you and the endpoint can read this traffic, API key included. \
+             Use it only for an internal host you trust."
+                .to_string(),
+        );
     }
 
     let prev_hook = std::panic::take_hook();

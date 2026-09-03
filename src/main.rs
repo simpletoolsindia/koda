@@ -261,7 +261,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 }
 
 async fn resolve_model(cfg: &Config) -> Result<String> {
-    let client = llm::Client::new(cfg.endpoint(), cfg.api_key.clone())?;
+    let client = llm::Client::with_tls(cfg.endpoint(), cfg.api_key.clone(), cfg.insecure_tls)?;
     let models = client.models().await?;
     models
         .into_iter()
@@ -270,7 +270,7 @@ async fn resolve_model(cfg: &Config) -> Result<String> {
 }
 
 async fn list_models(cfg: &Config) -> Result<()> {
-    let client = llm::Client::new(cfg.endpoint(), cfg.api_key.clone())?;
+    let client = llm::Client::with_tls(cfg.endpoint(), cfg.api_key.clone(), cfg.insecure_tls)?;
     let models = client.models().await?;
     if models.is_empty() {
         println!("{} reports no models", cfg.endpoint());

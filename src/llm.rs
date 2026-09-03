@@ -433,14 +433,26 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(endpoint: String, api_key: String) -> Result<Self> {
-        let http = reqwest::Client::builder()
+    /// Build a client, optionally accepting certificates that cannot be
+    /// verified.
+    ///
+    /// `insecure` exists for an internal endpoint behind a proxy that re-signs
+    /// TLS with a private CA. It turns off the check that the server is who it
+    /// says it is, so anything in the path can read and alter the traffic --
+    /// the API key included. It is never the default and is not inferred from
+    /// a failure; the user has to ask for it.
+    pub fn with_tls(endpoint: String, api_key: String, insecure: bool) -> Result<Self> {
+        let mut b = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // No total timeout: local generation can be slow.
             .pool_idle_timeout(Duration::from_secs(90))
-            .user_agent(concat!("koda/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .context("building HTTP client")?;
+            .user_agent(concat!("koda/", env!("CARGO_PKG_VERSION")));
+        if insecure {
+            b = b
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true);
+        }
+        let http = b.build().context("building HTTP client")?;
         Ok(Self {
             http,
             endpoint,

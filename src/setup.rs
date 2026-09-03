@@ -26,20 +26,27 @@ pub enum Field {
     /// answer is one of three words and typing it out invites typos that
     /// silently read as "auto".
     Vision,
+    /// History budget for this endpoint, in tokens.
+    Context,
+    /// Accept TLS certificates that cannot be verified. A toggle, and one
+    /// nobody should reach for without knowing what it turns off.
+    Insecure,
 }
 
 impl Field {
-    const ALL: [Field; 5] = [
+    const ALL: [Field; 7] = [
         Field::Name,
         Field::Url,
         Field::Model,
         Field::Key,
         Field::Vision,
+        Field::Context,
+        Field::Insecure,
     ];
 
     /// Cycled with left/right rather than typed into.
     pub fn is_toggle(&self) -> bool {
-        matches!(self, Field::Vision)
+        matches!(self, Field::Vision | Field::Insecure)
     }
 
     fn label(&self) -> &'static str {
@@ -49,6 +56,8 @@ impl Field {
             Field::Model => "model",
             Field::Key => "api key",
             Field::Vision => "images",
+            Field::Context => "context",
+            Field::Insecure => "tls",
         }
     }
 
@@ -59,6 +68,8 @@ impl Field {
             Field::Model => "leave empty to use the server's first model",
             Field::Key => "\"local\" is fine for a local server",
             Field::Vision => "← → : auto guesses from the model name; set on behind a router",
+            Field::Context => "history budget in tokens, e.g. 110000",
+            Field::Insecure => "← → : skip TLS checks — only for an internal host you trust",
         }
     }
 
@@ -68,17 +79,21 @@ impl Field {
             Field::Url => Field::Model,
             Field::Model => Field::Key,
             Field::Key => Field::Vision,
-            Field::Vision => Field::Name,
+            Field::Vision => Field::Context,
+            Field::Context => Field::Insecure,
+            Field::Insecure => Field::Name,
         }
     }
 
     fn prev(&self) -> Field {
         match self {
-            Field::Name => Field::Vision,
+            Field::Name => Field::Insecure,
             Field::Url => Field::Name,
             Field::Model => Field::Url,
             Field::Key => Field::Model,
             Field::Vision => Field::Key,
+            Field::Context => Field::Vision,
+            Field::Insecure => Field::Context,
         }
     }
 }
@@ -96,6 +111,8 @@ pub struct Setup {
     /// Held in an Editor like the rest so the drawing and caret code needs no
     /// special case; its buffer is only ever replaced by `cycle_vision`.
     vision: Editor,
+    context: Editor,
+    insecure: Editor,
     /// Models fetched from the endpoint, offered as suggestions.
     pub available: Vec<String>,
     pub status: Option<String>,
@@ -111,6 +128,8 @@ impl Setup {
             model: Editor::default(),
             key: Editor::default(),
             vision: Editor::default(),
+            context: Editor::default(),
+            insecure: Editor::default(),
             available: Vec::new(),
             status: None,
         };
@@ -119,6 +138,9 @@ impl Setup {
         s.model.insert(&cfg.model);
         s.key.insert(&cfg.api_key);
         s.vision.insert(normalize_vision(&cfg.vision));
+        s.context.insert(&cfg.context_tokens.to_string());
+        s.insecure
+            .insert(if cfg.insecure_tls { "on" } else { "off" });
         s
     }
 
@@ -146,6 +168,8 @@ impl Setup {
             Field::Model => &mut self.model,
             Field::Key => &mut self.key,
             Field::Vision => &mut self.vision,
+            Field::Context => &mut self.context,
+            Field::Insecure => &mut self.insecure,
         }
     }
 
@@ -156,6 +180,8 @@ impl Setup {
             Field::Model => &self.model,
             Field::Key => &self.key,
             Field::Vision => &self.vision,
+            Field::Context => &self.context,
+            Field::Insecure => &self.insecure,
         }
     }
 
@@ -175,6 +201,8 @@ impl Setup {
             Field::Model => &self.model.buf,
             Field::Key => &self.key.buf,
             Field::Vision => &self.vision.buf,
+            Field::Context => &self.context.buf,
+            Field::Insecure => &self.insecure.buf,
         }
     }
 
@@ -186,6 +214,13 @@ impl Setup {
     /// Step the images setting. Left and right rather than typing: three fixed
     /// words are a choice, not a value, and a typo in a typed one reads as
     /// "auto" without saying so.
+    /// Flip the TLS toggle. Two states, so direction does not matter.
+    pub fn cycle_insecure(&mut self) {
+        let on = self.insecure.buf.trim().eq_ignore_ascii_case("on");
+        self.insecure = Editor::default();
+        self.insecure.insert(if on { "off" } else { "on" });
+    }
+
     pub fn cycle_vision(&mut self, forward: bool) {
         let next = match (normalize_vision(&self.vision.buf), forward) {
             ("auto", true) => "on",
@@ -235,6 +270,21 @@ impl Setup {
         cfg.model = self.model.buf.trim().to_string();
         cfg.api_key = self.key.buf.trim().to_string();
         cfg.vision = normalize_vision(&self.vision.buf).to_string();
+        // A blank or unparseable context box means "leave it alone" rather than
+        // zero: zero would be a budget of nothing, and a typo should not empty
+        // somebody's history on the next turn.
+        if let Ok(n) = self
+            .context
+            .buf
+            .trim()
+            .replace([',', '_'], "")
+            .parse::<usize>()
+        {
+            if n > 0 {
+                cfg.context_tokens = n;
+            }
+        }
+        cfg.insecure_tls = self.insecure.buf.trim().eq_ignore_ascii_case("on");
         // A name turns this into a saved provider and selects it. Without one
         // the page behaves exactly as it always did, editing the single set of
         // top-level settings -- so naming things stays opt-in.
@@ -245,6 +295,8 @@ impl Setup {
         }
         cfg.upsert_provider(crate::config::Provider {
             name: name.clone(),
+            context_tokens: cfg.context_tokens,
+            insecure_tls: cfg.insecure_tls,
             base_url: cfg.base_url.clone(),
             api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
@@ -306,12 +358,12 @@ fn masked(s: &str) -> String {
 
 pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
     let w = area.width.saturating_sub(6).clamp(40, 78);
-    // Three lines per field plus the header: five fields come to 16, and the
-    // border takes two more. A status line adds a blank and itself, and without
-    // room for them it is drawn outside the panel and simply never seen -- which
-    // is the whole point of a status line missed.
-    let want = if s.status.is_some() { 20 } else { 18 };
-    let h = want.min(area.height.saturating_sub(2));
+    // Derived, not hardcoded. Each field costs three rows (a blank, its label,
+    // its value), the heading one, the border two, and a status line two more.
+    // Every time this was a constant, adding a field pushed something out of
+    // the panel where it was drawn but never seen.
+    let rows = 2 + 1 + 3 * Field::ALL.len() as u16 + if s.status.is_some() { 2 } else { 0 };
+    let h = rows.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
         y: (area.height.saturating_sub(h)) / 2,
@@ -469,6 +521,8 @@ mod tests {
             api_key: "sk-shared".into(),
             model: "auto".into(),
             vision: String::new(),
+            context_tokens: 0,
+            insecure_tls: false,
         });
 
         // Editing pre-fills the name, so saving updates that provider.
@@ -604,6 +658,8 @@ mod tests {
 
         let cfg = Config {
             vision: "auto".into(),
+            context_tokens: 0,
+            insecure_tls: false,
             ..Config::default()
         };
         let mut s = Setup::new(&cfg);
@@ -630,14 +686,18 @@ mod tests {
 
     /// Tab order has to include the new field, in both directions.
     #[test]
-    fn field_cycle_includes_vision() {
+    fn field_cycle_covers_every_field() {
         assert_eq!(Field::Key.next(), Field::Vision);
+        assert_eq!(Field::Vision.next(), Field::Context);
+        assert_eq!(Field::Context.next(), Field::Insecure);
         assert_eq!(
-            Field::Vision.next(),
+            Field::Insecure.next(),
             Field::Name,
             "wraps to the first field"
         );
-        assert_eq!(Field::Name.prev(), Field::Vision);
+        assert_eq!(Field::Name.prev(), Field::Insecure);
+        assert_eq!(Field::Insecure.prev(), Field::Context);
+        assert_eq!(Field::Context.prev(), Field::Vision);
         assert_eq!(Field::Vision.prev(), Field::Key);
         assert_eq!(Field::Name.next(), Field::Url);
         assert_eq!(Field::Url.prev(), Field::Name);
@@ -668,9 +728,13 @@ mod tests {
         s.next_field();
         assert_eq!(s.focus, Field::Vision);
         s.next_field();
+        assert_eq!(s.focus, Field::Context);
+        s.next_field();
+        assert_eq!(s.focus, Field::Insecure);
+        s.next_field();
         assert_eq!(s.focus, Field::Name);
         s.prev_field();
-        assert_eq!(s.focus, Field::Vision);
+        assert_eq!(s.focus, Field::Insecure);
     }
 
     #[test]
