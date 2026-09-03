@@ -133,6 +133,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/tools", "list available tools"),
     ("/think", "show or hide model reasoning"),
     ("/motion", "turn animation on or off"),
+    ("/provider", "list saved providers, or switch to one"),
     (
         "/mouse",
         "toggle mouse capture (on = wheel scrolls + drag selects)",
@@ -1605,6 +1606,22 @@ impl App {
             self.auto_tier = cfg.auto_tier;
             self.send(Command::SetAutoTier(cfg.auto_tier));
         }
+        // Provider: switching endpoint and model is the whole point, and the
+        // agent holds its own copies of both, so they have to be sent.
+        if cfg.active_provider != self.cfg.active_provider {
+            let mut next = cfg.resolved();
+            next.providers = cfg.providers.clone();
+            next.active_provider = cfg.active_provider.clone();
+            self.endpoint = next.endpoint();
+            self.model = next.model.clone();
+            self.send(Command::SetEndpoint(next.endpoint()));
+            self.send(Command::SetModel(next.model.clone()));
+            self.note(format!("provider → {}", cfg.provider_label()));
+            // Carry the resolved view forward so the rest of this function and
+            // everything after it sees the provider's settings, not the
+            // top-level ones it just replaced.
+            self.cfg = next.clone();
+        }
         // Mouse capture: a terminal mode rather than a stored flag, so a change
         // has to be written out, not just recorded.
         if cfg.mouse_capture != self.mouse_capture {
@@ -2015,7 +2032,7 @@ impl App {
                     None => self.note("no session to fork yet — say something first"),
                 }
             }
-            "setup" | "provider" | "config" => {
+            "setup" | "config" => {
                 self.setup = Some(Setup::new(&self.cfg));
                 self.send(Command::ProbeModels(self.endpoint.clone()));
             }
@@ -2271,6 +2288,56 @@ impl App {
                 let lines = p.render(&self.theme, &self.glyphs);
                 self.transcript.raw(lines);
                 self.follow = true;
+            }
+            "provider" | "providers" => {
+                if arg == "add" || arg == "new" {
+                    self.setup = Some(setup::Setup::new(&self.cfg));
+                    self.note("name it to save it as a provider you can switch back to");
+                } else if self.cfg.providers.is_empty() {
+                    self.note("no saved providers — /provider add, then give it a name");
+                } else if arg.is_empty() {
+                    let width = self.panel_width();
+                    let mut p = Panel::new("Providers", width)
+                        .footer("/provider <name> to switch · /provider add to add one");
+                    for prov in self.cfg.providers.clone() {
+                        let here = prov.name == self.cfg.active_provider;
+                        p.row(vec![
+                            Span::styled(
+                                if here { "● " } else { "  " }.to_string(),
+                                self.theme.fg(self.theme.success),
+                            ),
+                            Span::styled(
+                                format!("{:<14}", prov.name),
+                                self.theme.fg(self.theme.accent),
+                            ),
+                            Span::styled(
+                                format!("{}  {}", host_of(&prov.base_url), prov.model),
+                                self.theme.dim(),
+                            ),
+                        ]);
+                    }
+                    let lines = p.render(&self.theme, &self.glyphs);
+                    self.transcript.raw(lines);
+                    self.follow = true;
+                } else if self.cfg.providers.iter().any(|p| p.name == arg) {
+                    // Resolve through the same path the loader uses, then carry
+                    // the list and the choice across, so switching cannot
+                    // flatten the providers away.
+                    let mut cfg = self.cfg.clone();
+                    cfg.active_provider = arg.clone();
+                    let mut next = cfg.resolved();
+                    next.providers = cfg.providers.clone();
+                    next.active_provider = cfg.active_provider.clone();
+                    self.adopt_config(next);
+                    match crate::config::save(&self.cfg) {
+                        Ok(_) => self.note(format!("provider → {arg}")),
+                        Err(e) => self
+                            .transcript
+                            .error(format!("switched, but could not save: {e}")),
+                    }
+                } else {
+                    self.note(format!("no provider called {arg} — /provider to list them"));
+                }
             }
             "mouse" | "select" => {
                 // Toggling capture off hands click-drag back to the terminal so
@@ -3438,7 +3505,14 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
         }
     }
     if !m.compact {
-        segs.push(Segment::new(host_of(&app.endpoint), t.muted));
+        // A named provider replaces the host: "omniroute" says more at a glance
+        // than "localhost:20128", and the name is the thing the user chose.
+        let label = if app.cfg.active().is_some() {
+            app.cfg.provider_label()
+        } else {
+            host_of(&app.endpoint)
+        };
+        segs.push(Segment::new(label, t.muted));
     }
 
     let mut right = Vec::new();

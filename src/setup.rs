@@ -16,6 +16,9 @@ use ratatui::Frame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
+    /// What to call this endpoint. Naming it makes it a saved provider you
+    /// can switch back to; leaving it blank just edits the current settings.
+    Name,
     Url,
     Model,
     Key,
@@ -26,7 +29,13 @@ pub enum Field {
 }
 
 impl Field {
-    const ALL: [Field; 4] = [Field::Url, Field::Model, Field::Key, Field::Vision];
+    const ALL: [Field; 5] = [
+        Field::Name,
+        Field::Url,
+        Field::Model,
+        Field::Key,
+        Field::Vision,
+    ];
 
     /// Cycled with left/right rather than typed into.
     pub fn is_toggle(&self) -> bool {
@@ -35,6 +44,7 @@ impl Field {
 
     fn label(&self) -> &'static str {
         match self {
+            Field::Name => "name",
             Field::Url => "endpoint",
             Field::Model => "model",
             Field::Key => "api key",
@@ -44,6 +54,7 @@ impl Field {
 
     fn hint(&self) -> &'static str {
         match self {
+            Field::Name => "name it to save as a provider you can switch to (optional)",
             Field::Url => "http://localhost:11434/v1",
             Field::Model => "leave empty to use the server's first model",
             Field::Key => "\"local\" is fine for a local server",
@@ -53,16 +64,18 @@ impl Field {
 
     fn next(&self) -> Field {
         match self {
+            Field::Name => Field::Url,
             Field::Url => Field::Model,
             Field::Model => Field::Key,
             Field::Key => Field::Vision,
-            Field::Vision => Field::Url,
+            Field::Vision => Field::Name,
         }
     }
 
     fn prev(&self) -> Field {
         match self {
-            Field::Url => Field::Vision,
+            Field::Name => Field::Vision,
+            Field::Url => Field::Name,
             Field::Model => Field::Url,
             Field::Key => Field::Model,
             Field::Vision => Field::Key,
@@ -72,6 +85,7 @@ impl Field {
 
 pub struct Setup {
     pub focus: Field,
+    name: Editor,
     url: Editor,
     model: Editor,
     key: Editor,
@@ -86,7 +100,8 @@ pub struct Setup {
 impl Setup {
     pub fn new(cfg: &Config) -> Self {
         let mut s = Self {
-            focus: Field::Url,
+            focus: Field::Name,
+            name: Editor::default(),
             url: Editor::default(),
             model: Editor::default(),
             key: Editor::default(),
@@ -94,6 +109,7 @@ impl Setup {
             available: Vec::new(),
             status: None,
         };
+        s.name.insert(&cfg.active_provider);
         s.url.insert(&cfg.endpoint());
         s.model.insert(&cfg.model);
         s.key.insert(&cfg.api_key);
@@ -103,6 +119,7 @@ impl Setup {
 
     fn editor(&mut self, f: Field) -> &mut Editor {
         match f {
+            Field::Name => &mut self.name,
             Field::Url => &mut self.url,
             Field::Model => &mut self.model,
             Field::Key => &mut self.key,
@@ -112,6 +129,7 @@ impl Setup {
 
     fn editor_ref(&self, f: Field) -> &Editor {
         match f {
+            Field::Name => &self.name,
             Field::Url => &self.url,
             Field::Model => &self.model,
             Field::Key => &self.key,
@@ -130,6 +148,7 @@ impl Setup {
 
     pub fn value(&self, f: Field) -> &str {
         match f {
+            Field::Name => &self.name.buf,
             Field::Url => &self.url.buf,
             Field::Model => &self.model.buf,
             Field::Key => &self.key.buf,
@@ -194,12 +213,50 @@ impl Setup {
         cfg.model = self.model.buf.trim().to_string();
         cfg.api_key = self.key.buf.trim().to_string();
         cfg.vision = normalize_vision(&self.vision.buf).to_string();
+        // A name turns this into a saved provider and selects it. Without one
+        // the page behaves exactly as it always did, editing the single set of
+        // top-level settings -- so naming things stays opt-in.
+        let name = sanitize_provider_name(&self.name.buf);
+        if name.is_empty() {
+            cfg.active_provider.clear();
+            return;
+        }
+        cfg.upsert_provider(crate::config::Provider {
+            name: name.clone(),
+            base_url: cfg.base_url.clone(),
+            api_key: cfg.api_key.clone(),
+            model: cfg.model.clone(),
+            vision: cfg.vision.clone(),
+        });
     }
 
     pub fn save(&self, cfg: &mut Config) -> anyhow::Result<std::path::PathBuf> {
         self.apply(cfg);
         crate::config::save(cfg)
     }
+}
+
+/// Reduce a typed name to something usable as a provider label.
+///
+/// It ends up in a TOML key position, in `/provider <name>`, and in the status
+/// bar, so whitespace and separators make it unusable in at least one of those.
+/// Trimmed to a sane length because the status bar has to fit it.
+fn sanitize_provider_name(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| {
+            if c.is_whitespace() || c == '/' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(32)
+        .collect()
 }
 
 /// Fold any spelling of the setting onto the three values the UI cycles, so a
@@ -227,9 +284,9 @@ fn masked(s: &str) -> String {
 
 pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
     let w = area.width.saturating_sub(6).clamp(40, 78);
-    // Three lines per field plus the header: four fields come to 13, which is
-    // exactly the inner height here. A fifth would need this raised.
-    let h = 15u16.min(area.height.saturating_sub(2));
+    // Three lines per field plus the header: five fields come to 16, and the
+    // border takes two more.
+    let h = 18u16.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
         y: (area.height.saturating_sub(h)) / 2,
@@ -364,6 +421,22 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
 mod tests {
     use super::*;
 
+    /// The name lands in a TOML key, in `/provider <name>`, and in the status
+    /// bar, so it cannot carry whitespace or separators into any of them.
+    #[test]
+    fn a_provider_name_is_reduced_to_something_usable() {
+        assert_eq!(sanitize_provider_name("  omniroute  "), "omniroute");
+        assert_eq!(sanitize_provider_name("my local box"), "my-local-box");
+        assert_eq!(sanitize_provider_name("a/b"), "a-b");
+        assert_eq!(sanitize_provider_name(""), "");
+        assert_eq!(sanitize_provider_name("   "), "");
+        assert_eq!(
+            sanitize_provider_name(&"x".repeat(80)).len(),
+            32,
+            "kept short enough to show"
+        );
+    }
+
     /// The panel is a fixed height and the fields are laid out three lines
     /// apart, so adding one is not free: at three fields the content came to
     /// exactly the inner height, and a fourth pushed the footer off the bottom
@@ -448,9 +521,15 @@ mod tests {
     #[test]
     fn field_cycle_includes_vision() {
         assert_eq!(Field::Key.next(), Field::Vision);
-        assert_eq!(Field::Vision.next(), Field::Url);
-        assert_eq!(Field::Url.prev(), Field::Vision);
+        assert_eq!(
+            Field::Vision.next(),
+            Field::Name,
+            "wraps to the first field"
+        );
+        assert_eq!(Field::Name.prev(), Field::Vision);
         assert_eq!(Field::Vision.prev(), Field::Key);
+        assert_eq!(Field::Name.next(), Field::Url);
+        assert_eq!(Field::Url.prev(), Field::Name);
     }
 
     #[test]
@@ -468,6 +547,8 @@ mod tests {
     #[test]
     fn tab_cycles_every_field() {
         let mut s = Setup::new(&Config::default());
+        assert_eq!(s.focus, Field::Name, "the name comes first");
+        s.next_field();
         assert_eq!(s.focus, Field::Url);
         s.next_field();
         assert_eq!(s.focus, Field::Model);
@@ -476,7 +557,7 @@ mod tests {
         s.next_field();
         assert_eq!(s.focus, Field::Vision);
         s.next_field();
-        assert_eq!(s.focus, Field::Url);
+        assert_eq!(s.focus, Field::Name);
         s.prev_field();
         assert_eq!(s.focus, Field::Vision);
     }

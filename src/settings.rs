@@ -17,6 +17,7 @@ use ratatui::Frame;
 /// value formatting are all defined in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
+    Provider,
     Mode,
     Autonomy,
     Reasoning,
@@ -44,7 +45,8 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 23] = [
+    pub const ALL: [Row; 24] = [
+        Row::Provider,
         Row::Mode,
         Row::Autonomy,
         Row::Reasoning,
@@ -72,6 +74,7 @@ impl Row {
 
     fn label(&self) -> &'static str {
         match self {
+            Row::Provider => "provider",
             Row::Mode => "mode",
             Row::Autonomy => "autonomy",
             Row::Reasoning => "reasoning",
@@ -100,6 +103,7 @@ impl Row {
 
     fn hint(&self) -> &'static str {
         match self {
+            Row::Provider => "switch endpoints · /provider add to save a new one",
             Row::Mode => "plan reads only · execute edits · vibe spec-checks",
             Row::Autonomy => "ask · auto-write · full-auto (no prompts)",
             Row::Reasoning => "thinking effort: off · low · medium · high",
@@ -193,6 +197,25 @@ impl Settings {
             return;
         }
         match row {
+            Row::Provider => {
+                // Cycle the saved providers. With none saved there is nothing to
+                // cycle, and the label says where to make one.
+                let names: Vec<String> =
+                    self.cfg.providers.iter().map(|p| p.name.clone()).collect();
+                if !names.is_empty() {
+                    let i = names
+                        .iter()
+                        .position(|n| *n == self.cfg.active_provider)
+                        .unwrap_or(0);
+                    let n = names.len();
+                    let next = if forward {
+                        (i + 1) % n
+                    } else {
+                        (i + n - 1) % n
+                    };
+                    self.cfg.active_provider = names[next].clone();
+                }
+            }
             Row::Mode => {
                 self.cfg.mode = if forward {
                     self.cfg.mode.next()
@@ -356,6 +379,15 @@ impl Settings {
             }
         };
         match row {
+            Row::Provider => {
+                if self.cfg.providers.is_empty() {
+                    "(none saved)".to_string()
+                } else if self.cfg.active_provider.is_empty() {
+                    "(config default)".to_string()
+                } else {
+                    self.cfg.active_provider.clone()
+                }
+            }
             Row::Mode => self.cfg.mode.to_string(),
             Row::Autonomy => self.cfg.auto_tier.label().to_lowercase(),
             Row::Reasoning => self.cfg.reasoning_effort.to_lowercase(),

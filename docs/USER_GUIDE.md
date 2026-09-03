@@ -223,6 +223,51 @@ next message is treated as the answer, not a new turn.
 
 ---
 
+## Multiple providers
+
+koda can hold several named endpoints and switch between them in a word. A
+provider is the four things you have to get right before koda can say anything
+— where to talk, the key, the model, and whether it takes images — kept together
+under a name.
+
+Add one with `/provider add`, which opens the setup page: fill in the **name**
+field and it is saved as a provider and selected. Leave the name blank and the
+page behaves as it always did, editing the single set of settings.
+
+| Command | What it does |
+| --- | --- |
+| `/provider` | List saved providers; the active one is marked. |
+| `/provider <name>` | Switch to it, and remember the choice. |
+| `/provider add` | Open the setup page to save a new one. |
+
+`/settings` has a **provider** row that cycles the same list. The active
+provider's name replaces the host in the status bar, because "omniroute" says
+more at a glance than "localhost:20128".
+
+In the config file they are table arrays:
+
+```toml
+base_url = "http://localhost:11434/v1"   # used when no provider is active
+active_provider = "omniroute"
+
+[[provider]]
+name = "omniroute"
+base_url = "http://localhost:20128/v1"
+api_key = "sk-..."
+model = "auto"
+vision = "on"
+
+[[provider]]
+name = "ollama"
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5-coder:14b"
+```
+
+A field left out of a provider falls through to the top-level one, so a provider
+can name just a model and inherit the rest. Note that TOML binds a bare key to
+whatever table precedes it: keep `active_provider` and the other top-level
+settings **above** the first `[[provider]]` block. koda writes them that way.
+
 ## Editing what you typed — `#`
 
 Press `#` at the end of what you have written to open a small palette of actions

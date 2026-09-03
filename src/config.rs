@@ -161,6 +161,25 @@ impl std::fmt::Display for ToolProtocol {
     }
 }
 
+/// One named endpoint: where to talk, what to say you are, and which model.
+///
+/// A provider is exactly the four things you have to get right before koda can
+/// say anything, kept together and given a name so switching between a local
+/// server and a hosted one is one word rather than three edits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Provider {
+    /// What you call it. Shown in the status bar and used by `/provider`.
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    /// Per-provider image support: "auto" | "on" | "off". Empty means fall back
+    /// to the global setting, since most providers do not need their own.
+    #[serde(default)]
+    pub vision: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -214,6 +233,11 @@ pub struct Config {
     /// here) to hand click-drag back to the terminal for native text selection
     /// and copy; you then scroll with the wheel-free keys (PageUp/PageDown).
     pub mouse_capture: bool,
+
+    /// Which provider is in use, by name. Empty (or a name that is not in the
+    /// list) means the top-level fields.
+    #[serde(default)]
+    pub active_provider: String,
 
     /// Whether the model accepts images: "auto" | "on" | "off".
     ///
@@ -347,6 +371,15 @@ pub struct Config {
     /// How often (ms) watch mode rescans for triggers.
     #[serde(default = "default_watch_ms")]
     pub watch_interval_ms: u64,
+    /// Named endpoints, added through the setup page or by hand.
+    ///
+    /// Declared last on purpose: serde writes fields in declaration order and
+    /// TOML binds a bare key to whatever table precedes it, so a scalar emitted
+    /// after `[[provider]]` is read back as a field *of that provider*. With
+    /// this in the middle, koda wrote a config it then misread -- `vision` and
+    /// everything after it silently became part of the last provider.
+    #[serde(default, rename = "provider")]
+    pub providers: Vec<Provider>,
 }
 
 fn default_watch_ms() -> u64 {
@@ -424,6 +457,8 @@ impl Default for Config {
             reveal: true,
             mouse_capture: true,
             vision: "auto".into(),
+            providers: Vec::new(),
+            active_provider: String::new(),
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,
@@ -560,9 +595,19 @@ impl Config {
         if let Some(t) = project_table(root)? {
             merge(&mut table, t);
         }
-        let mut cfg: Config = toml::Value::Table(table)
+        let cfg: Config = toml::Value::Table(table)
             .try_into()
             .context("invalid koda config")?;
+        // Fold the active provider in here, once, so nothing downstream has to
+        // remember to ask -- a caller reading cfg.model directly while another
+        // used a getter is how two halves of the app end up on different
+        // servers. The list and the choice are carried over intact, so saving
+        // this config back does not flatten the providers away.
+        let providers = cfg.providers.clone();
+        let active = cfg.active_provider.clone();
+        let mut cfg = cfg.resolved();
+        cfg.providers = providers;
+        cfg.active_provider = active;
         cfg.apply_env();
         Ok(cfg)
     }
@@ -579,6 +624,65 @@ impl Config {
         }
         if let Some(v) = env("KODA_MODEL", "OPENAI_MODEL") {
             self.model = v;
+        }
+    }
+
+    /// The provider in use, when one is named and exists.
+    pub fn active(&self) -> Option<&Provider> {
+        if self.active_provider.trim().is_empty() {
+            return None;
+        }
+        self.providers
+            .iter()
+            .find(|p| p.name == self.active_provider)
+    }
+
+    /// Fold the active provider's settings over the top-level ones.
+    ///
+    /// Returned as a whole config rather than field-by-field getters so every
+    /// caller sees the same resolved view; a caller that read `cfg.model`
+    /// directly while another used a getter is how two halves of the app end up
+    /// talking to different servers.
+    pub fn resolved(&self) -> Config {
+        let Some(p) = self.active() else {
+            return self.clone();
+        };
+        let mut out = self.clone();
+        if !p.base_url.trim().is_empty() {
+            out.base_url = p.base_url.clone();
+        }
+        if !p.api_key.trim().is_empty() {
+            out.api_key = p.api_key.clone();
+        }
+        if !p.model.trim().is_empty() {
+            out.model = p.model.clone();
+        }
+        if !p.vision.trim().is_empty() {
+            out.vision = p.vision.clone();
+        }
+        out
+    }
+
+    /// Add or replace a named provider, and make it the active one.
+    pub fn upsert_provider(&mut self, p: Provider) {
+        match self.providers.iter_mut().find(|x| x.name == p.name) {
+            Some(slot) => *slot = p.clone(),
+            None => self.providers.push(p.clone()),
+        }
+        self.active_provider = p.name;
+    }
+
+    /// What to show for the endpoint: the provider's name when there is one,
+    /// since "omniroute" tells you more at a glance than "localhost:20128".
+    pub fn provider_label(&self) -> String {
+        match self.active() {
+            Some(p) => p.name.clone(),
+            None => self
+                .endpoint()
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches("/v1")
+                .to_string(),
         }
     }
 
@@ -788,6 +892,131 @@ watch_interval_ms = 1500
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TOML puts bare keys under whatever table precedes them, so a scalar
+    /// written after `[[provider]]` is read back as a field *of that provider*.
+    /// If koda ever emits its config in that order it writes a file it cannot
+    /// read -- the endpoint and model would silently revert on next start.
+    #[test]
+    fn saved_config_keeps_scalars_above_the_provider_tables() {
+        let mut cfg = Config {
+            base_url: "http://top-level/v1".into(),
+            ..Config::default()
+        };
+        cfg.upsert_provider(Provider {
+            name: "omni".into(),
+            base_url: "http://provider/v1".into(),
+            model: "auto".into(),
+            ..Provider::default()
+        });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+
+        let first_table = text.find("[[provider]]").expect("providers were written");
+        let head = &text[..first_table];
+        // Every top-level scalar must be in the part above the first table
+        // array, where TOML will still read it as top-level.
+        for key in ["base_url", "model", "active_provider", "vision", "theme"] {
+            assert!(
+                head.lines().any(|l| l.starts_with(&format!("{key} ="))),
+                "{key} is written after [[provider]] and would be read back as \
+                 part of that provider:\n{text}"
+            );
+        }
+        // And the whole thing survives the round trip.
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.active_provider, "omni");
+        assert_eq!(back.base_url, "http://top-level/v1");
+        assert_eq!(back.resolved().base_url, "http://provider/v1");
+    }
+
+    /// A config written before providers existed must keep working exactly as
+    /// it did: the top-level fields stay authoritative until something is
+    /// actually in the list.
+    #[test]
+    fn a_config_without_providers_is_unchanged() {
+        let cfg = Config {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen".into(),
+            api_key: "local".into(),
+            ..Config::default()
+        };
+        let r = cfg.resolved();
+        assert_eq!(r.base_url, "http://localhost:11434/v1");
+        assert_eq!(r.model, "qwen");
+        assert!(cfg.active().is_none());
+        assert_eq!(cfg.provider_label(), "localhost:11434");
+    }
+
+    /// The active provider wins field by field, and an empty field falls
+    /// through -- so a provider can name just a model and inherit the rest.
+    #[test]
+    fn the_active_provider_overrides_field_by_field() {
+        let mut cfg = Config {
+            base_url: "http://fallback/v1".into(),
+            api_key: "fallback-key".into(),
+            model: "fallback-model".into(),
+            ..Config::default()
+        };
+        cfg.upsert_provider(Provider {
+            name: "omni".into(),
+            base_url: "http://localhost:20128/v1".into(),
+            api_key: String::new(), // inherit
+            model: "auto".into(),
+            vision: "on".into(),
+        });
+        let r = cfg.resolved();
+        assert_eq!(r.base_url, "http://localhost:20128/v1");
+        assert_eq!(r.model, "auto");
+        assert_eq!(r.api_key, "fallback-key", "an empty field inherits");
+        assert_eq!(r.vision, "on");
+        assert_eq!(cfg.provider_label(), "omni", "the bar shows the name");
+    }
+
+    /// Adding a provider twice replaces it rather than growing a duplicate.
+    #[test]
+    fn upsert_replaces_and_activates() {
+        let mut cfg = Config::default();
+        cfg.upsert_provider(Provider {
+            name: "a".into(),
+            model: "m1".into(),
+            ..Provider::default()
+        });
+        cfg.upsert_provider(Provider {
+            name: "b".into(),
+            model: "m2".into(),
+            ..Provider::default()
+        });
+        cfg.upsert_provider(Provider {
+            name: "a".into(),
+            model: "m3".into(),
+            ..Provider::default()
+        });
+        assert_eq!(cfg.providers.len(), 2, "two names, not three entries");
+        assert_eq!(cfg.active_provider, "a", "the last one added is active");
+        assert_eq!(cfg.resolved().model, "m3", "and it was replaced, not kept");
+    }
+
+    /// Round-tripping through TOML has to preserve the list and the choice.
+    #[test]
+    fn providers_survive_a_toml_round_trip() {
+        let mut cfg = Config::default();
+        cfg.upsert_provider(Provider {
+            name: "omni".into(),
+            base_url: "http://localhost:20128/v1".into(),
+            api_key: "sk-x".into(),
+            model: "auto".into(),
+            vision: String::new(),
+        });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            text.contains("[[provider]]"),
+            "written as a table array:\n{text}"
+        );
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.providers, cfg.providers);
+        assert_eq!(back.active_provider, "omni");
+        assert_eq!(back.resolved().base_url, "http://localhost:20128/v1");
+    }
 
     #[test]
     fn shell_flag_matches_the_shell() {
