@@ -452,6 +452,13 @@ impl Client {
         self.endpoint = endpoint;
     }
 
+    /// Swap the credential, for when the endpoint changes with it — a role
+    /// agent pointed at a different provider needs that provider's key, not the
+    /// session's.
+    pub fn set_api_key(&mut self, api_key: String) {
+        self.api_key = api_key;
+    }
+
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.endpoint, path);
         let mut rb = self.http.request(method, url);

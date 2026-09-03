@@ -268,6 +268,36 @@ can name just a model and inherit the rest. Note that TOML binds a bare key to
 whatever table precedes it: keep `active_provider` and the other top-level
 settings **above** the first `[[provider]]` block. koda writes them that way.
 
+## Agents with their own model
+
+A role skill defines an agent you can delegate to. It can now name the model it
+runs on, which is a property of the role rather than of whatever the session
+happens to be using — a reviewer wants a careful model, a scaffolder a fast one.
+
+```markdown
+---
+name: reviewer
+role: reviewer
+model: omniroute/auto
+when: reviewing a diff before it ships
+---
+
+Read the diff. Flag correctness bugs first, style last.
+```
+
+`provider/model` runs the agent on that saved provider — its endpoint and its
+key, not the session's. A bare model name uses the current endpoint. Leave
+`model` out and the agent runs on whatever the session is using.
+
+In the web UI (`web_ui = true`, then `/logs` or the printed address), the
+**Agents & Skills** page has a provider dropdown and a model box that suggests
+what that provider actually serves. The dropdown is populated from your saved
+providers; the model box still accepts free text, since a provider may serve
+models it does not list.
+
+The web UI never receives your API keys — the provider list reports only whether
+a key is set.
+
 ## Editing what you typed — `#`
 
 Press `#` at the end of what you have written to open a small palette of actions

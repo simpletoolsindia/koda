@@ -1165,16 +1165,28 @@ function CodeGraph({ graph, loading, error }) {
 }
 // AgentsSkills.jsx — Skills & role agents list + editor
 function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
-  const [form, setForm] = React.useState({ name: '', when: '', role: '', body: '' });
+  const [form, setForm] = React.useState({ name: '', when: '', role: '', body: '', model: '' });
+  // Saved providers, so the model box offers real choices instead of asking the
+  // user to remember exact ids. Empty until /api/providers answers; the field
+  // still accepts free text, because a provider may serve models it does not
+  // list and koda should not be the thing standing in the way.
+  const [providers, setProviders] = React.useState([]);
+  const [models, setModels] = React.useState({});   // provider name -> [model ids]
+  React.useEffect(() => {
+    fetch('/api/providers')
+      .then(r => r.json())
+      .then(d => setProviders(d.providers || []))
+      .catch(() => {});
+  }, []);
   const [submitting, setSubmitting] = React.useState(false);
   const [filter, setFilter] = React.useState('all'); // all | skills | agents
 
   const loadIntoForm = (s) => {
-    setForm({ name: s.name || '', when: s.when || '', role: s.role || '', body: s.body || '' });
+    setForm({ name: s.name || '', when: s.when || '', role: s.role || '', body: s.body || '', model: s.model || '' });
     window.scrollTo && window.scrollTo(0, 0);
   };
 
-  const resetForm = () => setForm({ name: '', when: '', role: '', body: '' });
+  const resetForm = () => setForm({ name: '', when: '', role: '', body: '', model: '' });
 
   const remove = async (s, e) => {
     if (e) e.stopPropagation();
@@ -1201,6 +1213,9 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
     try {
       const payload = { name: form.name.trim(), when: form.when, body: form.body };
       if (form.role.trim()) payload.role = form.role.trim();
+      // Only meaningful for an agent: a knowledge skill is read by whichever
+      // model is already running and is never dispatched anywhere.
+      if (form.role.trim() && form.model.trim()) payload.model = form.model.trim();
       const res = await fetch('/api/skills', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
@@ -1309,6 +1324,47 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
             <p className="text-[10px] text-gray-600 mt-1">Setting a role turns this entry into a role agent.</p>
           </Field>
 
+          {form.role.trim() && (
+            <Field label="Model for this agent">
+              <div className="flex gap-2">
+                <select
+                  value={providerOf(form.model)}
+                  onChange={e => {
+                    const p = e.target.value;
+                    const rest = modelOf(form.model);
+                    setForm({ ...form, model: p ? (rest ? p + '/' + rest : p + '/') : rest });
+                    if (p && !models[p]) loadModels(p, setModels);
+                  }}
+                  className="form-input w-40" aria-label="Provider">
+                  <option value="">(session default)</option>
+                  {providers.map(p => (
+                    <option key={p.name} value={p.name}>{p.name}</option>
+                  ))}
+                </select>
+                <input
+                  list="koda-model-options"
+                  value={modelOf(form.model)}
+                  onChange={e => {
+                    const p = providerOf(form.model);
+                    const m = e.target.value;
+                    setForm({ ...form, model: p ? (m ? p + '/' + m : p + '/') : m });
+                  }}
+                  placeholder="model id, e.g. auto or qwen2.5-coder:14b"
+                  className="form-input flex-1" aria-label="Model" />
+                <datalist id="koda-model-options">
+                  {(models[providerOf(form.model)] || []).map(m => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              </div>
+              <p className="text-[10px] text-gray-600 mt-1">
+                Leave the provider blank to run this agent on whatever the session
+                is using. Pick one and the agent runs on that endpoint instead —
+                a reviewer can sit on a careful model while the session stays fast.
+              </p>
+            </Field>
+          )}
+
           <Field label="Body">
             <textarea value={form.body} onChange={e => setForm({...form, body: e.target.value})}
               placeholder="The knowledge / instructions…" rows={10}
@@ -1323,6 +1379,28 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
       </aside>
     </div>
   );
+}
+
+// `provider/model` is one string in the skill file; the form edits it as two
+// boxes. These keep the split in one place so the two halves cannot disagree.
+function providerOf(spec) {
+  const i = (spec || '').indexOf('/');
+  return i === -1 ? '' : spec.slice(0, i);
+}
+
+function modelOf(spec) {
+  const i = (spec || '').indexOf('/');
+  return i === -1 ? (spec || '') : spec.slice(i + 1);
+}
+
+// Ask the provider what it serves, so the model box can suggest. A provider
+// that cannot be reached simply offers no suggestions — the field still takes
+// whatever is typed.
+function loadModels(name, setModels) {
+  fetch('/api/providers/' + encodeURIComponent(name) + '/models')
+    .then(r => r.json())
+    .then(d => setModels(prev => ({ ...prev, [name]: d.models || [] })))
+    .catch(() => setModels(prev => ({ ...prev, [name]: [] })));
 }
 
 function Field({ label, required, children }) {
