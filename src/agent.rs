@@ -696,6 +696,31 @@ impl Agent {
             Command::UpdateConfig(cfg) => {
                 // Adopt the settings-edited config for the live-editable fields.
                 crate::debug::set_enabled(cfg.debug);
+                // TLS trust is fixed when the HTTP client is built, so changing
+                // the flag alone would do nothing until the next start -- a
+                // toggle that appears to work and does not is worse than no
+                // toggle. Rebuild the client instead.
+                if cfg.insecure_tls != self.cfg.insecure_tls {
+                    match Client::with_tls(
+                        self.endpoint.clone(),
+                        cfg.api_key.clone(),
+                        cfg.insecure_tls,
+                    ) {
+                        Ok(c) => {
+                            self.client = c;
+                            let _ = tx.send(Event::Notice(if cfg.insecure_tls {
+                                "TLS verification off — certificates are no longer checked".into()
+                            } else {
+                                "TLS verification on".to_string()
+                            }));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Error(format!(
+                                "could not rebuild the HTTP client: {e}"
+                            )));
+                        }
+                    }
+                }
                 self.cfg = Arc::new(*cfg);
                 self.ctx.cfg = self.cfg.clone();
                 // System prompt / web-search availability may have changed.

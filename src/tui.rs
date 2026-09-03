@@ -1659,6 +1659,8 @@ impl App {
             || cfg.web_fetch != self.cfg.web_fetch
             || cfg.ocr != self.cfg.ocr
             || cfg.vision != self.cfg.vision
+            || cfg.insecure_tls != self.cfg.insecure_tls
+            || cfg.context_tokens != self.cfg.context_tokens
             || cfg.reasoning_effort != self.cfg.reasoning_effort
             || cfg.system_prompt != self.cfg.system_prompt
         {
