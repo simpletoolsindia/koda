@@ -18,6 +18,7 @@ use ratatui::Frame;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
     Provider,
+    InsecureTls,
     Mode,
     Autonomy,
     Reasoning,
@@ -45,8 +46,9 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 24] = [
+    pub const ALL: [Row; 25] = [
         Row::Provider,
+        Row::InsecureTls,
         Row::Mode,
         Row::Autonomy,
         Row::Reasoning,
@@ -75,6 +77,7 @@ impl Row {
     fn label(&self) -> &'static str {
         match self {
             Row::Provider => "provider",
+            Row::InsecureTls => "tls verification",
             Row::Mode => "mode",
             Row::Autonomy => "autonomy",
             Row::Reasoning => "reasoning",
@@ -104,6 +107,7 @@ impl Row {
     fn hint(&self) -> &'static str {
         match self {
             Row::Provider => "switch endpoints · /provider add to save a new one",
+            Row::InsecureTls => "off = skip certificate checks (internal hosts only)",
             Row::Mode => "plan reads only · execute edits · vibe spec-checks",
             Row::Autonomy => "ask · auto-write · full-auto (no prompts)",
             Row::Reasoning => "thinking effort: off · low · medium · high",
@@ -197,6 +201,7 @@ impl Settings {
             return;
         }
         match row {
+            Row::InsecureTls => self.cfg.insecure_tls = !self.cfg.insecure_tls,
             Row::Provider => {
                 // Cycle the saved providers. With none saved there is nothing to
                 // cycle, and the label says where to make one.
@@ -379,6 +384,16 @@ impl Settings {
             }
         };
         match row {
+            Row::InsecureTls => {
+                // Phrased as the security property, not the flag: "verification: on"
+                // reads the right way round, where "insecure: off" makes a reader
+                // work out a double negative before they know what is safe.
+                if self.cfg.insecure_tls {
+                    "off — not verified".to_string()
+                } else {
+                    "on".to_string()
+                }
+            }
             Row::Provider => {
                 if self.cfg.providers.is_empty() {
                     "(none saved)".to_string()

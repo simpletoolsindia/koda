@@ -283,7 +283,9 @@ base_url = "https://llm.internal.corp/v1"
 insecure_tls = true          # or just this one endpoint
 ```
 
-It is also the **tls** field on `/setup`, toggled with `←`/`→`.
+It is also the **tls** field on `/setup` and the **tls verification** row in
+`/settings`, both toggled with `←`/`→`. Changing it takes effect immediately —
+koda rebuilds its HTTP client rather than waiting for a restart.
 
 This turns off the check that the server is who it claims to be, so anything
 able to sit in the path can read and alter the traffic — your API key and your
