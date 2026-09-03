@@ -1475,6 +1475,19 @@ impl App {
     }
 
     fn save_setup(&mut self) {
+        // Saving an "add" with no name would quietly do the opposite of what
+        // was asked: it edits the top-level settings and deselects the provider
+        // that was active. Keep the page open and say what is missing.
+        if let Some(s) = self.setup.as_mut() {
+            if s.adding && s.value(setup::Field::Name).trim().is_empty() {
+                // The panel's own status line, not a transcript note: the panel
+                // is covering the transcript, so a note there is invisible
+                // exactly when it is needed.
+                s.status = Some("a provider needs a name — type one, or esc to cancel".into());
+                s.focus = setup::Field::Name;
+                return;
+            }
+        }
         let Some(s) = self.setup.take() else { return };
         let mut cfg = self.cfg.clone();
         match s.save(&mut cfg) {

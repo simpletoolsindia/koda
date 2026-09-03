@@ -307,8 +307,11 @@ fn masked(s: &str) -> String {
 pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
     let w = area.width.saturating_sub(6).clamp(40, 78);
     // Three lines per field plus the header: five fields come to 16, and the
-    // border takes two more.
-    let h = 18u16.min(area.height.saturating_sub(2));
+    // border takes two more. A status line adds a blank and itself, and without
+    // room for them it is drawn outside the panel and simply never seen -- which
+    // is the whole point of a status line missed.
+    let want = if s.status.is_some() { 20 } else { 18 };
+    let h = want.min(area.height.saturating_sub(2));
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
         y: (area.height.saturating_sub(h)) / 2,
@@ -550,6 +553,36 @@ mod tests {
         for label in ["endpoint", "model", "api key", "images"] {
             assert!(text.contains(label), "{label} is missing from the panel");
         }
+
+        // With a status line the panel needs two more rows; without them the
+        // message is drawn past the border and never seen.
+        let mut s2 = Setup::new(&cfg);
+        s2.status = Some("a provider needs a name".into());
+        let mut term2 = Terminal::new(TestBackend::new(90, 30)).unwrap();
+        term2
+            .draw(|f| {
+                let area = f.area();
+                draw(
+                    f,
+                    area,
+                    &s2,
+                    &crate::theme::resolve("auto"),
+                    &crate::theme::UNICODE,
+                );
+            })
+            .unwrap();
+        let text2: String = term2
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text2.contains("a provider needs a name"),
+            "the status line was clipped out of the panel:\n{text2}"
+        );
+        assert!(text2.contains("images"), "and the last field still fits");
         // "images" is the last row, so its presence is what proves the added
         // field did not overflow the fixed height. The footer is a block title,
         // drawn whatever the content does, so it proves nothing here.
