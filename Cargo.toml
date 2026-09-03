@@ -36,15 +36,18 @@ tokio = { version = "1", features = [
 toml = "0.8"
 unicode-width = "0.2"
 
-# Optional heavy formats. Off by default so the ~6 MB binary is unchanged;
-# a packager opts in with `--features docs` and/or `--features pdf`.
+# Document formats. On by default: "read this spreadsheet" is a thing people
+# ask a coding agent, and being told to rebuild with a Cargo flag is not an
+# answer. They cost 1.4 MB of a 8.7 MB binary, measured, which is a price worth
+# paying for the formats working when asked. A packager who wants the smaller
+# build still has `--no-default-features`.
 calamine = { version = "0.26", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.36", optional = true }
 pdf-extract = { version = "0.7", optional = true }
 
 [features]
-default = []
+default = ["docs", "pdf"]
 docs = ["dep:calamine", "dep:zip", "dep:quick-xml"]
 pdf = ["dep:pdf-extract"]
 

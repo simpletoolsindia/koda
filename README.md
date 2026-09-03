@@ -350,9 +350,16 @@ like a command the agent runs, but the conversation context is untouched.
 `read_file` returns numbered lines for text. CSV/TSV files are rendered as an
 aligned table with a header rule, so the model reads columns reliably. Images
 (`@photo.png`) are attached to a vision model rather than read as text —
-`.png .jpg .jpeg .gif .webp .bmp .tiff .avif .svg` are recognized. Reading PDF,
-Word and Excel is designed in [docs/spec-doc-parsing.md](docs/spec-doc-parsing.md)
-and gated behind a Cargo feature so the default binary stays small.
+`.png .jpg .jpeg .gif .webp .bmp .tiff .avif .svg` are recognized.
+
+PDF, Word and Excel are read too, and are on by default: `.pdf`, `.docx`,
+`.xlsx .xlsm .xls .ods`, alongside `.csv .tsv .tab`. They add 1.4 MB to the
+binary, which is the price of "read this spreadsheet" working when it is asked.
+A packager who wants the smaller build can use `--no-default-features`. The
+design is in [docs/spec-doc-parsing.md](docs/spec-doc-parsing.md).
+
+Legacy `.doc` (the pre-2007 binary Word format) is **not** supported — only
+`.docx`. Convert it, or open it and save as `.docx`.
 
 **OCR fallback.** If you attach an image but your model isn't vision-capable,
 turn on `ocr` (in `/settings`, off by default) and koda extracts the image's

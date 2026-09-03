@@ -206,14 +206,23 @@ update() {
     fi
 
     # Update every copy found, so a shadowed one cannot keep serving old code.
-    local prefix t
-    while IFS= read -r t; do
+    #
+    # A `while read ... done <<EOF` loop would redirect stdin to the heredoc for
+    # everything inside it, and build_and_install prompts on stdin -- it would
+    # see a non-tty, take the non-interactive branch and refuse to install Rust
+    # or ripgrep. Splitting on newlines with IFS leaves stdin alone.
+    local prefix t oldifs="$IFS"
+    IFS='
+'
+    for t in $targets; do
+        IFS="$oldifs"
         [ -n "$t" ] || continue
         prefix="$(dirname "$(dirname "$t")")"
         build_and_install "$prefix"
-    done <<EOF
-$targets
-EOF
+        IFS='
+'
+    done
+    IFS="$oldifs"
     ok "updated: $before → $(version_of "$first")"
 }
 
@@ -243,12 +252,17 @@ uninstall() {
             warn "re-run in a terminal, or set KODA_UNINSTALL_YES=1 to confirm"
             return 0
         fi
-        while IFS= read -r t; do
+        local oldifs="$IFS"
+        IFS='
+'
+        for t in $targets; do
+            IFS="$oldifs"
             [ -n "$t" ] || continue
             maybe_sudo "$t" rm -f "$t" && ok "removed $t"
-        done <<EOF
-$targets
-EOF
+            IFS='
+'
+        done
+        IFS="$oldifs"
     fi
 
     # Config is deliberately a separate question and defaults to no: it holds
