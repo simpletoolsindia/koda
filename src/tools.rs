@@ -954,10 +954,9 @@ fn extract_docx(bytes: &[u8]) -> Result<String> {
                     _ => {}
                 }
             }
-            Ok(Event::Text(t)) => {
-                if in_text {
-                    para.push_str(&t.unescape().unwrap_or_default());
-                }
+            // Text outside a <w:t> is markup noise, not document content.
+            Ok(Event::Text(t)) if in_text => {
+                para.push_str(&t.unescape().unwrap_or_default());
             }
             Ok(Event::End(e)) => {
                 let name = e.local_name();
@@ -969,11 +968,9 @@ fn extract_docx(bytes: &[u8]) -> Result<String> {
                         out.push('\n');
                         para.clear();
                     }
-                    b"tc" => {
-                        if !para.is_empty() {
-                            para.push('\t');
-                        }
-                    }
+                    // A cell boundary separates columns, but only between
+                    // them: a leading tab would indent every row.
+                    b"tc" if !para.is_empty() => para.push('\t'),
                     b"br" => para.push('\n'),
                     _ => {}
                 }
