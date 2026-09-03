@@ -1259,6 +1259,17 @@ mod tests {
         std::fs::remove_dir_all(&cfg_home).ok();
         std::fs::create_dir_all(&cfg_home).ok();
         std::env::set_var("XDG_CONFIG_HOME", &cfg_home);
+        // This test POSTs an 80 KB system prompt, and the handler saves it. If
+        // the env var is not in force the save lands in the developer's real
+        // config, where 80 KB of "You are a reviewer." costs 20k tokens on every
+        // message thereafter and nothing says so. That happened. Fail loudly
+        // here rather than quietly there.
+        assert!(
+            crate::config::config_path().starts_with(&cfg_home),
+            "refusing to run: config_path() is {}, not under {}",
+            crate::config::config_path().display(),
+            cfg_home.display()
+        );
         let root = std::env::temp_dir().join(format!("koda-split-{}", std::process::id()));
         std::fs::create_dir_all(&root).ok();
         let addr = start(root.clone(), 0, "medium".into()).await.expect("bind");

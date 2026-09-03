@@ -2313,6 +2313,26 @@ fn highlight_selection(
     }
 }
 
+/// Warn about a custom system prompt big enough to dominate every request.
+///
+/// The built-in prompt is around 2.5 KB. Anything past this is either a
+/// deliberate and very large prompt -- worth knowing the price of -- or
+/// something that got in by accident.
+fn oversized_prompt_warning(prompt: &str) -> Option<String> {
+    const LIMIT: usize = 20_000;
+    let n = prompt.len();
+    (n > LIMIT).then(|| {
+        format!(
+            "your custom system prompt is {} KB (~{} tokens) and is sent with every \
+             message — clear it with /settings → system prompt, or edit system_prompt \
+             in {}",
+            n / 1024,
+            n / 4,
+            crate::config::config_path().display()
+        )
+    })
+}
+
 /// A paste that is really a file path.
 ///
 /// Several terminals answer an image paste by writing the image to a temp file
@@ -3907,6 +3927,14 @@ pub async fn run(
         app.last_size = (size.width, size.height);
     }
     app.show_welcome(&cfg);
+    // A custom system prompt is sent whole on every single request, so an
+    // oversized one is a standing bill nothing else reports. One config here
+    // held 80 KB of repeated filler -- a stray test write -- which cost about
+    // 20k tokens per message, and the only visible symptom was that koda felt
+    // expensive. Say it out loud.
+    if let Some(msg) = oversized_prompt_warning(&cfg.system_prompt) {
+        app.transcript.error(msg);
+    }
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -4348,6 +4376,24 @@ mod tests {
         let mut other = vec![Line::from("untouched".to_string())];
         highlight_selection(&mut other, 9, ((0, 0), (1, 1)), &theme);
         assert_eq!(other[0].spans.len(), 1, "left exactly as it was drawn");
+    }
+
+    /// A stray 80 KB system prompt cost ~20k tokens on every message and the
+    /// only symptom was that koda felt expensive. The price of a custom prompt
+    /// should never be invisible.
+    #[test]
+    fn an_oversized_system_prompt_is_reported() {
+        assert_eq!(oversized_prompt_warning(""), None, "the built-in is silent");
+        assert_eq!(
+            oversized_prompt_warning(&"x".repeat(2_500)),
+            None,
+            "a normal custom prompt is not nagged about"
+        );
+        let junk = "You are a reviewer. ".repeat(4000);
+        let msg = oversized_prompt_warning(&junk).expect("80 KB is reported");
+        assert!(msg.contains("78 KB"), "{msg}");
+        assert!(msg.contains("20000 tokens"), "{msg}");
+        assert!(msg.contains("/settings"), "and says how to clear it: {msg}");
     }
 
     #[test]
