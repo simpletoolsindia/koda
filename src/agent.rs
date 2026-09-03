@@ -1870,6 +1870,9 @@ impl Agent {
 
     fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
         let mut images = Vec::new();
+        // The raw `@token`s whose images made it onto the wire, so the text can
+        // be cleaned of them afterwards.
+        let mut attached: Vec<String> = Vec::new();
         // OCR'd text blocks, appended to the message when the model can't see
         // images (and OCR is enabled) so the content isn't simply lost.
         let mut ocr_blocks: Vec<String> = Vec::new();
@@ -1894,6 +1897,7 @@ impl Agent {
                 match tools::image_data_url(&full, self.cfg.max_file_bytes) {
                     Ok(url) => {
                         images.push(url);
+                        attached.push(raw.to_string());
                         let _ = tx.send(Event::Notice(format!("attached image {raw}")));
                     }
                     Err(e) => {
@@ -1935,7 +1939,30 @@ impl Agent {
         if images.is_empty() {
             Message::user(input)
         } else {
-            Message::user_with_images(input, images)
+            // The path was how the bytes got here; it is not part of what the
+            // user said. Left in, the model reads a temp filename as if it were
+            // content -- and a model that cannot see the image has nothing but
+            // that filename to answer from, which is how "analyse this
+            // screenshot" comes back as a guess about /var/folders.
+            Message::user_with_images(Self::strip_attached_paths(input, &attached), images)
+        }
+    }
+
+    /// Remove the `@path` tokens whose images were attached, leaving the sentence
+    /// the user actually wrote.
+    ///
+    /// A bare mention with nothing else around it becomes a short marker rather than
+    /// nothing at all, so "«image»" still tells the model something arrived.
+    fn strip_attached_paths(input: &str, attached: &[String]) -> String {
+        let mut out = input.to_string();
+        for raw in attached {
+            out = out.replace(&format!("@{raw}"), "");
+        }
+        let cleaned = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        if cleaned.is_empty() {
+            "(image attached)".to_string()
+        } else {
+            cleaned
         }
     }
 
@@ -3615,6 +3642,33 @@ mod tests {
         assert!(
             a.accepts_images(),
             "and auto still recognises a real vision name"
+        );
+    }
+
+    /// The path is how the bytes reached the request, not something the user
+    /// said. Left in the text, a model reads a temp filename as content -- and a
+    /// model that cannot see the image has nothing else to answer from, which is
+    /// how "analyse this screenshot" comes back as a guess about /var/folders.
+    #[test]
+    fn an_attached_image_path_is_not_left_in_the_text() {
+        let attached = vec!["/var/folders/xk/T/clipboard-1.png".to_string()];
+        assert_eq!(
+            Agent::strip_attached_paths(
+                "what is wrong here? @/var/folders/xk/T/clipboard-1.png",
+                &attached
+            ),
+            "what is wrong here?"
+        );
+        // A bare paste with no words still says something arrived.
+        assert_eq!(
+            Agent::strip_attached_paths("@/var/folders/xk/T/clipboard-1.png", &attached),
+            "(image attached)"
+        );
+        // A path that was not attached (no vision, say) is left alone -- the
+        // model may still need to know which file was meant.
+        assert_eq!(
+            Agent::strip_attached_paths("look at @/tmp/other.png", &[]),
+            "look at @/tmp/other.png"
         );
     }
 

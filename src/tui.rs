@@ -271,6 +271,11 @@ pub struct App {
     /// Where the transcript text is drawn, so a mouse position can be turned
     /// back into a line and column. Filled in by `draw` each frame.
     text_area: Rect,
+    /// Images pasted this turn, shown in the composer as a short `@imageN`
+    /// token and expanded to their real paths on submit. The path is an
+    /// implementation detail of getting the bytes to the model; it is not
+    /// something the user typed, so it should not fill their input line.
+    images: Vec<PathBuf>,
     /// An in-progress or finished drag selection, in absolute transcript
     /// coordinates: ((anchor_line, anchor_col), (cursor_line, cursor_col)).
     /// Absolute rather than screen-relative so scrolling mid-drag does not
@@ -355,17 +360,17 @@ impl App {
         // A path, not prose: attach it instead of typing it out. This is how an
         // image paste actually arrives in most terminals.
         if let Some(path) = paste_as_path(trimmed) {
-            let image = crate::tools::is_image_path(&path);
-            self.editor.insert(&format!("@{} ", path.display()));
-            let kb = std::fs::metadata(&path)
-                .map(|m| m.len() / 1024)
-                .unwrap_or(0);
-            self.note(if image {
-                format!("pasted image ({kb} KB) — it attaches when you send")
+            if crate::tools::is_image_path(&path) {
+                self.attach_image(path);
             } else {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("pasted path {name} — it attaches when you send")
-            });
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                self.editor.insert(&format!("@{} ", path.display()));
+                self.note(format!("pasted path {name} — it attaches when you send"));
+            }
             return;
         }
         if trimmed.len() > 200 || trimmed.contains('\n') {
@@ -379,6 +384,24 @@ impl App {
         } else {
             self.editor.insert(trimmed);
         }
+    }
+
+    /// Note a pasted image and put a short token in the composer.
+    ///
+    /// The composer shows `@image1`, not a 90-character temp path: the user
+    /// pasted a picture, and a wall of path is noise in the one line they are
+    /// trying to write a sentence in. `submit` swaps it back for the real path,
+    /// which is what the attach step matches on.
+    fn attach_image(&mut self, path: PathBuf) {
+        let kb = std::fs::metadata(&path)
+            .map(|m| m.len() / 1024)
+            .unwrap_or(0);
+        self.images.push(path);
+        let n = self.images.len();
+        self.editor.insert(&format!("@image{n} "));
+        self.note(format!(
+            "pasted image ({kb} KB) as @image{n} — it attaches when you send"
+        ));
     }
 
     /// Put a clipboard image in front of the model.
@@ -398,13 +421,7 @@ impl App {
         if clipboard_image(&dest).is_err() {
             return false;
         }
-        let kb = std::fs::metadata(&dest)
-            .map(|m| m.len() / 1024)
-            .unwrap_or(0);
-        self.editor.insert(&format!("@{} ", dest.display()));
-        self.note(format!(
-            "pasted image ({kb} KB) — it attaches when you send"
-        ));
+        self.attach_image(dest);
         true
     }
 
@@ -1688,6 +1705,15 @@ impl App {
                 }
             }
             self.pastes.clear();
+        }
+        if !self.images.is_empty() {
+            for (i, path) in self.images.iter().enumerate() {
+                let token = format!("@image{}", i + 1);
+                if trimmed.contains(&token) {
+                    trimmed = trimmed.replace(&token, &format!("@{}", path.display()));
+                }
+            }
+            self.images.clear();
         }
         if let Some(rest) = trimmed.strip_prefix('/') {
             // ...unless it is a path. No command name contains a slash, while a
@@ -4102,6 +4128,7 @@ pub async fn run(
         // the frame budget derive from this one capability-aware flag.
         sync_output: cfg.sync_output && anim::sync_trustworthy(),
         mouse_capture: cfg.mouse_capture,
+        images: Vec::new(),
         text_area: Rect::new(0, 0, 0, 0),
         selection: None,
         last_size: (0, 0),
