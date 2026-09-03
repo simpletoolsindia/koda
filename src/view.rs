@@ -873,6 +873,10 @@ fn shown_prefix(text: &str, cut: Option<usize>) -> &str {
     }
 }
 
+// Nine inputs, each of them genuinely needed to draw one block, and all of them
+// per-call rather than per-session state. Bundling them into a struct would move
+// the argument list rather than shorten it, on the hottest path in the renderer.
+#[allow(clippy::too_many_arguments)]
 fn render_item(
     item: &Item,
     width: usize,

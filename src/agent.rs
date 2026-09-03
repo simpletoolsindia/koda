@@ -1172,10 +1172,11 @@ impl Agent {
         // visible), the raw SSE streams in from the HTTP layer, and the parsed
         // result is attached when the step closes.
         let step = crate::trace::open_step(self.trace_turn, crate::trace::StepKind::Model, &self.model);
-        let request_json = step
-            .is_some()
-            .then(|| serde_json::to_string_pretty(&req.to_json()).unwrap_or_default())
-            .unwrap_or_default();
+        let request_json = if step.is_some() {
+            serde_json::to_string_pretty(&req.to_json()).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let prompt_tokens = self.history_tokens();
 
         let (stx, mut srx) = mpsc::unbounded_channel::<StreamEvent>();
