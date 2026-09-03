@@ -22,6 +22,11 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
   };
 
   const resetForm = () => setForm({ name: '', when: '', role: '', body: '', model: '' });
+  // An agent is a skill with a role, which is not something you can guess from
+  // an empty form. Seeding the role is what makes the distinction visible: the
+  // heading, the model picker and the button all key off it.
+  const newAgent = () => { resetForm(); setForm({ name: '', when: '', role: 'reviewer', body: '', model: '' }); setFilter('agents'); };
+  const newSkill = () => { resetForm(); setFilter('skills'); };
 
   const remove = async (s, e) => {
     if (e) e.stopPropagation();
@@ -79,7 +84,19 @@ function AgentsSkills({ skills, loading, error, onRefresh, pushToast }) {
       {/* List */}
       <div className="flex-1 overflow-y-auto bg-canvas p-4 md:p-6">
         <div className="flex items-center gap-2 mb-3">
-          <h2 className="text-sm font-semibold text-gray-200">Knowledge Base</h2>
+          <h2 className="text-sm font-semibold text-gray-200">Agents &amp; Skills</h2>
+          {/* Creating either one meant knowing that the difference is whether
+              you fill in "Role". These say it outright and set the form up. */}
+          <button type="button" onClick={newAgent}
+            className="px-2.5 py-1 rounded-lg text-xs font-medium bg-purple-500/20 text-purple-200 border border-purple-500/30 hover:bg-purple-500/30"
+            title="An agent you can delegate to, with its own instructions and model">
+            + New Agent
+          </button>
+          <button type="button" onClick={newSkill}
+            className="px-2.5 py-1 rounded-lg text-xs font-medium bg-white/5 text-gray-300 border border-white/10 hover:bg-white/10"
+            title="Knowledge the agent reads when it applies">
+            + New Skill
+          </button>
           <div className="flex gap-1 ml-auto" role="group" aria-label="Filter">
             {[['all', `All ${list.length}`], ['skills', `Skills ${skillCount}`], ['agents', `Agents ${agentCount}`]].map(([v, label]) => (
               <button key={v} onClick={() => setFilter(v)}
