@@ -24,7 +24,10 @@ pub fn set_enabled(on: bool) {
 /// Whether capture is active. Honours `KODA_DEBUG=1` even if config said off.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
-        || matches!(std::env::var("KODA_DEBUG").ok().as_deref(), Some("1") | Some("true"))
+        || matches!(
+            std::env::var("KODA_DEBUG").ok().as_deref(),
+            Some("1") | Some("true")
+        )
 }
 
 /// The directory debug artifacts are written to: `<state>/koda/debug`.
@@ -85,11 +88,7 @@ pub fn report() -> String {
     let count = std::fs::read_dir(&d)
         .map(|it| {
             it.flatten()
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .ends_with(".json")
-                })
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
                 .count()
         })
         .unwrap_or(0);

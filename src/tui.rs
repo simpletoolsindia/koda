@@ -6,29 +6,29 @@
 //! There is exactly one border depth anywhere on screen — the terminal edge
 //! already frames the app, so nothing else is boxed except a modal.
 
-use crate::anim;
 use crate::agent::{Agent, Approval, Command, Event};
+use crate::anim;
 use crate::config::{AutoTier, Config, Mode};
+use crate::editor::Editor;
 use crate::fuzzy::FileIndex;
 use crate::log;
+use crate::md;
+use crate::panel::{self, Panel};
 use crate::session::{self, Summary};
 use crate::settings;
 use crate::setup::{self, Setup};
-use crate::editor::Editor;
-use crate::md;
-use crate::panel::{self, Panel};
 use crate::theme::{self, Glyphs, Theme};
 use crate::view::Transcript;
 
 use anyhow::Result;
+#[cfg(windows)]
+use ratatui::crossterm::event::EnableMouseCapture;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
 };
-use ratatui::crossterm::execute;
 use ratatui::crossterm::event::{DisableMouseCapture, MouseButton, MouseEventKind};
-#[cfg(windows)]
-use ratatui::crossterm::event::EnableMouseCapture;
+use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
     EnterAlternateScreen, LeaveAlternateScreen,
@@ -44,8 +44,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthStr;
 use tokio::sync::{mpsc, oneshot, Notify};
+use unicode_width::UnicodeWidthStr;
 
 /// A spinner that flashes for instant work is noise, so hold it back briefly.
 const SPINNER_DELAY: Duration = Duration::from_millis(200);
@@ -85,7 +85,6 @@ fn working_message(elapsed: Duration) -> &'static str {
     WORKING_MSGS[slot % WORKING_MSGS.len()]
 }
 
-
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
 /// A bold "ANSI Shadow" face with drop shadows — fancier and more striking than
@@ -112,8 +111,14 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/reason", "reasoning effort: off/low/medium/high"),
     ("/websearch", "turn web search on or off"),
     ("/skills", "list skills, or reload them from disk"),
-    ("/learn", "review & accept what koda learned about this project"),
-    ("/orc", "run a task in vibe mode (spec, orchestrate, verify)"),
+    (
+        "/learn",
+        "review & accept what koda learned about this project",
+    ),
+    (
+        "/orc",
+        "run a task in vibe mode (spec, orchestrate, verify)",
+    ),
     ("/setup", "set the endpoint, model and API key"),
     ("/settings", "interactive settings page"),
     ("/resume", "reopen an earlier conversation"),
@@ -128,7 +133,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/tools", "list available tools"),
     ("/think", "show or hide model reasoning"),
     ("/motion", "turn animation on or off"),
-    ("/mouse", "toggle mouse capture (on = wheel scrolls + drag selects)"),
+    (
+        "/mouse",
+        "toggle mouse capture (on = wheel scrolls + drag selects)",
+    ),
     ("/reveal", "toggle progressive text reveal"),
     ("/copy", "copy last reply to the clipboard"),
     ("/cwd", "show the workspace root"),
@@ -349,7 +357,9 @@ impl App {
         if let Some(path) = paste_as_path(trimmed) {
             let image = crate::tools::is_image_path(&path);
             self.editor.insert(&format!("@{} ", path.display()));
-            let kb = std::fs::metadata(&path).map(|m| m.len() / 1024).unwrap_or(0);
+            let kb = std::fs::metadata(&path)
+                .map(|m| m.len() / 1024)
+                .unwrap_or(0);
             self.note(if image {
                 format!("pasted image ({kb} KB) — it attaches when you send")
             } else {
@@ -388,7 +398,9 @@ impl App {
         if clipboard_image(&dest).is_err() {
             return false;
         }
-        let kb = std::fs::metadata(&dest).map(|m| m.len() / 1024).unwrap_or(0);
+        let kb = std::fs::metadata(&dest)
+            .map(|m| m.len() / 1024)
+            .unwrap_or(0);
         self.editor.insert(&format!("@{} ", dest.display()));
         self.note(format!(
             "pasted image ({kb} KB) — it attaches when you send"
@@ -555,7 +567,11 @@ impl App {
                     scroll: 0,
                 });
             }
-            Event::AskUser { question, options, reply } => {
+            Event::AskUser {
+                question,
+                options,
+                reply,
+            } => {
                 // Show the question as a distinct prose block. With options, the
                 // user picks from a dropdown (a custom-answer entry is added);
                 // otherwise their next typed message is the answer.
@@ -633,7 +649,9 @@ impl App {
                 } else if self.model_picker_pending {
                     self.model_picker_pending = false;
                     if list.is_empty() {
-                        self.note("no models reported — check the endpoint (/url) and key (/setup)");
+                        self.note(
+                            "no models reported — check the endpoint (/url) and key (/setup)",
+                        );
                     } else {
                         let cur = list.iter().position(|m| m == &self.model).unwrap_or(0);
                         self.choices = Some((list, cur, ChoiceKind::Model));
@@ -743,7 +761,10 @@ impl App {
                 t.body(),
             )]);
             p.row(vec![Span::styled(
-                format!("Type /setup, or run `koda models` to see what {} has.", host_of(&self.endpoint)),
+                format!(
+                    "Type /setup, or run `koda models` to see what {} has.",
+                    host_of(&self.endpoint)
+                ),
                 t.dim(),
             )]);
             let lines = p.render(&t, &g);
@@ -803,16 +824,16 @@ impl App {
                 "a fast terminal coding agent".to_string(),
                 t.emphasis(t.accent_alt),
             ),
-            Span::styled(
-                format!("  {}  {}", g.sep, model_short),
-                t.dim(),
-            ),
+            Span::styled(format!("  {}  {}", g.sep, model_short), t.dim()),
         ]));
         lines.push(Line::default());
         // Quick-start tips: the few things a new user most needs, one per line,
         // key highlighted in the accent, description dimmed.
         let tips: [(&str, &str); 4] = [
-            ("type a task", "and press enter — e.g. \"fix the failing test\""),
+            (
+                "type a task",
+                "and press enter — e.g. \"fix the failing test\"",
+            ),
             ("@", "attach a file to your message"),
             ("/help", "see all commands"),
             ("ctrl+p", "switch mode (plan · execute · vibe)"),
@@ -847,11 +868,8 @@ impl App {
         }
         let current = self.model.clone();
         let width = self.panel_width();
-        let mut p = Panel::new(
-            format!("Models on {}", host_of(&self.endpoint)),
-            width,
-        )
-        .footer("/model <name> to switch");
+        let mut p = Panel::new(format!("Models on {}", host_of(&self.endpoint)), width)
+            .footer("/model <name> to switch");
         for m in &list {
             let selected = *m == current;
             p.row(vec![
@@ -909,7 +927,12 @@ impl App {
         }
         // Ask-user dropdown: navigate/select options until the user picks the
         // custom-answer entry, after which typing flows to the input as normal.
-        if self.asking.as_ref().map(|a| !a.custom && !a.options.is_empty()).unwrap_or(false) {
+        if self
+            .asking
+            .as_ref()
+            .map(|a| !a.custom && !a.options.is_empty())
+            .unwrap_or(false)
+        {
             self.asking_key(key);
             return;
         }
@@ -1005,13 +1028,21 @@ impl App {
             KeyCode::Char('r') if ctrl => {
                 self.follow |= self.transcript.toggle_tools_pref();
                 let on = self.transcript.expand_tools;
-                self.note(if on { "tool output expanded (stays until ctrl+r)" } else { "tool output collapsed" });
+                self.note(if on {
+                    "tool output expanded (stays until ctrl+r)"
+                } else {
+                    "tool output collapsed"
+                });
             }
             KeyCode::Char('p') if ctrl => self.cycle_mode(),
             KeyCode::Char('t') if ctrl => {
                 self.follow |= self.transcript.toggle_reasoning_pref();
                 let on = self.transcript.show_reasoning;
-                self.note(if on { "reasoning shown (stays until ctrl+t)" } else { "reasoning hidden" });
+                self.note(if on {
+                    "reasoning shown (stays until ctrl+t)"
+                } else {
+                    "reasoning hidden"
+                });
             }
             // clippy suggests collapsing this into the match guard. Do not: see
             // below.
@@ -1128,7 +1159,9 @@ impl App {
 
     /// Key handling for the ask_user dropdown (options + custom-answer entry).
     fn asking_key(&mut self, key: KeyEvent) {
-        let Some(a) = self.asking.as_mut() else { return };
+        let Some(a) = self.asking.as_mut() else {
+            return;
+        };
         // The last row is always the custom-answer entry.
         let total = a.options.len() + 1;
         match key.code {
@@ -1176,7 +1209,9 @@ impl App {
 
     /// Key handling for the generic mode/model picker overlay.
     fn choices_key(&mut self, key: KeyEvent) {
-        let Some((list, sel, kind)) = &mut self.choices else { return };
+        let Some((list, sel, kind)) = &mut self.choices else {
+            return;
+        };
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.choices = None,
             KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
@@ -1205,7 +1240,6 @@ impl App {
         }
     }
 
-
     fn setup_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // A toggle field is a choice, not a value: left/right and space step it,
@@ -1214,8 +1248,14 @@ impl App {
         if let Some(s) = self.setup.as_mut() {
             if s.focus.is_toggle() {
                 match key.code {
-                    KeyCode::Left => { s.cycle_vision(false); return; }
-                    KeyCode::Right | KeyCode::Char(' ') => { s.cycle_vision(true); return; }
+                    KeyCode::Left => {
+                        s.cycle_vision(false);
+                        return;
+                    }
+                    KeyCode::Right | KeyCode::Char(' ') => {
+                        s.cycle_vision(true);
+                        return;
+                    }
                     KeyCode::Char(_) if !ctrl => return,
                     KeyCode::Backspace => return,
                     _ => {}
@@ -1308,7 +1348,9 @@ impl App {
     }
 
     fn settings_key(&mut self, key: KeyEvent) {
-        let Some(s) = self.settings.as_mut() else { return };
+        let Some(s) = self.settings.as_mut() else {
+            return;
+        };
         // Inline text editor open (SearXNG URL, system prompt): capture typing.
         if s.editing.is_some() {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1353,7 +1395,9 @@ impl App {
                     if dirty {
                         match crate::config::save(&cfg) {
                             Ok(path) => self.note(format!("settings saved to {}", path.display())),
-                            Err(e) => self.transcript.error(format!("could not save settings: {e}")),
+                            Err(e) => self
+                                .transcript
+                                .error(format!("could not save settings: {e}")),
                         }
                     }
                 }
@@ -1366,7 +1410,9 @@ impl App {
     /// Push the settings overlay's working config into the live app and agent,
     /// so a change is visible immediately rather than only after close.
     fn apply_settings(&mut self) {
-        let Some(cfg) = self.settings.as_ref().map(|s| s.cfg.clone()) else { return };
+        let Some(cfg) = self.settings.as_ref().map(|s| s.cfg.clone()) else {
+            return;
+        };
         self.adopt_config(cfg);
     }
 
@@ -1380,7 +1426,11 @@ impl App {
             self.set_theme(th);
         }
         // Motion / reveal.
-        self.motion = if cfg.motion { anim::Motion::Full } else { anim::Motion::Reduced };
+        self.motion = if cfg.motion {
+            anim::Motion::Full
+        } else {
+            anim::Motion::Reduced
+        };
         self.reveal_pref = cfg.reveal;
         self.transcript.animate_reveal = self.motion.animates() && self.reveal_pref;
         if !self.transcript.animate_reveal {
@@ -1461,7 +1511,9 @@ impl App {
                             self.send(Command::Resume(path));
                             self.note(format!("web: resumed session {}", header.id));
                         }
-                        Err(e) => self.transcript.error(format!("could not read that session: {e}")),
+                        Err(e) => self
+                            .transcript
+                            .error(format!("could not read that session: {e}")),
                     }
                 }
             }
@@ -1471,7 +1523,9 @@ impl App {
 
     /// Returns true when the key belonged to the log overlay.
     fn log_key(&mut self, key: KeyEvent) -> bool {
-        let Some(scroll) = self.logs else { return false };
+        let Some(scroll) = self.logs else {
+            return false;
+        };
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.logs = None;
@@ -1686,8 +1740,13 @@ impl App {
         match cmd.as_str() {
             "help" | "?" => self.show_help(),
             "detailhelp" | "guide" => match crate::detailhelp::open(COMMANDS) {
-                Ok(path) => self.note(format!("opened the full guide in your browser ({})", path.display())),
-                Err(e) => self.transcript.error(format!("could not open the guide: {e}")),
+                Ok(path) => self.note(format!(
+                    "opened the full guide in your browser ({})",
+                    path.display()
+                )),
+                Err(e) => self
+                    .transcript
+                    .error(format!("could not open the guide: {e}")),
             },
             "keys" => self.show_help(),
             "model" => {
@@ -1706,8 +1765,15 @@ impl App {
                 "" => {
                     // No argument: open a selectable list of the three modes,
                     // pre-selecting the current one.
-                    let modes = vec!["plan".to_string(), "execute".to_string(), "vibe".to_string()];
-                    let cur = modes.iter().position(|m| m == &self.mode.to_string()).unwrap_or(0);
+                    let modes = vec![
+                        "plan".to_string(),
+                        "execute".to_string(),
+                        "vibe".to_string(),
+                    ];
+                    let cur = modes
+                        .iter()
+                        .position(|m| m == &self.mode.to_string())
+                        .unwrap_or(0);
                     self.choices = Some((modes, cur, ChoiceKind::Mode));
                 }
                 other => match other.parse::<Mode>() {
@@ -1766,7 +1832,9 @@ impl App {
             }
             "orc" | "orchestrate" => {
                 if arg.is_empty() {
-                    self.note("usage: /orc <task> — runs it in vibe mode (spec → orchestrate → verify)");
+                    self.note(
+                        "usage: /orc <task> — runs it in vibe mode (spec → orchestrate → verify)",
+                    );
                     return;
                 }
                 // Orc is now folded into vibe mode: vibe already writes a spec,
@@ -1823,7 +1891,11 @@ impl App {
                 self.cfg.debug = on;
                 let mut lines = vec![Line::from(Span::styled(
                     format!("debug capture {}", if on { "on" } else { "off" }),
-                    self.theme.emphasis(if on { self.theme.success } else { self.theme.warning }),
+                    self.theme.emphasis(if on {
+                        self.theme.success
+                    } else {
+                        self.theme.warning
+                    }),
                 ))];
                 for l in crate::debug::report().lines() {
                     lines.push(Line::from(Span::styled(l.to_string(), self.theme.dim())));
@@ -1927,17 +1999,21 @@ impl App {
                 let action = match it.next().unwrap_or("") {
                     "" | "review" | "show" => LearnAction::Review,
                     "all" => LearnAction::Accept(None),
-                    "accept" | "ok" | "yes" => match it.next().and_then(|n| n.parse::<usize>().ok()) {
-                        Some(n) => LearnAction::Accept(Some(n)),
-                        None => LearnAction::Accept(None),
-                    },
-                    "reject" | "no" | "drop" => match it.next().and_then(|n| n.parse::<usize>().ok()) {
-                        Some(n) => LearnAction::Reject(n),
-                        None => {
-                            self.note("usage: /learn reject <n>");
-                            return;
+                    "accept" | "ok" | "yes" => {
+                        match it.next().and_then(|n| n.parse::<usize>().ok()) {
+                            Some(n) => LearnAction::Accept(Some(n)),
+                            None => LearnAction::Accept(None),
                         }
-                    },
+                    }
+                    "reject" | "no" | "drop" => {
+                        match it.next().and_then(|n| n.parse::<usize>().ok()) {
+                            Some(n) => LearnAction::Reject(n),
+                            None => {
+                                self.note("usage: /learn reject <n>");
+                                return;
+                            }
+                        }
+                    }
                     _ => {
                         self.note("usage: /learn [accept <n> | all | reject <n>]");
                         return;
@@ -1970,8 +2046,8 @@ impl App {
             }
             "tools" => {
                 let width = self.panel_width();
-                let mut p = Panel::new("Tools", width)
-                    .footer("the agent picks these · ● asks approval");
+                let mut p =
+                    Panel::new("Tools", width).footer("the agent picks these · ● asks approval");
                 for spec in crate::tools::specs() {
                     let desc: String = spec
                         .desc
@@ -2109,7 +2185,12 @@ impl App {
                 ));
                 // A swatch of the palette, so you can choose by eye.
                 for c in [
-                    th.accent, th.accent_alt, th.success, th.warning, th.error, th.info,
+                    th.accent,
+                    th.accent_alt,
+                    th.success,
+                    th.warning,
+                    th.error,
+                    th.info,
                 ] {
                     row.push(Span::styled("██", Style::default().fg(c)));
                 }
@@ -2144,7 +2225,10 @@ impl App {
             ("ctrl+r", "expand last tool output"),
             ("ctrl+t", "expand last reasoning"),
             ("wheel / pgup/pgdn", "scroll the reply"),
-            ("shift+↑/↓", "scroll a line (ctrl+↑/↓ too, where the OS allows)"),
+            (
+                "shift+↑/↓",
+                "scroll a line (ctrl+↑/↓ too, where the OS allows)",
+            ),
             ("up/down", "previous / next message you typed"),
             ("tab", "complete · pick a file"),
             ("@", "mention a file"),
@@ -2164,7 +2248,10 @@ impl App {
             ("/auto", "cycle ask → auto-write → full-auto"),
             ("/reason high", "reasoning effort: off/low/medium/high"),
             ("/watch", "act on AI! / AI? comment triggers"),
-            ("/orc build a login page", "split the task across role agents"),
+            (
+                "/orc build a login page",
+                "split the task across role agents",
+            ),
             ("/settings", "edit everything (system prompt, web UI, …)"),
             ("/theme tokyo-night", "switch palette by name"),
             ("@src/main.rs", "attach a file (or image) to your message"),
@@ -2187,7 +2274,8 @@ impl App {
         lines.extend(ex.render(&self.theme, &self.glyphs));
         lines.push(Line::default());
 
-        let mut k = Panel::new("Keys", width).footer("/detailhelp opens the full guide in your browser");
+        let mut k =
+            Panel::new("Keys", width).footer("/detailhelp opens the full guide in your browser");
         for row in panel::key_value_rows(KEYS, k.inner(), &self.theme) {
             k.row(row);
         }
@@ -2243,9 +2331,9 @@ impl App {
 fn copy_to_clipboard(text: &str) -> Result<()> {
     use std::process::{Command as Proc, Stdio};
     for (bin, args) in [
-        ("pbcopy", &[][..]),            // macOS
-        ("clip", &[]),                  // Windows
-        ("wl-copy", &[]),               // Linux/Wayland
+        ("pbcopy", &[][..]),                     // macOS
+        ("clip", &[]),                           // Windows
+        ("wl-copy", &[]),                        // Linux/Wayland
         ("xclip", &["-selection", "clipboard"]), // Linux/X11
         ("xsel", &["--clipboard", "--input"]),   // Linux/X11 alt
     ] {
@@ -2427,7 +2515,10 @@ fn clipboard_image(dest: &Path) -> Result<()> {
         // Wayland and X11 both hand the bytes back on stdout.
         for (bin, args) in [
             ("wl-paste", &["--type", "image/png"][..]),
-            ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+            (
+                "xclip",
+                &["-selection", "clipboard", "-t", "image/png", "-o"],
+            ),
         ] {
             if let Ok(out) = Proc::new(bin).args(args).stderr(Stdio::null()).output() {
                 if out.status.success() && !out.stdout.is_empty() {
@@ -2530,7 +2621,15 @@ fn draw(f: &mut Frame, app: &mut App) {
     // it stays a two-line field so it reads as a real input box, and it can
     // expand to a tall field as you type.
     let max_input = if m.tiny { 6 } else { 14 };
-    let min_input = if app.editor.is_empty() { if m.tiny { 1 } else { 2 } } else { 3 };
+    let min_input = if app.editor.is_empty() {
+        if m.tiny {
+            1
+        } else {
+            2
+        }
+    } else {
+        3
+    };
     let input_h = rows.len().saturating_add(1).clamp(min_input, max_input) as u16;
 
     // A one-row gap between the transcript/hint area and the input keeps the
@@ -2543,7 +2642,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     // even after it has scrolled out of the transcript. Hidden when there is no
     // plan or every step is done. Capped so a long plan can't eat the screen.
     let sticky = app.transcript.current_todos().filter(|items| {
-        !items.is_empty() && items.iter().any(|i| i.status != crate::tools::TodoStatus::Done)
+        !items.is_empty()
+            && items
+                .iter()
+                .any(|i| i.status != crate::tools::TodoStatus::Done)
     });
     let plan_h: u16 = if m.tiny {
         0
@@ -2645,7 +2747,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     let input_lines: Vec<Line> = if app.editor.is_empty() && !app.busy {
         let (label, style) = if app.asking.is_some() {
             // koda asked a question — make the input read as an answer field.
-            ("type your answer and press enter".to_string(), t.emphasis(t.accent))
+            (
+                "type your answer and press enter".to_string(),
+                t.emphasis(t.accent),
+            )
         } else {
             ("ask, or /help for commands".to_string(), t.dim())
         };
@@ -2680,12 +2785,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         input_lines.push(Line::from(vec![Span::raw("  ".to_string())]));
     }
     f.render_widget(
-        Paragraph::new(panel::fill(
-            input_lines,
-            area.width as usize,
-            t.bg_panel,
-            1,
-        )),
+        Paragraph::new(panel::fill(input_lines, area.width as usize, t.bg_panel, 1)),
         input,
     );
 
@@ -2752,7 +2852,11 @@ fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_w = rect.width.saturating_sub(2) as usize;
 
     let entries = log::recent(
-        if app.cfg.log_detail { log::Level::Debug } else { log::Level::Info },
+        if app.cfg.log_detail {
+            log::Level::Debug
+        } else {
+            log::Level::Info
+        },
         500,
     );
     let mut lines: Vec<Line> = Vec::new();
@@ -2776,10 +2880,7 @@ fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(truncate_line(head, inner_w as u16));
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "nothing logged yet",
-            t.dim(),
-        )));
+        lines.push(Line::from(Span::styled("nothing logged yet", t.dim())));
     }
 
     // Default to the tail: the newest entry is what you came to read.
@@ -2789,7 +2890,14 @@ fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
 
     let (warns, errors) = log::counts();
     let title = match log::file_path() {
-        Some(p) => format!(" logs {} {} warn {} error {} {} ", g.sep, warns, errors, g.sep, p.display()),
+        Some(p) => format!(
+            " logs {} {} warn {} error {} {} ",
+            g.sep,
+            warns,
+            errors,
+            g.sep,
+            p.display()
+        ),
         None => format!(" logs {} {} warn {} error ", g.sep, warns, errors),
     };
     let block = Block::default()
@@ -2802,12 +2910,8 @@ fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(" esc close ", t.dim()),
         ]));
     f.render_widget(Clear, rect);
-    f.render_widget(
-        Paragraph::new(lines).block(block).scroll((scroll, 0)),
-        rect,
-    );
+    f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), rect);
 }
-
 
 fn host_of(endpoint: &str) -> String {
     endpoint
@@ -2850,79 +2954,105 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
         };
         let tint = if app.cancelling { t.warning } else { t.accent };
         left.push(Span::styled(format!(" {glyph} "), t.fg(tint)));
-        let verb = if app.cancelling { "cancelling compaction" } else { "compacting context" };
+        let verb = if app.cancelling {
+            "cancelling compaction"
+        } else {
+            "compacting context"
+        };
         let label = format!("{verb}…  {}", anim::short_elapsed(started.elapsed()));
         if app.motion.animates() && !app.cancelling {
-            let bright = anim::shimmer(label.chars().count(), started.elapsed(), Duration::from_millis(1600));
+            let bright = anim::shimmer(
+                label.chars().count(),
+                started.elapsed(),
+                Duration::from_millis(1600),
+            );
             let base = t.muted;
             for (ch, b) in label.chars().zip(bright) {
-                let colour = if b <= 0.0 { base } else { theme::mix(base, t.accent, b) };
+                let colour = if b <= 0.0 {
+                    base
+                } else {
+                    theme::mix(base, t.accent, b)
+                };
                 left.push(Span::styled(ch.to_string(), t.fg(colour)));
             }
         } else {
-            left.push(Span::styled(label, if app.cancelling { t.emphasis(t.warning) } else { t.dim() }));
+            left.push(Span::styled(
+                label,
+                if app.cancelling {
+                    t.emphasis(t.warning)
+                } else {
+                    t.dim()
+                },
+            ));
         }
     } else {
         match (app.busy, app.turn_started) {
-        (true, _) if app.cancelling => {
-            // The interrupt landed but the turn is still unwinding (a tool call
-            // in flight, a stream draining). Say so, in the warning tint, rather
-            // than showing the ordinary "working" state.
-            let glyph = if app.motion.animates() {
-                g.thinking[anim::sweep(app.turn_started.map(|s| s.elapsed()).unwrap_or_default())
-                    % g.thinking.len()]
-            } else {
-                g.thinking[0]
-            };
-            left.push(Span::styled(format!(" {glyph} "), t.fg(t.warning)));
-            left.push(Span::styled("cancelling…".to_string(), t.emphasis(t.warning)));
-        }
-        (true, Some(started)) if started.elapsed() >= SPINNER_DELAY => {
-            // The sweep derives its frame from elapsed time rather than a
-            // counter, so its pace is identical whether the loop is redrawing
-            // for animation or because the user typed.
-            let glyph = if app.motion.animates() {
-                g.thinking[anim::sweep(started.elapsed()) % g.thinking.len()]
-            } else {
-                g.thinking[0]
-            };
-            left.push(Span::styled(format!(" {glyph} "), t.fg(t.accent)));
-            // Show what the agent is doing right now (reading X, editing Y). When
-            // no specific tool activity is in flight, rotate a light-hearted
-            // message every ~10s so a long turn feels alive rather than frozen.
-            let verb = app
-                .activity
-                .as_deref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| working_message(started.elapsed()).to_string());
-            let label = format!("{verb}  {}", anim::short_elapsed(started.elapsed()));
-            if app.motion.animates() {
-                // A highlight sweeping the label reads as ongoing activity
-                // without moving any text around.
-                let bright = anim::shimmer(
-                    label.chars().count(),
-                    started.elapsed(),
-                    Duration::from_millis(1600),
-                );
-                let base = t.muted;
-                for (ch, b) in label.chars().zip(bright) {
-                    let colour = if b <= 0.0 {
-                        base
-                    } else {
-                        theme::mix(base, t.accent, b)
-                    };
-                    left.push(Span::styled(ch.to_string(), t.fg(colour)));
+            (true, _) if app.cancelling => {
+                // The interrupt landed but the turn is still unwinding (a tool call
+                // in flight, a stream draining). Say so, in the warning tint, rather
+                // than showing the ordinary "working" state.
+                let glyph = if app.motion.animates() {
+                    g.thinking[anim::sweep(
+                        app.turn_started.map(|s| s.elapsed()).unwrap_or_default(),
+                    ) % g.thinking.len()]
+                } else {
+                    g.thinking[0]
+                };
+                left.push(Span::styled(format!(" {glyph} "), t.fg(t.warning)));
+                left.push(Span::styled(
+                    "cancelling…".to_string(),
+                    t.emphasis(t.warning),
+                ));
+            }
+            (true, Some(started)) if started.elapsed() >= SPINNER_DELAY => {
+                // The sweep derives its frame from elapsed time rather than a
+                // counter, so its pace is identical whether the loop is redrawing
+                // for animation or because the user typed.
+                let glyph = if app.motion.animates() {
+                    g.thinking[anim::sweep(started.elapsed()) % g.thinking.len()]
+                } else {
+                    g.thinking[0]
+                };
+                left.push(Span::styled(format!(" {glyph} "), t.fg(t.accent)));
+                // Show what the agent is doing right now (reading X, editing Y). When
+                // no specific tool activity is in flight, rotate a light-hearted
+                // message every ~10s so a long turn feels alive rather than frozen.
+                let verb = app
+                    .activity
+                    .as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| working_message(started.elapsed()).to_string());
+                let label = format!("{verb}  {}", anim::short_elapsed(started.elapsed()));
+                if app.motion.animates() {
+                    // A highlight sweeping the label reads as ongoing activity
+                    // without moving any text around.
+                    let bright = anim::shimmer(
+                        label.chars().count(),
+                        started.elapsed(),
+                        Duration::from_millis(1600),
+                    );
+                    let base = t.muted;
+                    for (ch, b) in label.chars().zip(bright) {
+                        let colour = if b <= 0.0 {
+                            base
+                        } else {
+                            theme::mix(base, t.accent, b)
+                        };
+                        left.push(Span::styled(ch.to_string(), t.fg(colour)));
+                    }
+                } else {
+                    left.push(Span::styled(label, t.dim()));
                 }
-            } else {
-                left.push(Span::styled(label, t.dim()));
+            }
+            (true, _) => left.push(Span::styled("  working".to_string(), t.dim())),
+            (false, _) => {
+                left.push(Span::styled(
+                    format!(" {} ", g.ready),
+                    t.emphasis(t.success),
+                ));
+                left.push(Span::styled("ready".to_string(), t.dim()));
             }
         }
-        (true, _) => left.push(Span::styled("  working".to_string(), t.dim())),
-        (false, _) => {
-            left.push(Span::styled(format!(" {} ", g.ready), t.emphasis(t.success)));
-            left.push(Span::styled("ready".to_string(), t.dim()));
-        }
-    }
     }
 
     if let Some((done, total)) = app.transcript.todo_progress() {
@@ -3035,9 +3165,19 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 g.thinking[0]
             };
             // Keep it short so the model/mode/tokens still fit on the right.
-            let cap = if m.tiny { 16 } else if m.compact { 24 } else { 40 };
+            let cap = if m.tiny {
+                16
+            } else if m.compact {
+                24
+            } else {
+                40
+            };
             let text: String = act.chars().take(cap).collect();
-            let text = if act.chars().count() > cap { format!("{text}…") } else { text };
+            let text = if act.chars().count() > cap {
+                format!("{text}…")
+            } else {
+                text
+            };
             segs.push(Segment::new(format!("{glyph} {text}"), t.accent).bold());
         }
     }
@@ -3088,7 +3228,10 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
         let frac = app.tokens as f64 / app.context_budget.max(1) as f64;
         let pct = (frac * 100.0).round() as usize;
         if m.compact {
-            right.push(Segment::new(format!("{}  {pct}%", Tokens(app.tokens)), t.muted));
+            right.push(Segment::new(
+                format!("{}  {pct}%", Tokens(app.tokens)),
+                t.muted,
+            ));
         } else {
             right.push(Segment::new(
                 format!(
@@ -3116,8 +3259,6 @@ impl std::fmt::Display for Tokens {
         }
     }
 }
-
-
 
 /// Clip a line to the available width without wrapping.
 fn truncate_line(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
@@ -3150,7 +3291,9 @@ fn draw_scrollbar(f: &mut Frame, rect: Rect, app: &App, total: usize) {
     }
     let thumb = ((h * h) / total).max(1).min(h);
     let max_scroll = total.saturating_sub(h);
-    let pos = (app.scroll * (h - thumb)).checked_div(max_scroll).unwrap_or(0);
+    let pos = (app.scroll * (h - thumb))
+        .checked_div(max_scroll)
+        .unwrap_or(0);
     let lines: Vec<Line> = (0..h)
         .map(|i| {
             if i >= pos && i < pos + thumb {
@@ -3174,7 +3317,10 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     if rect.height == 0 {
         return;
     }
-    let done = items.iter().filter(|i| i.status == TodoStatus::Done).count();
+    let done = items
+        .iter()
+        .filter(|i| i.status == TodoStatus::Done)
+        .count();
     let total = items.len();
     let avail = rect.width.saturating_sub(4) as usize;
 
@@ -3189,7 +3335,10 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     // Show the tasks; if there are more than fit, keep the active one in view by
     // windowing around it, and note how many are hidden.
     let cap = (rect.height as usize).saturating_sub(1).max(1);
-    let active = items.iter().position(|i| i.status == TodoStatus::Active).unwrap_or(0);
+    let active = items
+        .iter()
+        .position(|i| i.status == TodoStatus::Active)
+        .unwrap_or(0);
     let start = if items.len() <= cap {
         0
     } else {
@@ -3203,7 +3352,11 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
                 t.emphasis(t.success),
                 t.dim().add_modifier(Modifier::CROSSED_OUT),
             ),
-            TodoStatus::Active => (g.running, t.emphasis(t.warning), t.body().add_modifier(Modifier::BOLD)),
+            TodoStatus::Active => (
+                g.running,
+                t.emphasis(t.warning),
+                t.body().add_modifier(Modifier::BOLD),
+            ),
             TodoStatus::Pending => (g.pending, t.dim(), t.dim()),
         };
         let text: String = it.text.chars().take(avail.saturating_sub(3)).collect();
@@ -3252,7 +3405,11 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     let name_w = hits.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
     let max_rows = 10usize;
     // Window the list around the selection so a long list stays navigable.
-    let start = if sel >= max_rows { sel + 1 - max_rows } else { 0 };
+    let start = if sel >= max_rows {
+        sel + 1 - max_rows
+    } else {
+        0
+    };
     let shown: Vec<&&(&str, &str)> = hits.iter().skip(start).take(max_rows).collect();
     let inner_w = input.width.max(10) as usize;
 
@@ -3261,7 +3418,10 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
         let idx = start + i;
         let selected = idx == sel;
         let marker = if selected { "›" } else { " " };
-        let desc: String = desc.chars().take(inner_w.saturating_sub(name_w + 6)).collect();
+        let desc: String = desc
+            .chars()
+            .take(inner_w.saturating_sub(name_w + 6))
+            .collect();
         let name_style = if selected {
             Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
@@ -3295,10 +3455,15 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
 /// visible jump. Reduced-motion and non-TTY paths never reach here.
 fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration) {
     let t = &app.theme;
-    let (Some(a), Some(b), Some(c)) = (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info)) else {
+    let (Some(a), Some(b), Some(c)) = (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info))
+    else {
         return; // No gradient on non-truecolor palettes; nothing to shimmer.
     };
-    let cols = BANNER_ART.iter().map(|r| r.chars().count()).max().unwrap_or(1);
+    let cols = BANNER_ART
+        .iter()
+        .map(|r| r.chars().count())
+        .max()
+        .unwrap_or(1);
     // A band that sweeps across the banner width over the animation window.
     let bright = anim::shimmer(cols, elapsed, WELCOME_ANIM);
     for (i, row) in BANNER_ART.iter().enumerate() {
@@ -3330,10 +3495,17 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
             }
             spans.push(Span::styled(
                 ch.to_string(),
-                Style::default().fg(Color::Rgb(r, gg, bl)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Rgb(r, gg, bl))
+                    .add_modifier(Modifier::BOLD),
             ));
         }
-        let rect = Rect { x: text_area.x, y, width: text_area.width, height: 1 };
+        let rect = Rect {
+            x: text_area.x,
+            y,
+            width: text_area.width,
+            height: 1,
+        };
         f.render_widget(Paragraph::new(Line::from(spans)), rect);
     }
 }
@@ -3384,7 +3556,9 @@ fn mention_popup(f: &mut Frame, app: &App, input: Rect, hits: &[String]) {
 }
 
 fn session_picker(f: &mut Frame, app: &App, area: Rect) {
-    let Some((list, sel)) = &app.picker else { return };
+    let Some((list, sel)) = &app.picker else {
+        return;
+    };
     let t = &app.theme;
     let g = &app.glyphs;
 
@@ -3478,7 +3652,9 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
 
 /// A generic centered picker for the /mode and /model overlays.
 fn choices_popup(f: &mut Frame, app: &App, area: Rect) {
-    let Some((list, sel, kind)) = &app.choices else { return };
+    let Some((list, sel, kind)) = &app.choices else {
+        return;
+    };
     let t = &app.theme;
     let g = &app.glyphs;
     let title = match kind {
@@ -3523,7 +3699,9 @@ fn choices_popup(f: &mut Frame, app: &App, area: Rect) {
         .border_style(t.fg(t.border_focus))
         .title(Span::styled(
             format!(" {title} "),
-            Style::default().fg(t.border_focus).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(t.border_focus)
+                .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Line::from(vec![
             Span::styled(" ↑↓", t.fg(t.accent)),
@@ -3599,7 +3777,12 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
 
     let content_w = lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(0) as u16;
     let w = (content_w + 4).clamp(48, max_w);
@@ -3667,14 +3850,21 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         let radio_off = if g.fine_blocks { "○" } else { "o" };
         for (i, opt) in a.options.iter().enumerate() {
             let focused = i == a.sel;
-            let cursor = if focused { format!("{} ", g.pick) } else { "  ".into() };
+            let cursor = if focused {
+                format!("{} ", g.pick)
+            } else {
+                "  ".into()
+            };
             let marker = if focused { radio_on } else { radio_off };
             let color = if focused { t.accent } else { t.text };
             let num = t.dim();
             let shown: String = opt.chars().take(body_w.saturating_sub(6)).collect();
             lines.push(Line::from(vec![
                 Span::styled(cursor, t.fg(t.accent)),
-                Span::styled(format!("{marker} "), t.fg(if focused { t.accent } else { t.muted })),
+                Span::styled(
+                    format!("{marker} "),
+                    t.fg(if focused { t.accent } else { t.muted }),
+                ),
                 Span::styled(format!("{}. ", i + 1), num),
                 Span::styled(
                     shown,
@@ -3688,11 +3878,18 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
         // The "type your own" row, always last (oh-my-pi's "Other").
         let focused = a.sel == custom_idx;
-        let cursor = if focused { format!("{} ", g.pick) } else { "  ".into() };
+        let cursor = if focused {
+            format!("{} ", g.pick)
+        } else {
+            "  ".into()
+        };
         let marker = if focused { radio_on } else { radio_off };
         lines.push(Line::from(vec![
             Span::styled(cursor, t.fg(t.accent)),
-            Span::styled(format!("{marker} "), t.fg(if focused { t.accent } else { t.muted })),
+            Span::styled(
+                format!("{marker} "),
+                t.fg(if focused { t.accent } else { t.muted }),
+            ),
             Span::styled(format!("{}. ", custom_idx + 1), t.dim()),
             Span::styled(
                 format!("{} type your own answer", g.pencil),
@@ -3715,7 +3912,12 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let content_w = lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(0) as u16;
     let w = (content_w + 6).clamp(44, max_w);
@@ -3741,7 +3943,9 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(t.info).add_modifier(Modifier::BOLD))
         .title(Span::styled(
             format!(" {} Ask ", g.pending),
-            Style::default().fg(t.info).add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            Style::default()
+                .fg(t.info)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ))
         .title_bottom(Span::styled(footer.to_string(), t.dim()));
 
@@ -3880,7 +4084,11 @@ pub async fn run(
         endpoint: cfg.endpoint(),
         tokens: 0,
         context_budget: cfg.context_tokens,
-        auto_tier: if cfg.auto_approve { AutoTier::Full } else { cfg.auto_tier },
+        auto_tier: if cfg.auto_approve {
+            AutoTier::Full
+        } else {
+            cfg.auto_tier
+        },
         web: cfg.web_search,
         searx_configured: !cfg.searx_url.trim().is_empty(),
         mode: cfg.mode,
@@ -4190,8 +4398,7 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let (Some((anchor, _)), Some(p)) =
-                    (app.selection, app.point_at(m.column, m.row))
+                if let (Some((anchor, _)), Some(p)) = (app.selection, app.point_at(m.column, m.row))
                 {
                     app.selection = Some((anchor, p));
                     return true;
@@ -4277,14 +4484,20 @@ mod tests {
         // file:// URLs, percent-encoded, are the other form terminals send.
         let spaced = dir.join("a shot.png");
         std::fs::write(&spaced, b"x").unwrap();
-        let url = format!("file://{}", spaced.display().to_string().replace(' ', "%20"));
+        let url = format!(
+            "file://{}",
+            spaced.display().to_string().replace(' ', "%20")
+        );
         assert_eq!(paste_as_path(&url), Some(spaced));
 
         // Ordinary text must not be mistaken for a path.
         assert_eq!(paste_as_path("fix the login bug"), None);
         assert_eq!(paste_as_path("/help"), None);
         assert_eq!(paste_as_path(""), None);
-        assert_eq!(paste_as_path(&format!("{}\nsecond line", img.display())), None);
+        assert_eq!(
+            paste_as_path(&format!("{}\nsecond line", img.display())),
+            None
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4297,7 +4510,10 @@ mod tests {
         assert!(word("var/folders/xk/T/clipboard-1.png"), "a pasted path");
         assert!(word("Users/sridhar/shot.png"), "any absolute path");
         assert!(!word("help"), "a bare command");
-        assert!(!word("url http://localhost:11434/v1"), "slashes in an argument");
+        assert!(
+            !word("url http://localhost:11434/v1"),
+            "slashes in an argument"
+        );
         assert!(!word("learn accept 3"), "command with plain arguments");
     }
 
@@ -4318,9 +4534,21 @@ mod tests {
         let sel = ((2, 3), (4, 5));
         assert_eq!(line_span(1, sel, 10), None, "before the selection");
         assert_eq!(line_span(5, sel, 10), None, "after it");
-        assert_eq!(line_span(2, sel, 10), Some((3, 10)), "first line runs to its end");
-        assert_eq!(line_span(3, sel, 10), Some((0, 10)), "middle lines are whole");
-        assert_eq!(line_span(4, sel, 10), Some((0, 5)), "last line stops at the cursor");
+        assert_eq!(
+            line_span(2, sel, 10),
+            Some((3, 10)),
+            "first line runs to its end"
+        );
+        assert_eq!(
+            line_span(3, sel, 10),
+            Some((0, 10)),
+            "middle lines are whole"
+        );
+        assert_eq!(
+            line_span(4, sel, 10),
+            Some((0, 5)),
+            "last line stops at the cursor"
+        );
 
         // One line, bounded at both ends.
         assert_eq!(line_span(2, ((2, 1), (2, 4)), 10), Some((1, 4)));
@@ -4329,7 +4557,11 @@ mod tests {
         // An empty range selects nothing.
         assert_eq!(line_span(2, ((2, 4), (2, 4)), 10), None);
         // A short line inside a multi-line selection.
-        assert_eq!(line_span(3, sel, 0), None, "nothing to take from a blank line");
+        assert_eq!(
+            line_span(3, sel, 0),
+            None,
+            "nothing to take from a blank line"
+        );
     }
 
     /// Dragging up the screen has to select the same text as dragging down it.
@@ -4345,7 +4577,11 @@ mod tests {
             }
         };
         assert_eq!(order((2, 3), (4, 5)), Some(((2, 3), (4, 5))));
-        assert_eq!(order((4, 5), (2, 3)), Some(((2, 3), (4, 5))), "same range, dragged up");
+        assert_eq!(
+            order((4, 5), (2, 3)),
+            Some(((2, 3), (4, 5))),
+            "same range, dragged up"
+        );
         assert_eq!(order((2, 3), (2, 3)), None, "a click is not a selection");
     }
 

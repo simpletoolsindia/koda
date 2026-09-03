@@ -247,7 +247,11 @@ pub async fn search(base_url: &str, query: &str, limit: usize) -> Result<Vec<Hit
     })?;
 
     let mut hits = Vec::new();
-    for item in v.get("results").and_then(|r| r.as_array()).unwrap_or(&vec![]) {
+    for item in v
+        .get("results")
+        .and_then(|r| r.as_array())
+        .unwrap_or(&vec![])
+    {
         let title = item
             .get("title")
             .and_then(|t| t.as_str())

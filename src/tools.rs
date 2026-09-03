@@ -147,7 +147,8 @@ fn build_specs() -> Vec<Spec> {
     vec![
         Spec {
             name: "read_file",
-            desc: "Read a UTF-8 text file. Returns numbered lines. Use offset/limit for large files.",
+            desc:
+                "Read a UTF-8 text file. Returns numbered lines. Use offset/limit for large files.",
             params: json!({
                 "type": "object",
                 "properties": {
@@ -478,8 +479,18 @@ pub fn is_parallel_safe(name: &str) -> bool {
 
 /// Tools available in plan mode: everything that cannot change the workspace.
 pub const PLAN_TOOLS: &[&str] = &[
-    "read_file", "list_dir", "find_files", "search", "delegate", "todo", "skill", "web_search",
-    "web_fetch", "codegraph", "remember", "about_creator",
+    "read_file",
+    "list_dir",
+    "find_files",
+    "search",
+    "delegate",
+    "todo",
+    "skill",
+    "web_search",
+    "web_fetch",
+    "codegraph",
+    "remember",
+    "about_creator",
 ];
 
 /// One tracked step of a multi-step task.
@@ -546,8 +557,14 @@ pub fn parse_todos(args: &Value) -> Vec<Todo> {
 }
 
 /// Tools a subagent may call: read-only, and no further delegation.
-pub const SUBAGENT_TOOLS: &[&str] =
-    &["read_file", "list_dir", "find_files", "search", "skill", "codegraph"];
+pub const SUBAGENT_TOOLS: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "find_files",
+    "search",
+    "skill",
+    "codegraph",
+];
 
 pub fn spec(name: &str) -> Option<&'static Spec> {
     specs().iter().find(|s| s.name == name)
@@ -747,7 +764,12 @@ fn format_delimited(text: &str, delim: char) -> String {
         }
     };
     let mut out = String::new();
-    let _ = writeln!(out, "# delimited table ({} cols × {} rows)", cols, rows.len());
+    let _ = writeln!(
+        out,
+        "# delimited table ({} cols × {} rows)",
+        cols,
+        rows.len()
+    );
     for (ri, r) in rows.iter().enumerate() {
         let mut cells = Vec::with_capacity(cols);
         for (i, w) in widths.iter().enumerate().take(cols) {
@@ -909,8 +931,8 @@ fn extract_docx(bytes: &[u8]) -> Result<String> {
     use quick_xml::Reader as XmlReader;
     use std::io::{Cursor, Read};
 
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))
-        .context("opening DOCX (zip)")?;
+    let mut zip =
+        zip::ZipArchive::new(Cursor::new(bytes.to_vec())).context("opening DOCX (zip)")?;
     let mut xml = String::new();
     zip.by_name("word/document.xml")
         .context("DOCX missing word/document.xml")?
@@ -991,8 +1013,7 @@ fn extract_pdf(_bytes: &[u8]) -> Result<String> {
 
 #[cfg(feature = "pdf")]
 fn extract_pdf(bytes: &[u8]) -> Result<String> {
-    let text = pdf_extract::extract_text_from_mem(bytes)
-        .context("extracting text from PDF")?;
+    let text = pdf_extract::extract_text_from_mem(bytes).context("extracting text from PDF")?;
     // A scanned / image-only PDF yields (almost) no text. Point at the vision
     // path rather than pretending the document is empty, and never OCR here.
     if text.trim().chars().filter(|c| !c.is_whitespace()).count() < 8 {
@@ -1043,15 +1064,29 @@ pub fn preview(name: &str, args: &Value, ctx: &ToolCtx) -> Option<String> {
             if let Some(arr) = args.get("edits").and_then(|e| e.as_array()) {
                 for e in arr {
                     edits.push((
-                        e.get("old").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        e.get("new").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        e.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false),
+                        e.get("old")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        e.get("new")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        e.get("replace_all")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
                     ));
                 }
             } else {
                 edits.push((
-                    args.get("old").and_then(|c| c.as_str()).unwrap_or("").to_string(),
-                    args.get("new").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    args.get("old")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    args.get("new")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     arg_bool(args, "replace_all"),
                 ));
             }
@@ -1215,23 +1250,30 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         let _ = writeln!(out, "{:>width$}| {line}", start + i + 1, width = width);
     }
     if end < total {
-        let _ = writeln!(out, "[... {} more lines; use offset={} ...]", total - end, end + 1);
+        let _ = writeln!(
+            out,
+            "[... {} more lines; use offset={} ...]",
+            total - end,
+            end + 1
+        );
     }
     if out.is_empty() {
         out.push_str("(empty file)\n");
     }
-    Ok(Outcome::ok(
-        out,
-        format!("read {} ({} lines)", rel(ctx, &full), total),
+    Ok(
+        Outcome::ok(out, format!("read {} ({} lines)", rel(ctx, &full), total)).with(
+            ToolView::Read {
+                path: rel(ctx, &full),
+                lang: doc_kind
+                    .map(|k| k.tag().to_string())
+                    .unwrap_or_else(|| lang_of(&full)),
+                lines: all[start..end].iter().map(|l| l.to_string()).collect(),
+                start: start + 1,
+                total,
+                truncated: end < total,
+            },
+        ),
     )
-    .with(ToolView::Read {
-        path: rel(ctx, &full),
-        lang: doc_kind.map(|k| k.tag().to_string()).unwrap_or_else(|| lang_of(&full)),
-        lines: all[start..end].iter().map(|l| l.to_string()).collect(),
-        start: start + 1,
-        total,
-        truncated: end < total,
-    }))
 }
 
 /// Language tag for a path, used to pick a syntax highlighter.
@@ -1417,7 +1459,10 @@ fn search(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 /// Locate a usable `rg` (ripgrep) binary, or `None` to use the built-in search.
 /// Honours `KODA_NO_RIPGREP=1` to force the built-in path (used in tests).
 fn ripgrep_path() -> Option<std::path::PathBuf> {
-    if matches!(std::env::var("KODA_NO_RIPGREP").ok().as_deref(), Some("1") | Some("true")) {
+    if matches!(
+        std::env::var("KODA_NO_RIPGREP").ok().as_deref(),
+        Some("1") | Some("true")
+    ) {
         return None;
     }
     which_in_path("rg")
@@ -1504,13 +1549,18 @@ fn search_ripgrep(rg: &Path, pattern: &str, args: &Value, ctx: &ToolCtx) -> Resu
         let (Some(path), Some(num), Some(text)) = (it.next(), it.next(), it.next()) else {
             continue;
         };
-        let Ok(lineno) = num.parse::<usize>() else { continue };
+        let Ok(lineno) = num.parse::<usize>() else {
+            continue;
+        };
         // rg prints paths relative to cwd (the workspace root); strip a leading
         // "./" so they read as repo-relative like the built-in output.
         let rel_path = path.strip_prefix("./").unwrap_or(path).to_string();
         let shown: String = text.trim_end().chars().take(240).collect();
         if groups.last().map(|g| g.file != rel_path).unwrap_or(true) {
-            groups.push(MatchGroup { file: rel_path.clone(), lines: Vec::new() });
+            groups.push(MatchGroup {
+                file: rel_path.clone(),
+                lines: Vec::new(),
+            });
             files += 1;
         }
         if let Some(g) = groups.last_mut() {
@@ -1648,7 +1698,11 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let diff = unified_diff(&old, &content, &rel(ctx, &full));
     let (added, removed) = diff_stats(&diff);
     Ok(Outcome::ok(
-        format!("{verb} {} ({lines} lines)\n{}", rel(ctx, &full), truncate(&diff, 4000)),
+        format!(
+            "{verb} {} ({lines} lines)\n{}",
+            rel(ctx, &full),
+            truncate(&diff, 4000)
+        ),
         format!("{verb} {} ({lines} lines)", rel(ctx, &full)),
     )
     .with(ToolView::Diff {
@@ -1691,9 +1745,20 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let mut edits: Vec<(String, String, bool)> = Vec::new();
     if let Some(arr) = args.get("edits").and_then(|e| e.as_array()) {
         for (i, e) in arr.iter().enumerate() {
-            let old_s = e.get("old").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let new_s = e.get("new").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let all = e.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+            let old_s = e
+                .get("old")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let new_s = e
+                .get("new")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let all = e
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if old_s.is_empty() {
                 return Ok(Outcome::err(format!(
                     "edit #{}: `old` must not be empty; use write_file to create files",
@@ -1708,7 +1773,9 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     } else {
         let old_s = arg_str(args, "old")?;
         if old_s.is_empty() {
-            return Ok(Outcome::err("`old` must not be empty; use write_file to create files"));
+            return Ok(Outcome::err(
+                "`old` must not be empty; use write_file to create files",
+            ));
         }
         edits.push((
             old_s,
@@ -1740,7 +1807,9 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     }
 
     if content == original {
-        return Ok(Outcome::err(format!("{path}: no change (old and new are identical)")));
+        return Ok(Outcome::err(format!(
+            "{path}: no change (old and new are identical)"
+        )));
     }
 
     std::fs::write(&full, &content).with_context(|| format!("writing {path}"))?;
@@ -1748,7 +1817,10 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let (added, removed) = diff_stats(&diff);
     let n_edits = edits.len();
     let summary = if n_edits > 1 {
-        format!("edit {} ({n_edits} edits, {total_reps} replacement(s))", rel(ctx, &full))
+        format!(
+            "edit {} ({n_edits} edits, {total_reps} replacement(s))",
+            rel(ctx, &full)
+        )
     } else {
         format!("edit {} ({total_reps} replacement(s))", rel(ctx, &full))
     };
@@ -1770,7 +1842,12 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 /// retries ignoring each line's leading/trailing whitespace so a model that got
 /// the indentation slightly wrong still succeeds. Errors carry actionable
 /// guidance rather than a bare "not found".
-fn apply_edit(content: &str, old_s: &str, new_s: &str, replace_all: bool) -> Result<(String, usize)> {
+fn apply_edit(
+    content: &str,
+    old_s: &str,
+    new_s: &str,
+    replace_all: bool,
+) -> Result<(String, usize)> {
     let exact = content.matches(old_s).count();
     if exact == 1 || (exact > 1 && replace_all) {
         let updated = if replace_all {
@@ -1913,10 +1990,18 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
     let cap = ctx.cfg.max_tool_output_bytes;
     let mut body = format!("$ {cmd}\nexit code: {code}\n");
     if !stdout.trim().is_empty() {
-        let _ = write!(body, "--- stdout ---\n{}\n", truncate(stdout.trim_end(), cap));
+        let _ = write!(
+            body,
+            "--- stdout ---\n{}\n",
+            truncate(stdout.trim_end(), cap)
+        );
     }
     if !stderr.trim().is_empty() {
-        let _ = write!(body, "--- stderr ---\n{}\n", truncate(stderr.trim_end(), cap / 2));
+        let _ = write!(
+            body,
+            "--- stderr ---\n{}\n",
+            truncate(stderr.trim_end(), cap / 2)
+        );
     }
     if stdout.trim().is_empty() && stderr.trim().is_empty() {
         body.push_str("(no output)\n");
@@ -2030,8 +2115,16 @@ pub fn base64_encode(data: &[u8]) -> String {
         let n = u32::from_be_bytes([0, b0, b1, b2]);
         out.push(T[(n >> 18 & 63) as usize] as char);
         out.push(T[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -2076,15 +2169,27 @@ mod tests {
     fn about_creator_returns_exact_details_for_the_model_to_phrase() {
         let out = about_creator().unwrap();
         assert!(out.ok);
-        assert!(out.content.contains("Sridhar Karuppusamy"), "{}", out.content);
-        assert!(out.content.contains("support@simpletools.in"), "{}", out.content);
+        assert!(
+            out.content.contains("Sridhar Karuppusamy"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("support@simpletools.in"),
+            "{}",
+            out.content
+        );
         assert!(
             out.content.contains(env!("CARGO_PKG_VERSION")),
             "version is filled in dynamically: {}",
             out.content
         );
         assert!(out.content.contains("your own words"), "{}", out.content);
-        assert!(out.summary.contains("Sridhar Karuppusamy"), "{}", out.summary);
+        assert!(
+            out.summary.contains("Sridhar Karuppusamy"),
+            "{}",
+            out.summary
+        );
     }
 
     /// It has to be reachable: listed for the model, routed by the dispatcher,
@@ -2146,7 +2251,9 @@ mod tests {
 
     #[test]
     fn apply_edit_rejects_ambiguous_without_replace_all() {
-        let err = apply_edit("a b a", "a", "X", false).unwrap_err().to_string();
+        let err = apply_edit("a b a", "a", "X", false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("appears 2 times"), "{err}");
     }
 
@@ -2164,7 +2271,9 @@ mod tests {
 
     #[test]
     fn apply_edit_reports_missing_text_clearly() {
-        let err = apply_edit("hello\n", "nonexistent", "x", false).unwrap_err().to_string();
+        let err = apply_edit("hello\n", "nonexistent", "x", false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not found"), "{err}");
     }
 
@@ -2333,7 +2442,11 @@ mod tests {
         let out = read_file(&json!({"path": "small.txt", "offset": 9999}), &c).unwrap();
         assert!(out.ok, "past-EOF offset should not error: {}", out.content);
         assert!(out.content.contains("past end of file"), "{}", out.content);
-        assert!(out.content.contains("three"), "should show the last line: {}", out.content);
+        assert!(
+            out.content.contains("three"),
+            "should show the last line: {}",
+            out.content
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2375,7 +2488,11 @@ mod tests {
         assert!(out.ok, "{}", out.content);
         assert!(out.content.contains("src/main.rs:2"), "{}", out.content);
         assert!(out.content.contains("README.md:2"), "{}", out.content);
-        assert!(!out.content.contains("secret.rs"), "gitignore leaked: {}", out.content);
+        assert!(
+            !out.content.contains("secret.rs"),
+            "gitignore leaked: {}",
+            out.content
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2413,29 +2530,53 @@ mod tests {
         println!("\n-- tool table (per tool call, and per streamed candidate) --");
         bench!("specs()", 2000, specs());
         bench!("spec(\"read_file\")", 2000, spec("read_file"));
-        bench!("is_mutating(\"write_file\")", 2000, is_mutating("write_file"));
-        bench!("openai_schema_for(None) [per request]", 500, openai_schema_for(None));
+        bench!(
+            "is_mutating(\"write_file\")",
+            2000,
+            is_mutating("write_file")
+        );
+        bench!(
+            "openai_schema_for(None) [per request]",
+            500,
+            openai_schema_for(None)
+        );
 
         println!("\n-- code graph --");
         let t0 = Instant::now();
         let g = crate::graph::scan(std::path::Path::new("."));
-        println!("  {:<40} {:>8.0}ms  ({} files, {} symbols)", "graph::scan(cwd)",
-            t0.elapsed().as_secs_f64() * 1e3, g.files, g.defs.len());
+        println!(
+            "  {:<40} {:>8.0}ms  ({} files, {} symbols)",
+            "graph::scan(cwd)",
+            t0.elapsed().as_secs_f64() * 1e3,
+            g.files,
+            g.defs.len()
+        );
         bench!("graph.overview()", 50, g.overview());
         bench!("graph.symbol(\"relayout\")", 200, g.symbol("relayout"));
 
         println!("\n-- telemetry ring (the web UI polls this every second) --");
         for i in 0..1000 {
-            crate::log::push(crate::log::Level::Info, "perf", format!("entry {i}"),
-                vec![("k".into(), "v".into())]);
+            crate::log::push(
+                crate::log::Level::Info,
+                "perf",
+                format!("entry {i}"),
+                vec![("k".into(), "v".into())],
+            );
         }
-        bench!("log::recent(Debug, 1000)", 200, crate::log::recent(crate::log::Level::Debug, 1000));
+        bench!(
+            "log::recent(Debug, 1000)",
+            200,
+            crate::log::recent(crate::log::Level::Debug, 1000)
+        );
 
         // The frame cost while a reply streams in is what a user actually feels.
         // The right-hand column is what a full re-render of the same text costs,
         // i.e. what this used to pay on every single frame.
         println!("\n-- streaming one long reply --");
-        println!("  {:<24} {:>14} {:>18}", "reply size", "per frame", "full re-render");
+        println!(
+            "  {:<24} {:>14} {:>18}",
+            "reply size", "per frame", "full re-render"
+        );
         let th = crate::theme::resolve("default");
         let mut tr = crate::view::Transcript::new(th, crate::theme::glyphs("unicode"));
         tr.user("write me a long explanation".to_string());
@@ -2461,21 +2602,31 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
                 std::hint::black_box(crate::md::render(&acc, 100, &th));
             }
             let full = t1.elapsed().as_secs_f64() / 20.0;
-            println!("  {:<24} {:>14} {:>18}", format!("~{}KB", target / 1000),
-                format!("{:.1}us", per * 1e6), format!("{:.1}us", full * 1e6));
+            println!(
+                "  {:<24} {:>14} {:>18}",
+                format!("~{}KB", target / 1000),
+                format!("{:.1}us", per * 1e6),
+                format!("{:.1}us", full * 1e6)
+            );
         }
 
         println!("\n-- settled transcript (1000 blocks) --");
         let mut big = crate::view::Transcript::new(th, crate::theme::glyphs("unicode"));
         for i in 0..500 {
             big.user(format!("message {i} asking something of moderate length"));
-            big.assistant_delta(&format!("reply {i} with a couple of sentences of prose.\n\n"));
+            big.assistant_delta(&format!(
+                "reply {i} with a couple of sentences of prose.\n\n"
+            ));
             big.finish_reveal();
         }
         big.relayout(100);
         let total = big.total_lines();
         bench!("relayout(100) with nothing dirty", 500, big.relayout(100));
-        bench!("window(bottom 40)", 2000, big.window(total.saturating_sub(40), 40));
+        bench!(
+            "window(bottom 40)",
+            2000,
+            big.window(total.saturating_sub(40), 40)
+        );
         println!();
     }
 
@@ -2487,18 +2638,38 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         // Whichever engine is available by default (ripgrep on this machine).
         let rg = search(&json!({"pattern": "todo", "path": "src/main.rs"}), &c).unwrap();
         assert!(rg.ok, "{}", rg.content);
-        assert!(rg.content.contains("src/main.rs:2"), "rg path: {}", rg.content);
-        assert!(!rg.content.contains("no matches"), "rg path: {}", rg.content);
+        assert!(
+            rg.content.contains("src/main.rs:2"),
+            "rg path: {}",
+            rg.content
+        );
+        assert!(
+            !rg.content.contains("no matches"),
+            "rg path: {}",
+            rg.content
+        );
         // Scoping to a file must exclude the other files that also match.
-        assert!(!rg.content.contains("README.md"), "rg path leaked: {}", rg.content);
+        assert!(
+            !rg.content.contains("README.md"),
+            "rg path leaked: {}",
+            rg.content
+        );
 
         // And the built-in engine must agree.
         std::env::set_var("KODA_NO_RIPGREP", "1");
         let builtin = search(&json!({"pattern": "todo", "path": "src/main.rs"}), &c).unwrap();
         std::env::remove_var("KODA_NO_RIPGREP");
         assert!(builtin.ok, "{}", builtin.content);
-        assert!(builtin.content.contains("src/main.rs:2"), "builtin: {}", builtin.content);
-        assert!(!builtin.content.contains("README.md"), "builtin leaked: {}", builtin.content);
+        assert!(
+            builtin.content.contains("src/main.rs:2"),
+            "builtin: {}",
+            builtin.content
+        );
+        assert!(
+            !builtin.content.contains("README.md"),
+            "builtin leaked: {}",
+            builtin.content
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2625,7 +2796,11 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         assert!(out.ok, "{}", out.content);
         assert!(out.content.contains("delimited table"), "{}", out.content);
         // Still passes through the shared line-numbering slicer.
-        assert!(out.content.contains("1| # delimited table"), "{}", out.content);
+        assert!(
+            out.content.contains("1| # delimited table"),
+            "{}",
+            out.content
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2636,11 +2811,21 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("big.csv"), "a,b\n1,2\n").unwrap();
         // absurdly small so the tiny file trips it
-        let cfg = Config { max_document_bytes: 4, ..Config::default() };
-        let c = ToolCtx { root: dir.clone(), cfg: Arc::new(cfg) };
+        let cfg = Config {
+            max_document_bytes: 4,
+            ..Config::default()
+        };
+        let c = ToolCtx {
+            root: dir.clone(),
+            cfg: Arc::new(cfg),
+        };
         let out = read_file(&json!({"path": "big.csv"}), &c).unwrap();
         assert!(!out.ok);
-        assert!(out.content.contains("max_document_bytes"), "{}", out.content);
+        assert!(
+            out.content.contains("max_document_bytes"),
+            "{}",
+            out.content
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2670,9 +2855,8 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         {
             let w = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(w);
-            let opts: zip::write::FileOptions<'_, ()> =
-                zip::write::FileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             zip.start_file("[Content_Types].xml", opts).unwrap();
             zip.write_all(br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#).unwrap();
             zip.start_file("_rels/.rels", opts).unwrap();
@@ -2699,9 +2883,8 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         {
             let w = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(w);
-            let opts: zip::write::FileOptions<'_, ()> =
-                zip::write::FileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             zip.start_file("word/document.xml", opts).unwrap();
             zip.write_all(br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p><w:p><w:r><w:t>World</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
             zip.finish().unwrap();

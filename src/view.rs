@@ -187,7 +187,10 @@ impl Transcript {
     pub fn todo_progress(&self) -> Option<(usize, usize)> {
         self.blocks.iter().rev().find_map(|b| match &b.item {
             Item::Todos(items) if !items.is_empty() => {
-                let done = items.iter().filter(|i| i.status == TodoStatus::Done).count();
+                let done = items
+                    .iter()
+                    .filter(|i| i.status == TodoStatus::Done)
+                    .count();
                 // Once every step is done the task is finished — drop the live
                 // counter so a stale "N/N steps" doesn't linger in the status row.
                 // The completed plan still shows in the transcript as a record.
@@ -638,7 +641,17 @@ impl Transcript {
                         if i == last_i {
                             stream = None;
                         }
-                        render_item(&b.item, width as usize, show, expand_tools, expand_reasoning, &theme, &glyphs, tick, cut)
+                        render_item(
+                            &b.item,
+                            width as usize,
+                            show,
+                            expand_tools,
+                            expand_reasoning,
+                            &theme,
+                            &glyphs,
+                            tick,
+                            cut,
+                        )
                     }
                 };
                 b.cache = Some((width, sig, lines));
@@ -826,7 +839,12 @@ fn stream_render(
         return None; // nothing has settled yet: one short render is cheaper
     }
 
-    let fresh = || StreamRender { block: index, width, stable_end: 0, stable_lines: 0 };
+    let fresh = || StreamRender {
+        block: index,
+        width,
+        stable_end: 0,
+        stable_lines: 0,
+    };
     let st = match state {
         // Same block, same width, and the settled prefix only grew: reusable.
         Some(s) if s.block == index && s.width == width && s.stable_end <= split => s,
@@ -866,7 +884,11 @@ fn stream_render(
 fn shown_prefix(text: &str, cut: Option<usize>) -> &str {
     match cut {
         Some(n) if n < text.chars().count() => {
-            let end = text.char_indices().nth(n).map(|(i, _)| i).unwrap_or(text.len());
+            let end = text
+                .char_indices()
+                .nth(n)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
             &text[..end]
         }
         _ => text,
@@ -930,7 +952,11 @@ fn render_item(
             let label = match elapsed {
                 Some(d) if toks > 0 => format!("thought for {} · ~{} tokens", human_ms(*d), toks),
                 Some(d) => format!("thought for {}", human_ms(*d)),
-                None if toks > 0 => format!("thinking {} · ~{} tokens", human_ms(started.elapsed()), toks),
+                None if toks > 0 => format!(
+                    "thinking {} · ~{} tokens",
+                    human_ms(started.elapsed()),
+                    toks
+                ),
                 None => format!("thinking {}", human_ms(started.elapsed())),
             };
             let mut lines = vec![Line::from({
@@ -988,7 +1014,10 @@ fn render_item(
         // The plan is the one thing worth framing: it is a standing summary of
         // the work, not a line in the log, so it gets a card with progress.
         Item::Todos(items) => {
-            let done = items.iter().filter(|i| i.status == TodoStatus::Done).count();
+            let done = items
+                .iter()
+                .filter(|i| i.status == TodoStatus::Done)
+                .count();
             let total = items.len();
             let any_active = items.iter().any(|i| i.status == TodoStatus::Active);
             let complete = done == total && total > 0;
@@ -1067,8 +1096,21 @@ fn render_item(
             grouped,
             ..
         } => render_tool(
-            name, label, ok, summary, detail, view, *expanded || expand_tools, started, elapsed, *depth, *grouped,
-            width, t, g, tick,
+            name,
+            label,
+            ok,
+            summary,
+            detail,
+            view,
+            *expanded || expand_tools,
+            started,
+            elapsed,
+            *depth,
+            *grouped,
+            width,
+            t,
+            g,
+            tick,
         ),
     }
 }
@@ -1145,7 +1187,12 @@ fn render_tool(
         let body: Vec<Line<'static>> = detail
             .lines()
             .take(if expanded { 40 } else { 6 })
-            .flat_map(|l| md::hard_wrap(l.trim_end().trim_start_matches("ERROR: "), avail.saturating_sub(4)))
+            .flat_map(|l| {
+                md::hard_wrap(
+                    l.trim_end().trim_start_matches("ERROR: "),
+                    avail.saturating_sub(4),
+                )
+            })
             .map(|s| Line::from(Span::styled(s, t.fg(t.error))))
             .collect();
         return indent_all(
@@ -1249,14 +1296,8 @@ fn render_tool(
             if *truncated {
                 meta.push("truncated".into());
             }
-            let head = panel::status_line(
-                Some(icon),
-                title,
-                Some((path.clone(), t.info)),
-                &meta,
-                t,
-                g,
-            );
+            let head =
+                panel::status_line(Some(icon), title, Some((path.clone(), t.info)), &meta, t, g);
             let gw = (start + src.len()).to_string().len().max(2);
             let mut body: Vec<Line<'static>> = src
                 .iter()
@@ -1391,10 +1432,7 @@ fn render_tool(
             }
             if !expanded && files.len() > cap {
                 out.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {} {} more", g.last, files.len() - cap),
-                        t.dim(),
-                    ),
+                    Span::styled(format!("  {} {} more", g.last, files.len() - cap), t.dim()),
                     panel::expand_hint(t),
                 ]));
             }
@@ -1496,7 +1534,11 @@ fn render_tool(
         let span = track.saturating_sub(block).max(1);
         let period = 1600u128;
         let phase = (started.elapsed().as_millis() % period) as f32 / period as f32;
-        let tri = if phase < 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
+        let tri = if phase < 0.5 {
+            phase * 2.0
+        } else {
+            (1.0 - phase) * 2.0
+        };
         let pos = (tri * span as f32).round() as usize;
         let mut spans = vec![Span::styled(" ".to_string(), t.dim())];
         for i in 0..track {
@@ -1548,11 +1590,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 /// The path or subject a label is about, for a failure header.
 fn first_word_target(label: &str) -> String {
-    label
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or(label)
-        .to_string()
+    label.split_whitespace().nth(1).unwrap_or(label).to_string()
 }
 
 /// Push a rendered block right, drawing a rail when it belongs to a subagent.
@@ -1692,7 +1730,11 @@ mod tests {
         one.user("q".into());
         one.assistant_delta(doc);
         one.relayout(90);
-        assert_eq!(shot(&inc), shot(&one), "re-wrap after a width change diverged");
+        assert_eq!(
+            shot(&inc),
+            shot(&one),
+            "re-wrap after a width change diverged"
+        );
     }
 
     /// A reply with no blank line has no settled prefix, so it must still render
@@ -1837,8 +1879,14 @@ mod tests {
         assert!(out.contains("Grep"), "{out}");
         assert!(out.contains("3 matches"), "{out}");
         assert!(out.contains("2 files"), "{out}");
-        assert!(out.contains("src/a.rs") && out.contains("src/b.rs"), "{out}");
-        assert!(out.contains("2 hits") && out.contains("1 hit"), "pluralised: {out}");
+        assert!(
+            out.contains("src/a.rs") && out.contains("src/b.rs"),
+            "{out}"
+        );
+        assert!(
+            out.contains("2 hits") && out.contains("1 hit"),
+            "pluralised: {out}"
+        );
         println!("\n--- grep ---\n{out}");
     }
 
@@ -1851,8 +1899,16 @@ mod tests {
             ToolView::Listing {
                 path: ".".into(),
                 entries: vec![
-                    DirEntry { name: "src".into(), is_dir: true, size: 0 },
-                    DirEntry { name: "README.md".into(), is_dir: false, size: 2048 },
+                    DirEntry {
+                        name: "src".into(),
+                        is_dir: true,
+                        size: 0,
+                    },
+                    DirEntry {
+                        name: "README.md".into(),
+                        is_dir: false,
+                        size: 2048,
+                    },
                 ],
                 truncated: false,
             },
@@ -1860,7 +1916,10 @@ mod tests {
         );
         assert!(out.contains("src/"), "dirs get a slash: {out}");
         assert!(out.contains("README.md"), "{out}");
-        assert!(out.contains("2.0K") || out.contains("2K"), "size shown: {out}");
+        assert!(
+            out.contains("2.0K") || out.contains("2K"),
+            "size shown: {out}"
+        );
         println!("\n--- list ---\n{out}");
     }
 
@@ -1880,9 +1939,15 @@ mod tests {
             },
             72,
         );
-        assert!(out.contains("10 import os"), "gutter starts at offset: {out}");
+        assert!(
+            out.contains("10 import os"),
+            "gutter starts at offset: {out}"
+        );
         assert!(out.contains("11 print"), "{out}");
-        assert!(out.contains("40 lines") && out.contains("truncated"), "{out}");
+        assert!(
+            out.contains("40 lines") && out.contains("truncated"),
+            "{out}"
+        );
         println!("\n--- read ---\n{out}");
     }
 
@@ -1902,7 +1967,10 @@ mod tests {
             72,
         );
         assert!(out.contains("Edit"), "{out}");
-        assert!(out.contains("+1") && out.contains("-1"), "stats in footer: {out}");
+        assert!(
+            out.contains("+1") && out.contains("-1"),
+            "stats in footer: {out}"
+        );
         println!("\n--- diff ---\n{out}");
     }
 
@@ -1910,7 +1978,13 @@ mod tests {
     fn failed_tool_expands_with_detail() {
         let mut t = tr();
         t.tool_start("1".into(), "read_file".into(), "read a".into(), 0);
-        t.tool_end("1", false, "boom".into(), "ERROR: boom".into(), crate::tools::ToolView::Plain);
+        t.tool_end(
+            "1",
+            false,
+            "boom".into(),
+            "ERROR: boom".into(),
+            crate::tools::ToolView::Plain,
+        );
         t.relayout(60);
         // The header already carries the failure glyph, so the body shows the
         // message without repeating "ERROR:".
@@ -1923,11 +1997,20 @@ mod tests {
     fn successful_tool_stays_collapsed_and_shows_summary() {
         let mut t = tr();
         t.tool_start("1".into(), "read_file".into(), "read a.rs".into(), 0);
-        t.tool_end("1", true, "read a.rs (12 lines)".into(), "1| x".into(), crate::tools::ToolView::Plain);
+        t.tool_end(
+            "1",
+            true,
+            "read a.rs (12 lines)".into(),
+            "1| x".into(),
+            crate::tools::ToolView::Plain,
+        );
         t.relayout(60);
         let text = flat(&t.window(0, 20));
         assert!(text.contains("read a.rs (12 lines)"), "{text}");
-        assert!(!text.contains("1| x"), "detail should stay collapsed: {text}");
+        assert!(
+            !text.contains("1| x"),
+            "detail should stay collapsed: {text}"
+        );
         assert!(t.toggle_tools_pref());
         t.relayout(60);
         assert!(flat(&t.window(0, 20)).contains("1| x"));
@@ -1941,16 +2024,37 @@ mod tests {
         let mut t = tr();
         t.expand_tools = true; // as if the user pressed ctrl+r
         t.tool_start("1".into(), "read_file".into(), "read a.rs".into(), 0);
-        t.tool_end("1", true, "read a.rs".into(), "AAA-body".into(), crate::tools::ToolView::Plain);
+        t.tool_end(
+            "1",
+            true,
+            "read a.rs".into(),
+            "AAA-body".into(),
+            crate::tools::ToolView::Plain,
+        );
         t.relayout(60);
-        assert!(flat(&t.window(0, 40)).contains("AAA-body"), "first block expanded");
+        assert!(
+            flat(&t.window(0, 40)).contains("AAA-body"),
+            "first block expanded"
+        );
         // A brand-new tool arrives in a later response.
         t.tool_start("2".into(), "read_file".into(), "read b.rs".into(), 0);
-        t.tool_end("2", true, "read b.rs".into(), "BBB-body".into(), crate::tools::ToolView::Plain);
+        t.tool_end(
+            "2",
+            true,
+            "read b.rs".into(),
+            "BBB-body".into(),
+            crate::tools::ToolView::Plain,
+        );
         t.relayout(60);
         let text = flat(&t.window(0, 40));
-        assert!(text.contains("AAA-body"), "old block still expanded: {text}");
-        assert!(text.contains("BBB-body"), "NEW block also expanded (no reset): {text}");
+        assert!(
+            text.contains("AAA-body"),
+            "old block still expanded: {text}"
+        );
+        assert!(
+            text.contains("BBB-body"),
+            "NEW block also expanded (no reset): {text}"
+        );
     }
 
     #[test]
@@ -1980,7 +2084,10 @@ mod tests {
         t.relayout(80);
         let text = flat(&t.window(0, 20));
         assert!(text.contains("thought for"), "{text}");
-        assert!(text.contains("tokens"), "reasoning should show token estimate: {text}");
+        assert!(
+            text.contains("tokens"),
+            "reasoning should show token estimate: {text}"
+        );
     }
 
     #[test]
@@ -1993,7 +2100,10 @@ mod tests {
         }
         t.relayout(80);
         let text = flat(&t.window(0, 20));
-        assert!(text.contains('━') || text.contains('─'), "running tool should show a progress track: {text}");
+        assert!(
+            text.contains('━') || text.contains('─'),
+            "running tool should show a progress track: {text}"
+        );
     }
 
     #[test]
@@ -2009,17 +2119,32 @@ mod tests {
     fn expanded_detail_gets_a_rail() {
         let mut t = tr();
         t.tool_start("1".into(), "run_command".into(), "$ ls".into(), 0);
-        t.tool_end("1", false, "failed".into(), "boom".into(), crate::tools::ToolView::Plain);
+        t.tool_end(
+            "1",
+            false,
+            "failed".into(),
+            "boom".into(),
+            crate::tools::ToolView::Plain,
+        );
         t.relayout(60);
         let text = flat(&t.window(0, 20));
-        assert!(text.contains(UNICODE.rail), "detail should sit under a rail: {text}");
+        assert!(
+            text.contains(UNICODE.rail),
+            "detail should sit under a rail: {text}"
+        );
     }
 
     #[test]
     fn nested_tools_get_a_rail() {
         let mut t = tr();
         t.tool_start("1".into(), "search".into(), "search /x/".into(), 1);
-        t.tool_end("1", true, "search /x/ (1 hit)".into(), String::new(), crate::tools::ToolView::Plain);
+        t.tool_end(
+            "1",
+            true,
+            "search /x/ (1 hit)".into(),
+            String::new(),
+            crate::tools::ToolView::Plain,
+        );
         t.relayout(60);
         assert!(flat(&t.window(0, 20)).contains(UNICODE.vline));
     }
@@ -2060,7 +2185,9 @@ mod tests {
     fn idle_frames_are_cheap_at_scale() {
         let mut t = tr();
         for i in 0..4000 {
-            t.user(format!("message number {i} with enough text to wrap once or twice"));
+            t.user(format!(
+                "message number {i} with enough text to wrap once or twice"
+            ));
         }
         t.relayout(80);
 
@@ -2090,7 +2217,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect();
-        assert!(text.contains("m1999"), "expected the last message, got {text:?}");
+        assert!(
+            text.contains("m1999"),
+            "expected the last message, got {text:?}"
+        );
         // Offsets are monotonic, which is what makes the binary search valid.
         let offsets: Vec<usize> = t.blocks.iter().map(|b| b.offset).collect();
         assert!(offsets.windows(2).all(|w| w[0] <= w[1]));

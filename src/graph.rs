@@ -88,13 +88,33 @@ fn strip_def_modifiers(lang: &str, line: &str) -> String {
     let words: &[&str] = match lang {
         "rust" => &["pub", "async", "unsafe", "extern", "default"],
         "javascript" | "typescript" => &[
-            "export", "default", "public", "private", "protected", "static",
-            "readonly", "abstract", "async", "declare",
+            "export",
+            "default",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "readonly",
+            "abstract",
+            "async",
+            "declare",
         ],
         "java" | "kotlin" | "swift" | "csharp" | "scala" | "dart" => &[
-            "public", "private", "protected", "internal", "static", "final",
-            "abstract", "sealed", "open", "override", "suspend", "inline",
-            "virtual", "async", "partial",
+            "public",
+            "private",
+            "protected",
+            "internal",
+            "static",
+            "final",
+            "abstract",
+            "sealed",
+            "open",
+            "override",
+            "suspend",
+            "inline",
+            "virtual",
+            "async",
+            "partial",
         ],
         "python" => &["async"],
         _ => &[],
@@ -121,7 +141,10 @@ fn strip_def_modifiers(lang: &str, line: &str) -> String {
         }
     }
     loop {
-        let word: String = s.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let word: String = s
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         if word.is_empty() || !words.contains(&word.as_str()) {
             break;
         }
@@ -179,66 +202,120 @@ fn definitions(lang: &str, line: &str) -> Option<(&'static str, String)> {
     // Keyword-prefixed forms cover most of what matters, across languages.
     let table: &[(&str, &'static str)] = match lang {
         "rust" => &[
-            ("pub fn ", "fn"), ("fn ", "fn"),
-            ("pub struct ", "struct"), ("struct ", "struct"),
-            ("pub enum ", "enum"), ("enum ", "enum"),
-            ("pub trait ", "trait"), ("trait ", "trait"),
-            ("pub type ", "type"), ("type ", "type"),
-            ("pub const ", "const"), ("const ", "const"),
-            ("pub static ", "static"), ("static ", "static"),
+            ("pub fn ", "fn"),
+            ("fn ", "fn"),
+            ("pub struct ", "struct"),
+            ("struct ", "struct"),
+            ("pub enum ", "enum"),
+            ("enum ", "enum"),
+            ("pub trait ", "trait"),
+            ("trait ", "trait"),
+            ("pub type ", "type"),
+            ("type ", "type"),
+            ("pub const ", "const"),
+            ("const ", "const"),
+            ("pub static ", "static"),
+            ("static ", "static"),
             ("macro_rules! ", "macro"),
         ],
         "python" => &[("def ", "fn"), ("async def ", "fn"), ("class ", "class")],
         "javascript" | "typescript" => &[
-            ("export function ", "fn"), ("async function ", "fn"), ("function ", "fn"),
-            ("export class ", "class"), ("class ", "class"),
-            ("export interface ", "interface"), ("interface ", "interface"),
-            ("export type ", "type"), ("type ", "type"),
-            ("export const ", "const"), ("const ", "const"),
-            ("export enum ", "enum"), ("enum ", "enum"),
+            ("export function ", "fn"),
+            ("async function ", "fn"),
+            ("function ", "fn"),
+            ("export class ", "class"),
+            ("class ", "class"),
+            ("export interface ", "interface"),
+            ("interface ", "interface"),
+            ("export type ", "type"),
+            ("type ", "type"),
+            ("export const ", "const"),
+            ("const ", "const"),
+            ("export enum ", "enum"),
+            ("enum ", "enum"),
         ],
         "go" => &[("func ", "fn"), ("type ", "type")],
         "java" | "kotlin" | "swift" => &[
-            ("public class ", "class"), ("class ", "class"),
-            ("public interface ", "interface"), ("interface ", "interface"),
-            ("struct ", "struct"), ("enum ", "enum"),
-            ("func ", "fn"), ("fun ", "fn"),
+            ("public class ", "class"),
+            ("class ", "class"),
+            ("public interface ", "interface"),
+            ("interface ", "interface"),
+            ("struct ", "struct"),
+            ("enum ", "enum"),
+            ("func ", "fn"),
+            ("fun ", "fn"),
         ],
         "csharp" => &[
-            ("public class ", "class"), ("internal class ", "class"), ("class ", "class"),
-            ("public interface ", "interface"), ("interface ", "interface"),
-            ("public struct ", "struct"), ("struct ", "struct"),
-            ("public enum ", "enum"), ("enum ", "enum"),
-            ("public record ", "record"), ("record ", "record"),
+            ("public class ", "class"),
+            ("internal class ", "class"),
+            ("class ", "class"),
+            ("public interface ", "interface"),
+            ("interface ", "interface"),
+            ("public struct ", "struct"),
+            ("struct ", "struct"),
+            ("public enum ", "enum"),
+            ("enum ", "enum"),
+            ("public record ", "record"),
+            ("record ", "record"),
             ("namespace ", "module"),
         ],
         "scala" => &[
-            ("def ", "fn"), ("class ", "class"), ("object ", "object"),
-            ("trait ", "trait"), ("case class ", "class"), ("type ", "type"),
+            ("def ", "fn"),
+            ("class ", "class"),
+            ("object ", "object"),
+            ("trait ", "trait"),
+            ("case class ", "class"),
+            ("type ", "type"),
         ],
         "dart" => &[
-            ("class ", "class"), ("mixin ", "mixin"), ("enum ", "enum"),
+            ("class ", "class"),
+            ("mixin ", "mixin"),
+            ("enum ", "enum"),
             ("abstract class ", "class"),
         ],
         "elixir" => &[
-            ("def ", "fn"), ("defp ", "fn"), ("defmodule ", "module"),
-            ("defmacro ", "macro"), ("defstruct ", "struct"),
+            ("def ", "fn"),
+            ("defp ", "fn"),
+            ("defmodule ", "module"),
+            ("defmacro ", "macro"),
+            ("defstruct ", "struct"),
         ],
         "erlang" => &[("-module(", "module"), ("-record(", "record")],
-        "haskell" => &[("data ", "type"), ("newtype ", "type"), ("type ", "type"), ("class ", "class")],
+        "haskell" => &[
+            ("data ", "type"),
+            ("newtype ", "type"),
+            ("type ", "type"),
+            ("class ", "class"),
+        ],
         "zig" => &[("pub fn ", "fn"), ("fn ", "fn"), ("const ", "const")],
-        "julia" => &[("function ", "fn"), ("struct ", "struct"), ("module ", "module"), ("abstract type ", "type")],
+        "julia" => &[
+            ("function ", "fn"),
+            ("struct ", "struct"),
+            ("module ", "module"),
+            ("abstract type ", "type"),
+        ],
         "r" => &[],
         "perl" => &[("sub ", "fn"), ("package ", "module")],
-        "objc" => &[("@interface ", "class"), ("@implementation ", "class"), ("@protocol ", "interface")],
+        "objc" => &[
+            ("@interface ", "class"),
+            ("@implementation ", "class"),
+            ("@protocol ", "interface"),
+        ],
         "ruby" => &[("def ", "fn"), ("class ", "class"), ("module ", "module")],
         "c" | "cpp" => &[
-            ("class ", "class"), ("struct ", "struct"),
-            ("typedef struct ", "struct"), ("enum ", "enum"),
+            ("class ", "class"),
+            ("struct ", "struct"),
+            ("typedef struct ", "struct"),
+            ("enum ", "enum"),
         ],
         "shell" => &[("function ", "fn")],
         "lua" => &[("local function ", "fn"), ("function ", "fn")],
-        "php" => &[("function ", "fn"), ("class ", "class"), ("interface ", "interface"), ("trait ", "trait")],
+        "php" => &[
+            ("function ", "fn"),
+            ("class ", "class"),
+            ("interface ", "interface"),
+            ("trait ", "trait"),
+        ],
         _ => &[],
     };
     for (prefix, kind) in table {
@@ -321,7 +398,10 @@ fn identifiers(lang: &str, line: &str, out: &mut BTreeSet<String>) {
         if c.is_alphanumeric() || c == '_' {
             cur.push(c);
         } else if !cur.is_empty() {
-            if cur.len() > 2 && !cur.chars().all(|c| c.is_ascii_digit()) && !kw.contains(&cur.as_str()) {
+            if cur.len() > 2
+                && !cur.chars().all(|c| c.is_ascii_digit())
+                && !kw.contains(&cur.as_str())
+            {
                 out.insert(std::mem::take(&mut cur));
             } else {
                 cur.clear();
@@ -350,8 +430,22 @@ fn strip_literals_and_comments(lang: &str, line: &str) -> String {
             break;
         }
         // Block comment start `/* … */` (C-family): drop to a same-line close.
-        if matches!(lang, "rust" | "c" | "cpp" | "java" | "javascript" | "typescript" | "csharp" | "go" | "swift" | "kotlin" | "scala" | "dart" | "php")
-            && line[i..].starts_with("/*")
+        if matches!(
+            lang,
+            "rust"
+                | "c"
+                | "cpp"
+                | "java"
+                | "javascript"
+                | "typescript"
+                | "csharp"
+                | "go"
+                | "swift"
+                | "kotlin"
+                | "scala"
+                | "dart"
+                | "php"
+        ) && line[i..].starts_with("/*")
         {
             if let Some(end) = line[i..].find("*/") {
                 for _ in 0..end + 1 {
@@ -384,31 +478,83 @@ fn strip_literals_and_comments(lang: &str, line: &str) -> String {
 fn keywords(lang: &str) -> &'static [&'static str] {
     match lang {
         "rust" => &[
-            "let", "mut", "fn", "pub", "use", "mod", "struct", "enum", "impl",
-            "trait", "for", "while", "loop", "match", "return", "self", "super",
-            "crate", "async", "await", "move", "ref", "dyn", "where", "const",
-            "static", "type", "unsafe", "extern", "continue", "break", "else",
+            "let", "mut", "fn", "pub", "use", "mod", "struct", "enum", "impl", "trait", "for",
+            "while", "loop", "match", "return", "self", "super", "crate", "async", "await", "move",
+            "ref", "dyn", "where", "const", "static", "type", "unsafe", "extern", "continue",
+            "break", "else",
         ],
         "python" => &[
-            "def", "class", "return", "import", "from", "for", "while", "with",
-            "and", "not", "elif", "else", "None", "True", "False", "self",
-            "lambda", "yield", "async", "await", "pass", "raise", "except",
-            "finally", "global", "nonlocal", "assert",
+            "def", "class", "return", "import", "from", "for", "while", "with", "and", "not",
+            "elif", "else", "None", "True", "False", "self", "lambda", "yield", "async", "await",
+            "pass", "raise", "except", "finally", "global", "nonlocal", "assert",
         ],
         "javascript" | "typescript" => &[
-            "let", "var", "const", "function", "return", "import", "export",
-            "from", "for", "while", "class", "extends", "async", "await",
-            "this", "new", "typeof", "instanceof", "else", "case", "switch",
-            "interface", "type", "public", "private", "readonly", "static",
+            "let",
+            "var",
+            "const",
+            "function",
+            "return",
+            "import",
+            "export",
+            "from",
+            "for",
+            "while",
+            "class",
+            "extends",
+            "async",
+            "await",
+            "this",
+            "new",
+            "typeof",
+            "instanceof",
+            "else",
+            "case",
+            "switch",
+            "interface",
+            "type",
+            "public",
+            "private",
+            "readonly",
+            "static",
         ],
         "go" => &[
-            "func", "var", "type", "struct", "interface", "return", "import",
-            "package", "for", "range", "chan", "defer", "else", "map", "const",
+            "func",
+            "var",
+            "type",
+            "struct",
+            "interface",
+            "return",
+            "import",
+            "package",
+            "for",
+            "range",
+            "chan",
+            "defer",
+            "else",
+            "map",
+            "const",
         ],
         "java" | "kotlin" | "csharp" | "swift" | "scala" => &[
-            "public", "private", "protected", "class", "interface", "return",
-            "import", "static", "final", "void", "new", "this", "else", "for",
-            "while", "func", "fun", "val", "var", "override",
+            "public",
+            "private",
+            "protected",
+            "class",
+            "interface",
+            "return",
+            "import",
+            "static",
+            "final",
+            "void",
+            "new",
+            "this",
+            "else",
+            "for",
+            "while",
+            "func",
+            "fun",
+            "val",
+            "var",
+            "override",
         ],
         _ => &[],
     }
@@ -436,8 +582,19 @@ fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
     // aren't sure of the owner we just record the bare name as before.
     let brace_lang = matches!(
         lang,
-        "rust" | "javascript" | "typescript" | "go" | "java" | "kotlin"
-            | "swift" | "csharp" | "scala" | "cpp" | "c" | "php" | "dart"
+        "rust"
+            | "javascript"
+            | "typescript"
+            | "go"
+            | "java"
+            | "kotlin"
+            | "swift"
+            | "csharp"
+            | "scala"
+            | "cpp"
+            | "c"
+            | "php"
+            | "dart"
     );
     // (type_name, brace_depth_at_open) for brace langs.
     let mut type_stack: Vec<(String, i32)> = Vec::new();
@@ -521,7 +678,13 @@ fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
             }
         }
     }
-    FileParse { rel, lang, defs, imports, ids }
+    FileParse {
+        rel,
+        lang,
+        defs,
+        imports,
+        ids,
+    }
 }
 
 /// Extract the target type of a Rust `impl` line: `impl Foo`, `impl<T> Foo<T>`,
@@ -542,7 +705,9 @@ fn rust_impl_target(line: &str) -> Option<String> {
     // Skip generics `<...>` then read the type name.
     let target = target.trim_start();
     let target = target.strip_prefix('<').map_or(target, |r| {
-        r.find('>').map(|i| target[i + 2..].trim_start()).unwrap_or(target)
+        r.find('>')
+            .map(|i| target[i + 2..].trim_start())
+            .unwrap_or(target)
     });
     let name: String = target
         .trim_start()
@@ -696,7 +861,10 @@ pub fn scan(root: &Path) -> Graph {
             g.by_file.entry(fp.rel.clone()).or_default().push(name);
         }
         if !fp.imports.is_empty() {
-            g.imports.entry(fp.rel.clone()).or_default().extend(fp.imports);
+            g.imports
+                .entry(fp.rel.clone())
+                .or_default()
+                .extend(fp.imports);
         }
         mentions.push((fp.rel, fp.ids));
     }
@@ -787,7 +955,10 @@ impl Graph {
             self.by_file.entry(rel.clone()).or_default().push(name);
         }
         if !fp.imports.is_empty() {
-            self.imports.entry(rel.clone()).or_default().extend(fp.imports);
+            self.imports
+                .entry(rel.clone())
+                .or_default()
+                .extend(fp.imports);
         }
         // Rebuild this file's references against the (updated) definition set.
         for id in &fp.ids {
@@ -822,8 +993,7 @@ impl Graph {
         }
 
         // Most-referenced symbols are the load-bearing ones.
-        let mut hot: Vec<(&String, usize)> =
-            self.refs.iter().map(|(k, v)| (k, v.len())).collect();
+        let mut hot: Vec<(&String, usize)> = self.refs.iter().map(|(k, v)| (k, v.len())).collect();
         hot.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         if !hot.is_empty() {
             out.push_str("\nMost referenced:\n");
@@ -870,10 +1040,7 @@ impl Graph {
                 return format!("`{name}` is not in the code graph.");
             }
             let list: Vec<&str> = near.iter().map(|s| s.as_str()).collect();
-            return format!(
-                "No symbol named `{name}`. Similar: {}",
-                list.join(", ")
-            );
+            return format!("No symbol named `{name}`. Similar: {}", list.join(", "));
         };
         let mut out = format!("`{name}` — defined in:\n");
         for d in defs {
@@ -987,7 +1154,9 @@ impl Graph {
             }
             // Must be defined in THIS project (not a stdlib/third-party name we
             // merely saw referenced), and have a single clear definition kind.
-            let Some(defs) = self.defs.get(name) else { continue };
+            let Some(defs) = self.defs.get(name) else {
+                continue;
+            };
             let Some(first) = defs.first() else { continue };
             // File-local variables with the same spelling are merged by the
             // lightweight graph and cannot establish a project-wide idiom.
@@ -1000,8 +1169,16 @@ impl Graph {
             // advice about a variable name and only adds noise to /learn.
             if !matches!(
                 first.kind,
-                "fn" | "method" | "struct" | "enum" | "trait" | "class" | "interface"
-                    | "type" | "record" | "module" | "macro"
+                "fn" | "method"
+                    | "struct"
+                    | "enum"
+                    | "trait"
+                    | "class"
+                    | "interface"
+                    | "type"
+                    | "record"
+                    | "module"
+                    | "macro"
             ) {
                 continue;
             }
@@ -1094,12 +1271,55 @@ impl Graph {
 /// also happens to define a symbol with the same bare name.
 fn is_generic_idiom_name(name: &str) -> bool {
     const GENERIC: &[&str] = &[
-        "as_ref", "as_str", "body", "build", "chars", "clone", "close", "collect",
-        "contains", "count", "default", "expect", "filter", "find", "first", "from",
-        "get", "insert", "into", "is_empty", "iter", "last", "len", "line", "load",
-        "main", "map", "name", "new", "next", "open", "parse", "path", "push", "read",
-        "remove", "run", "save", "skip", "sort", "take", "text", "to_string", "to_vec",
-        "trim", "unwrap", "update", "value", "write",
+        "as_ref",
+        "as_str",
+        "body",
+        "build",
+        "chars",
+        "clone",
+        "close",
+        "collect",
+        "contains",
+        "count",
+        "default",
+        "expect",
+        "filter",
+        "find",
+        "first",
+        "from",
+        "get",
+        "insert",
+        "into",
+        "is_empty",
+        "iter",
+        "last",
+        "len",
+        "line",
+        "load",
+        "main",
+        "map",
+        "name",
+        "new",
+        "next",
+        "open",
+        "parse",
+        "path",
+        "push",
+        "read",
+        "remove",
+        "run",
+        "save",
+        "skip",
+        "sort",
+        "take",
+        "text",
+        "to_string",
+        "to_vec",
+        "trim",
+        "unwrap",
+        "update",
+        "value",
+        "write",
     ];
     name.len() < 3 || GENERIC.binary_search(&name).is_ok()
 }
@@ -1125,22 +1345,83 @@ fn is_generic_idiom_name(name: &str) -> bool {
 /// a user would actually accept.
 fn is_ambient_vocabulary(name: &str) -> bool {
     const AMBIENT: &[&str] = &[
-        "Array", "Boolean", "Error", "Function", "JSON",
-        "Map", "Math", "Number", "Object", "Promise",
-        "Proxy", "Reflect", "RegExp", "Set", "String",
-        "Symbol", "WeakMap", "WeakSet", "append", "boolean",
-        "byteLength", "callback", "concat", "constructor", "createContext",
-        "createElement", "defineProperties", "defineProperty", "deserialize", "endsWith",
-        "entries", "extend", "forEach", "format", "fromCharCode",
-        "hasOwnProperty", "includes", "indexOf", "isArray", "isInteger",
-        "join", "keys", "length", "normalize", "null",
-        "number", "padStart", "parseInt", "prototype", "reduce",
-        "reject", "replace", "resolve", "serialize", "slice",
-        "splice", "split", "startsWith", "stringify", "substring",
-        "toFixed", "toJSON", "toLowerCase", "toString", "toUpperCase",
-        "undefined", "unknown", "useCallback", "useContext", "useEffect",
-        "useMemo", "useReducer", "useRef", "useState", "validate",
-        "valueOf", "values",
+        "Array",
+        "Boolean",
+        "Error",
+        "Function",
+        "JSON",
+        "Map",
+        "Math",
+        "Number",
+        "Object",
+        "Promise",
+        "Proxy",
+        "Reflect",
+        "RegExp",
+        "Set",
+        "String",
+        "Symbol",
+        "WeakMap",
+        "WeakSet",
+        "append",
+        "boolean",
+        "byteLength",
+        "callback",
+        "concat",
+        "constructor",
+        "createContext",
+        "createElement",
+        "defineProperties",
+        "defineProperty",
+        "deserialize",
+        "endsWith",
+        "entries",
+        "extend",
+        "forEach",
+        "format",
+        "fromCharCode",
+        "hasOwnProperty",
+        "includes",
+        "indexOf",
+        "isArray",
+        "isInteger",
+        "join",
+        "keys",
+        "length",
+        "normalize",
+        "null",
+        "number",
+        "padStart",
+        "parseInt",
+        "prototype",
+        "reduce",
+        "reject",
+        "replace",
+        "resolve",
+        "serialize",
+        "slice",
+        "splice",
+        "split",
+        "startsWith",
+        "stringify",
+        "substring",
+        "toFixed",
+        "toJSON",
+        "toLowerCase",
+        "toString",
+        "toUpperCase",
+        "undefined",
+        "unknown",
+        "useCallback",
+        "useContext",
+        "useEffect",
+        "useMemo",
+        "useReducer",
+        "useRef",
+        "useState",
+        "validate",
+        "valueOf",
+        "values",
     ];
     AMBIENT.binary_search(&name).is_ok()
 }
@@ -1173,12 +1454,25 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/app.js"), "export function ownSymbol() {}\n").unwrap();
         // No .gitignore at all: the walker must exclude these by name.
-        for d in ["node_modules/pkg", "dist", "__pycache__", "vendor", "coverage"] {
+        for d in [
+            "node_modules/pkg",
+            "dist",
+            "__pycache__",
+            "vendor",
+            "coverage",
+        ] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
-            std::fs::write(dir.join(d).join("dep.js"), "export function vendored() {}\n").unwrap();
+            std::fs::write(
+                dir.join(d).join("dep.js"),
+                "export function vendored() {}\n",
+            )
+            .unwrap();
         }
         let g = scan(&dir);
-        assert!(g.defs.contains_key("ownSymbol"), "the project's own code is indexed");
+        assert!(
+            g.defs.contains_key("ownSymbol"),
+            "the project's own code is indexed"
+        );
         assert!(
             !g.defs.contains_key("vendored"),
             "dependency and build directories are not: {:?}",
@@ -1202,9 +1496,22 @@ mod tests {
     #[test]
     fn language_and_framework_vocabulary_is_not_a_project_idiom() {
         for noise in [
-            "undefined", "toString", "isArray", "callback", "byteLength", "normalize",
-            "defineProperties", "useState", "useEffect", "Promise", "Error", "length",
-            "join", "null", "number", "unknown",
+            "undefined",
+            "toString",
+            "isArray",
+            "callback",
+            "byteLength",
+            "normalize",
+            "defineProperties",
+            "useState",
+            "useEffect",
+            "Promise",
+            "Error",
+            "length",
+            "join",
+            "null",
+            "number",
+            "unknown",
         ] {
             assert!(
                 is_ambient_vocabulary(noise) || !is_distinctive_idiom_name(noise),
@@ -1212,7 +1519,12 @@ mod tests {
             );
         }
         // Real project vocabulary still survives both filters.
-        for real in ["complete_current_plan", "MatchGroup", "apply_discount", "log_audit"] {
+        for real in [
+            "complete_current_plan",
+            "MatchGroup",
+            "apply_discount",
+            "log_audit",
+        ] {
             assert!(!is_ambient_vocabulary(real), "{real} is not ambient");
             assert!(is_distinctive_idiom_name(real), "{real} is distinctive");
         }
@@ -1224,11 +1536,24 @@ mod tests {
     fn ambient_and_generic_lists_are_sorted() {
         // Every name the lists claim to hold must actually be found; an
         // unsorted slice makes binary_search miss entries without erroring.
-        for n in ["Array", "undefined", "useState", "values", "join", "toString"] {
-            assert!(is_ambient_vocabulary(n), "{n} must be found by binary_search");
+        for n in [
+            "Array",
+            "undefined",
+            "useState",
+            "values",
+            "join",
+            "toString",
+        ] {
+            assert!(
+                is_ambient_vocabulary(n),
+                "{n} must be found by binary_search"
+            );
         }
         for n in ["len", "map", "new", "parse"] {
-            assert!(is_generic_idiom_name(n), "{n} must be found by binary_search");
+            assert!(
+                is_generic_idiom_name(n),
+                "{n} must be found by binary_search"
+            );
         }
     }
 
@@ -1238,7 +1563,13 @@ mod tests {
     #[test]
     fn runtime_scheme_imports_are_not_project_conventions() {
         let g = Graph::default();
-        for external in ["node:path", "node:fs/promises", "bun:test", "npm:left-pad", "https://x/y"] {
+        for external in [
+            "node:path",
+            "node:fs/promises",
+            "bun:test",
+            "npm:left-pad",
+            "https://x/y",
+        ] {
             assert!(!g.is_internal_import(external), "{external} is external");
         }
         for internal in ["./util", "../components/CodeBlock", "crate::agent"] {
@@ -1295,7 +1626,10 @@ mod tests {
         std::fs::write(dir.join("src/ambiguous.rs"), "set_enabled();\n").unwrap();
         let g = scan(&dir);
         let report = g.file("src/trace_ring.rs");
-        assert!(report.contains("real_user.rs"), "real user missing: {report}");
+        assert!(
+            report.contains("real_user.rs"),
+            "real user missing: {report}"
+        );
         assert!(
             !report.contains("other.rs"),
             "a generic-name mention is not a dependency: {report}"
@@ -1315,8 +1649,13 @@ mod tests {
     fn only_distinctive_names_and_internal_imports_become_conventions() {
         // Short common words are noise in a lexical graph, however many files
         // mention them; compound or long names are specific enough to trust.
-        for noisy in ["key", "error", "label", "end", "file", "tool", "raw", "matches"] {
-            assert!(!is_distinctive_idiom_name(noisy), "{noisy} should be rejected");
+        for noisy in [
+            "key", "error", "label", "end", "file", "tool", "raw", "matches",
+        ] {
+            assert!(
+                !is_distinctive_idiom_name(noisy),
+                "{noisy} should be rejected"
+            );
         }
         for real in [
             "complete_current_plan",
@@ -1331,7 +1670,8 @@ mod tests {
         // Only project-internal modules are a convention; stdlib is ambient.
         let mut g = Graph::default();
         g.by_file.insert("src/theme.rs".into(), vec![]);
-        g.by_file.insert("web-ui/src/components/TraceRail.jsx".into(), vec![]);
+        g.by_file
+            .insert("web-ui/src/components/TraceRail.jsx".into(), vec![]);
         assert!(g.is_internal_import("crate::theme::Theme"));
         assert!(g.is_internal_import("./components/TraceRail"));
         assert!(g.is_internal_import("../lib/util"));
@@ -1339,7 +1679,10 @@ mod tests {
         assert!(g.is_internal_import("theme"));
         assert!(!g.is_internal_import("std::sync::Arc"));
         assert!(!g.is_internal_import("ratatui::text::Line"));
-        assert!(!g.is_internal_import("super::*"), "test glob is not a convention");
+        assert!(
+            !g.is_internal_import("super::*"),
+            "test glob is not a convention"
+        );
         assert!(!g.is_internal_import("crate::view::*"));
     }
 
@@ -1356,7 +1699,8 @@ mod tests {
             (0..n).map(|i| format!("f{i}.rs")).collect()
         };
         // A widely-used function is a real idiom.
-        g.defs.insert("render_tool".into(), vec![def("fn", "render_tool")]);
+        g.defs
+            .insert("render_tool".into(), vec![def("fn", "render_tool")]);
         g.refs.insert("render_tool".into(), files(4));
         // A widely-seen constant is a value, not an abstraction.
         g.defs.insert("label".into(), vec![def("const", "label")]);
@@ -1385,7 +1729,11 @@ mod tests {
             "use crate::lib;\nfn main() {\n    let w = build_widget();\n}\n",
         )
         .unwrap();
-        std::fs::write(dir.join("app.py"), "import os\n\nclass Thing:\n    def run(self):\n        pass\n").unwrap();
+        std::fs::write(
+            dir.join("app.py"),
+            "import os\n\nclass Thing:\n    def run(self):\n        pass\n",
+        )
+        .unwrap();
         std::fs::write(dir.join(".gitignore"), "vendor/\n").unwrap();
         std::fs::create_dir_all(dir.join("vendor")).unwrap();
         std::fs::write(dir.join("vendor/skip.rs"), "pub fn hidden() {}\n").unwrap();
@@ -1405,45 +1753,108 @@ mod tests {
         )
         .unwrap();
         g.update_file(&dir, &dir.join("src/lib.rs"));
-        assert!(!g.defs.contains_key("build_widget"), "old symbol should be gone");
-        assert!(g.defs.contains_key("make_widget"), "new symbol should be indexed");
+        assert!(
+            !g.defs.contains_key("build_widget"),
+            "old symbol should be gone"
+        );
+        assert!(
+            g.defs.contains_key("make_widget"),
+            "new symbol should be indexed"
+        );
         assert!(g.defs.contains_key("Widget"), "unchanged symbol kept");
         // Deleting a file removes its symbols.
         std::fs::remove_file(dir.join("src/lib.rs")).unwrap();
         g.update_file(&dir, &dir.join("src/lib.rs"));
-        assert!(!g.defs.contains_key("make_widget"), "deleted file's symbols gone");
+        assert!(
+            !g.defs.contains_key("make_widget"),
+            "deleted file's symbols gone"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn detects_definitions_in_more_languages() {
-        assert_eq!(definitions("csharp", "public record User(int Id)"), Some(("record", "User".into())));
-        assert_eq!(definitions("scala", "object Main {"), Some(("object", "Main".into())));
-        assert_eq!(definitions("elixir", "defmodule App do"), Some(("module", "App".into())));
-        assert_eq!(definitions("dart", "class Widget {"), Some(("class", "Widget".into())));
-        assert_eq!(definitions("zig", "pub fn main() void {"), Some(("fn", "main".into())));
+        assert_eq!(
+            definitions("csharp", "public record User(int Id)"),
+            Some(("record", "User".into()))
+        );
+        assert_eq!(
+            definitions("scala", "object Main {"),
+            Some(("object", "Main".into()))
+        );
+        assert_eq!(
+            definitions("elixir", "defmodule App do"),
+            Some(("module", "App".into()))
+        );
+        assert_eq!(
+            definitions("dart", "class Widget {"),
+            Some(("class", "Widget".into()))
+        );
+        assert_eq!(
+            definitions("zig", "pub fn main() void {"),
+            Some(("fn", "main".into()))
+        );
         assert_eq!(definitions("perl", "sub run {"), Some(("fn", "run".into())));
-        assert_eq!(definitions("php", "trait Loggable {"), Some(("trait", "Loggable".into())));
+        assert_eq!(
+            definitions("php", "trait Loggable {"),
+            Some(("trait", "Loggable".into()))
+        );
     }
 
     #[test]
     fn detects_definitions_behind_modifiers() {
         // Rust: modifiers that used to defeat the verbatim prefix match.
-        assert_eq!(definitions("rust", "pub async fn fetch() {}"), Some(("fn", "fetch".into())));
-        assert_eq!(definitions("rust", "pub(crate) fn helper() {}"), Some(("fn", "helper".into())));
-        assert_eq!(definitions("rust", "    pub unsafe fn raw() {}"), Some(("fn", "raw".into())));
-        assert_eq!(definitions("rust", "pub const fn zero() -> u8 { 0 }"), Some(("fn", "zero".into())));
-        assert_eq!(definitions("rust", "pub extern \"C\" fn c_abi() {}"), Some(("fn", "c_abi".into())));
+        assert_eq!(
+            definitions("rust", "pub async fn fetch() {}"),
+            Some(("fn", "fetch".into()))
+        );
+        assert_eq!(
+            definitions("rust", "pub(crate) fn helper() {}"),
+            Some(("fn", "helper".into()))
+        );
+        assert_eq!(
+            definitions("rust", "    pub unsafe fn raw() {}"),
+            Some(("fn", "raw".into()))
+        );
+        assert_eq!(
+            definitions("rust", "pub const fn zero() -> u8 { 0 }"),
+            Some(("fn", "zero".into()))
+        );
+        assert_eq!(
+            definitions("rust", "pub extern \"C\" fn c_abi() {}"),
+            Some(("fn", "c_abi".into()))
+        );
         // But `const`/`static` as real definition keywords are still recognised.
-        assert_eq!(definitions("rust", "pub const MAX: usize = 8;"), Some(("const", "MAX".into())));
-        assert_eq!(definitions("rust", "static REG: u32 = 0;"), Some(("static", "REG".into())));
+        assert_eq!(
+            definitions("rust", "pub const MAX: usize = 8;"),
+            Some(("const", "MAX".into()))
+        );
+        assert_eq!(
+            definitions("rust", "static REG: u32 = 0;"),
+            Some(("static", "REG".into()))
+        );
         // TS/JS: export/async/decorated.
-        assert_eq!(definitions("typescript", "export async function load() {}"), Some(("fn", "load".into())));
-        assert_eq!(definitions("typescript", "export abstract class Base {"), Some(("class", "Base".into())));
+        assert_eq!(
+            definitions("typescript", "export async function load() {}"),
+            Some(("fn", "load".into()))
+        );
+        assert_eq!(
+            definitions("typescript", "export abstract class Base {"),
+            Some(("class", "Base".into()))
+        );
         // Java-family: multi-modifier and annotated.
-        assert_eq!(definitions("java", "public static final class Config {"), Some(("class", "Config".into())));
-        assert_eq!(definitions("kotlin", "override suspend fun run() {}"), Some(("fn", "run".into())));
-        assert_eq!(definitions("python", "async def handler():"), Some(("fn", "handler".into())));
+        assert_eq!(
+            definitions("java", "public static final class Config {"),
+            Some(("class", "Config".into()))
+        );
+        assert_eq!(
+            definitions("kotlin", "override suspend fun run() {}"),
+            Some(("fn", "run".into()))
+        );
+        assert_eq!(
+            definitions("python", "async def handler():"),
+            Some(("fn", "handler".into()))
+        );
     }
 
     #[test]
@@ -1451,15 +1862,32 @@ mod tests {
         let mut ids = BTreeSet::new();
         // `Widget` in code counts; `Widget` inside a string does not; the
         // keyword `return` never counts.
-        identifiers("rust", r#"    return Widget::new("Widget in a string");"#, &mut ids);
-        assert!(ids.contains("Widget"), "real reference should be kept: {ids:?}");
+        identifiers(
+            "rust",
+            r#"    return Widget::new("Widget in a string");"#,
+            &mut ids,
+        );
+        assert!(
+            ids.contains("Widget"),
+            "real reference should be kept: {ids:?}"
+        );
         assert!(!ids.contains("return"), "keyword must be dropped: {ids:?}");
-        assert!(!ids.contains("string"), "string-literal word must be dropped: {ids:?}");
+        assert!(
+            !ids.contains("string"),
+            "string-literal word must be dropped: {ids:?}"
+        );
 
         // A line-comment's words are ignored.
         let mut ids2 = BTreeSet::new();
-        identifiers("rust", "let x = 1; // TokenInComment matters not", &mut ids2);
-        assert!(!ids2.contains("TokenInComment"), "comment word must be dropped: {ids2:?}");
+        identifiers(
+            "rust",
+            "let x = 1; // TokenInComment matters not",
+            &mut ids2,
+        );
+        assert!(
+            !ids2.contains("TokenInComment"),
+            "comment word must be dropped: {ids2:?}"
+        );
         assert!(!ids2.contains("let"), "keyword dropped: {ids2:?}");
 
         // Python uses # comments.
@@ -1489,11 +1917,22 @@ mod tests {
         assert!(g.defs.contains_key("total"), "{:?}", g.defs.keys());
         assert!(g.defs.contains_key("submit"));
         // And now the qualified method name resolves too.
-        assert!(g.defs.contains_key("Cart::total"), "impl method not associated: {:?}", g.defs.keys());
-        assert!(g.defs.contains_key("Order::submit"), "py method not associated: {:?}", g.defs.keys());
+        assert!(
+            g.defs.contains_key("Cart::total"),
+            "impl method not associated: {:?}",
+            g.defs.keys()
+        );
+        assert!(
+            g.defs.contains_key("Order::submit"),
+            "py method not associated: {:?}",
+            g.defs.keys()
+        );
         // A module-level function is NOT falsely attributed to the class.
         assert!(g.defs.contains_key("free_function"));
-        assert!(!g.defs.contains_key("Order::free_function"), "dedented fn wrongly attributed");
+        assert!(
+            !g.defs.contains_key("Order::free_function"),
+            "dedented fn wrongly attributed"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1595,7 +2034,10 @@ mod tests {
             definitions("shell", "check() {"),
             Some(("fn", "check".to_string()))
         );
-        assert_eq!(definitions("rust", "pub fn go() {}"), Some(("fn", "go".into())));
+        assert_eq!(
+            definitions("rust", "pub fn go() {}"),
+            Some(("fn", "go".into()))
+        );
         assert_eq!(definitions("rust", "    let x = 1;"), None);
     }
 
@@ -1603,11 +2045,7 @@ mod tests {
     fn idioms_surface_internal_symbols_used_across_files() {
         // A helper defined once and referenced from several files is an idiom.
         let dir = fixture("idioms");
-        std::fs::write(
-            dir.join("src/lib.rs"),
-            "pub fn build_widget() {}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn build_widget() {}\n").unwrap();
         // Three files that all call build_widget -> reach = 3.
         for f in ["a", "b", "c"] {
             std::fs::write(
@@ -1619,7 +2057,9 @@ mod tests {
         let g = scan(&dir);
         let idioms = g.idioms(3);
         assert!(
-            idioms.iter().any(|(n, _, reach)| n == "build_widget" && *reach >= 3),
+            idioms
+                .iter()
+                .any(|(n, _, reach)| n == "build_widget" && *reach >= 3),
             "expected build_widget as an idiom, got {idioms:?}"
         );
         // A high threshold excludes it.
@@ -1646,9 +2086,18 @@ mod tests {
         }
         let g = scan(&dir);
         let idioms = g.idioms(3);
-        assert!(idioms.iter().any(|(name, _, _)| name == "build_widget"), "{idioms:?}");
-        assert!(!idioms.iter().any(|(name, _, _)| name == "len"), "{idioms:?}");
-        assert!(!idioms.iter().any(|(name, _, _)| name == "path"), "{idioms:?}");
+        assert!(
+            idioms.iter().any(|(name, _, _)| name == "build_widget"),
+            "{idioms:?}"
+        );
+        assert!(
+            !idioms.iter().any(|(name, _, _)| name == "len"),
+            "{idioms:?}"
+        );
+        assert!(
+            !idioms.iter().any(|(name, _, _)| name == "path"),
+            "{idioms:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1668,14 +2117,18 @@ mod tests {
         let g = scan(&dir);
         let common = g.common_imports(3);
         assert!(
-            common.iter().any(|(m, n)| m.contains("internal_kit") && *n >= 3),
+            common
+                .iter()
+                .any(|(m, n)| m.contains("internal_kit") && *n >= 3),
             "expected internal_kit imported across files, got {common:?}"
         );
         // A standard-library import in the same project is not reported.
         std::fs::write(dir.join("d.py"), "import os\nimport sys\n").unwrap();
         let g2 = scan(&dir);
         assert!(
-            !g2.common_imports(1).iter().any(|(m, _)| m == "os" || m == "sys"),
+            !g2.common_imports(1)
+                .iter()
+                .any(|(m, _)| m == "os" || m == "sys"),
             "stdlib must not be a convention: {:?}",
             g2.common_imports(1)
         );

@@ -104,10 +104,7 @@ fn repair_json(s: &str) -> String {
     }
     // Drop a dangling comma before closing.
     let trimmed = out.trim_end();
-    let mut out = trimmed
-        .strip_suffix(',')
-        .unwrap_or(trimmed)
-        .to_string();
+    let mut out = trimmed.strip_suffix(',').unwrap_or(trimmed).to_string();
     while let Some(open) = stack.pop() {
         out.push(if open == '{' { '}' } else { ']' });
     }
@@ -210,11 +207,35 @@ impl Message {
 pub fn model_is_vision(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     const HINTS: &[&str] = &[
-        "vl", "vision", "llava", "bakllava", "moondream", "minicpm-v", "cogvlm",
-        "qwen2-vl", "qwen2.5-vl", "qwen-vl", "internvl", "pixtral", "gemma-3",
-        "gemma3", "llama-3.2", "llama3.2", "phi-3.5-vision", "phi-3-vision",
-        "gpt-4o", "gpt-4.1", "gpt-4-vision", "gpt-4-turbo", "claude-3", "gemini",
-        "smolvlm", "idefics", "florence", "janus", "glm-4v",
+        "vl",
+        "vision",
+        "llava",
+        "bakllava",
+        "moondream",
+        "minicpm-v",
+        "cogvlm",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "qwen-vl",
+        "internvl",
+        "pixtral",
+        "gemma-3",
+        "gemma3",
+        "llama-3.2",
+        "llama3.2",
+        "phi-3.5-vision",
+        "phi-3-vision",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-4-vision",
+        "gpt-4-turbo",
+        "claude-3",
+        "gemini",
+        "smolvlm",
+        "idefics",
+        "florence",
+        "janus",
+        "glm-4v",
     ];
     HINTS.iter().any(|h| m.contains(h))
 }
@@ -394,10 +415,7 @@ fn classify_status(status: reqwest::StatusCode, body: &str, model: &str) -> ApiE
             },
             detail,
         ),
-        _ => ApiError::permanent(
-            format!("the server replied {status}"),
-            detail,
-        ),
+        _ => ApiError::permanent(format!("the server replied {status}"), detail),
     }
 }
 
@@ -755,9 +773,7 @@ fn emit(v: &Value, tx: &UnboundedSender<StreamEvent>) {
     }
     if let Some(reason) = choice.get("finish_reason") {
         if !reason.is_null() {
-            let _ = tx.send(StreamEvent::Finish(
-                reason.as_str().map(|s| s.to_string()),
-            ));
+            let _ = tx.send(StreamEvent::Finish(reason.as_str().map(|s| s.to_string())));
         }
     }
 }

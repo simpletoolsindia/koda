@@ -63,7 +63,10 @@ impl Editor {
     }
 
     pub fn home(&mut self) {
-        self.cursor = self.buf[..self.cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.cursor = self.buf[..self.cursor]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
     }
 
     pub fn end(&mut self) {
@@ -144,7 +147,10 @@ impl Editor {
     }
 
     pub fn kill_to_start(&mut self) {
-        let start = self.buf[..self.cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let start = self.buf[..self.cursor]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         self.buf.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
@@ -170,7 +176,10 @@ impl Editor {
         if start == 0 {
             return;
         }
-        let prev_start = self.buf[..start - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let prev_start = self.buf[..start - 1]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         let prev_len = start - 1 - prev_start;
         self.cursor = prev_start + col.min(prev_len);
         self.snap();

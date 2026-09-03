@@ -184,7 +184,10 @@ pub fn set_enabled(on: bool) {
 /// Whether capture is active. `KODA_TRACE=1` forces it on.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
-        || matches!(std::env::var("KODA_TRACE").ok().as_deref(), Some("1") | Some("true"))
+        || matches!(
+            std::env::var("KODA_TRACE").ok().as_deref(),
+            Some("1") | Some("true")
+        )
 }
 
 pub fn version() -> u64 {
@@ -353,7 +356,9 @@ fn with_step(step: StepRef, f: impl FnOnce(&mut Step)) {
 
 /// Newest first, so the rail can render straight from this.
 pub fn summaries() -> Vec<TurnSummary> {
-    let Ok(ring) = ring().lock() else { return Vec::new() };
+    let Ok(ring) = ring().lock() else {
+        return Vec::new();
+    };
     ring.iter()
         .rev()
         .map(|t| TurnSummary {
@@ -383,7 +388,10 @@ pub fn turn(id: u64) -> Option<Turn> {
 /// The turn currently running, if any — what the UI pins to the top and follows.
 pub fn live() -> Option<Turn> {
     let ring = ring().lock().ok()?;
-    ring.iter().rev().find(|t| t.status == Status::Running).cloned()
+    ring.iter()
+        .rev()
+        .find(|t| t.status == Status::Running)
+        .cloned()
 }
 
 pub fn clear() {
@@ -487,7 +495,13 @@ mod tests {
             );
         }
         let s2 = open_step(t, StepKind::Model, "granite");
-        finish_model(s2, ModelCall { text: "writing".into(), ..Default::default() });
+        finish_model(
+            s2,
+            ModelCall {
+                text: "writing".into(),
+                ..Default::default()
+            },
+        );
         let s3 = open_step(t, StepKind::Tool, "write_file");
         finish_tool(
             s3,
@@ -520,7 +534,11 @@ mod tests {
         assert_eq!(full.steps[4].seq, 4);
         // Payloads survive on the right steps.
         let m = full.steps[0].model.as_ref().unwrap();
-        assert!(m.response.contains("data:"), "raw SSE kept: {:?}", m.response);
+        assert!(
+            m.response.contains("data:"),
+            "raw SSE kept: {:?}",
+            m.response
+        );
         assert_eq!(m.retries, 1);
         assert_eq!(m.tool_calls, vec!["read_file", "search"]);
         assert_eq!(full.steps[1].tool.as_ref().unwrap().name, "read_file");
@@ -599,7 +617,11 @@ mod tests {
         end_turn(t, Status::Ok, "", 0);
         let full = turn(t.unwrap()).unwrap();
         let m = full.steps[0].model.as_ref().unwrap();
-        assert!(m.response.len() < CAP_FIELD + 64, "sse len {}", m.response.len());
+        assert!(
+            m.response.len() < CAP_FIELD + 64,
+            "sse len {}",
+            m.response.len()
+        );
         assert!(m.response.contains("truncated"));
         assert!(m.request.len() < CAP_REQUEST + 64);
         assert!(m.text.len() < CAP_FIELD + 64);

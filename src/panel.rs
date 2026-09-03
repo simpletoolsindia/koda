@@ -319,7 +319,9 @@ pub fn status_line(
     }
     spans.push(Span::styled(
         title.to_string(),
-        Style::default().fg(t.tool_title).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(t.tool_title)
+            .add_modifier(Modifier::BOLD),
     ));
     if let Some((d, c)) = desc {
         spans.push(Span::styled(": ".to_string(), t.dim()));
@@ -421,7 +423,12 @@ pub fn status_bar(
 /// red for a failure). Every line is padded to `width` so the fill is a clean
 /// rectangle rather than a ragged one, and the tint is applied to spans that do
 /// not already set their own background.
-pub fn fill(lines: Vec<Line<'static>>, width: usize, bg: Option<Color>, pad: usize) -> Vec<Line<'static>> {
+pub fn fill(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    bg: Option<Color>,
+    pad: usize,
+) -> Vec<Line<'static>> {
     let Some(bg) = bg else {
         // No fill for this theme: indent so the block still reads as grouped.
         return lines
@@ -460,7 +467,6 @@ pub fn fill(lines: Vec<Line<'static>>, width: usize, bg: Option<Color>, pad: usi
         })
         .collect()
 }
-
 
 /// Clip spans to `limit` display cells, returning them and the width used.
 ///
@@ -501,11 +507,7 @@ fn clip(spans: Vec<Span<'static>>, limit: usize) -> (Vec<Span<'static>>, usize) 
 ///
 /// Returns rows ready to hand to a `Panel`, so the panel stays responsible for
 /// framing and this stays responsible for alignment.
-pub fn key_value_rows(
-    pairs: &[(&str, &str)],
-    inner: usize,
-    t: &Theme,
-) -> Vec<Vec<Span<'static>>> {
+pub fn key_value_rows(pairs: &[(&str, &str)], inner: usize, t: &Theme) -> Vec<Vec<Span<'static>>> {
     let key_w = pairs.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
     let desc_w = pairs.iter().map(|(_, d)| d.width()).max().unwrap_or(0);
     let one_col_w = key_w + 2 + desc_w;
@@ -522,10 +524,7 @@ pub fn key_value_rows(
     };
 
     if !two {
-        return pairs
-            .iter()
-            .map(|(k, d)| cell(k, d, key_w, t))
-            .collect();
+        return pairs.iter().map(|(k, d)| cell(k, d, key_w, t)).collect();
     }
 
     // Fill the left column top-to-bottom so reading order stays vertical.
@@ -581,7 +580,6 @@ mod tests {
             .collect()
     }
 
-
     #[test]
     fn filled_panel_rows_are_all_the_same_width() {
         let mut p = Panel::new("Commands", 50);
@@ -591,7 +589,10 @@ mod tests {
         let widths: Vec<usize> = text(&lines).iter().map(|l| l.width()).collect();
         assert!(widths.iter().all(|w| *w == 50), "ragged fill: {widths:?}");
         for l in &lines {
-            assert!(l.spans.iter().all(|s| s.style.bg.is_some()), "hole in fill: {l:?}");
+            assert!(
+                l.spans.iter().all(|s| s.style.bg.is_some()),
+                "hole in fill: {l:?}"
+            );
         }
     }
 
@@ -600,7 +601,10 @@ mod tests {
         let p = Panel::new("Themes", 44).footer("enter to pick");
         let lines = text(&p.render(&DARK, &UNICODE));
         assert!(lines[0].contains("Themes"), "{lines:?}");
-        assert!(lines[0].contains("enter to pick"), "footer belongs on the heading row");
+        assert!(
+            lines[0].contains("enter to pick"),
+            "footer belongs on the heading row"
+        );
     }
 
     #[test]
@@ -611,12 +615,19 @@ mod tests {
         let rows = text(&lines);
         // Every content/header row starts with the rail glyph…
         for r in &rows[..rows.len() - 1] {
-            assert!(r.starts_with(UNICODE.vline), "row missing rail spine: {r:?}");
+            assert!(
+                r.starts_with(UNICODE.vline),
+                "row missing rail spine: {r:?}"
+            );
         }
         // …and the block ends with a bare corner cap on its own row, so the eye
         // lands on an unambiguous end-of-output marker (no full bottom rule).
         let last = rows.last().unwrap();
-        assert_eq!(last.trim(), UNICODE.corner_bl, "closing cap missing: {last:?}");
+        assert_eq!(
+            last.trim(),
+            UNICODE.corner_bl,
+            "closing cap missing: {last:?}"
+        );
         assert!(rows[0].contains("Read: a.rs"));
     }
 
@@ -642,8 +653,19 @@ mod tests {
         // block. No panic, spine present, cap present.
         let head = vec![Span::raw("Run".to_string())];
         let body = vec![Line::from(Span::raw("$ ls".to_string()))];
-        let rows = text(&railed(head, body, None, 40, Frame::Failed, &ANSI, &UNICODE));
-        assert!(rows[0].starts_with(UNICODE.vline), "no spine in fallback: {rows:?}");
+        let rows = text(&railed(
+            head,
+            body,
+            None,
+            40,
+            Frame::Failed,
+            &ANSI,
+            &UNICODE,
+        ));
+        assert!(
+            rows[0].starts_with(UNICODE.vline),
+            "no spine in fallback: {rows:?}"
+        );
         assert_eq!(rows.last().unwrap().trim(), UNICODE.corner_bl);
     }
 
@@ -661,7 +683,10 @@ mod tests {
         p.row(vec![Span::raw("x".to_string())]);
         let lines = text(&p.render(&ANSI, &UNICODE));
         assert!(lines[0].contains("Keys"));
-        assert!(lines[1].contains(UNICODE.hline), "expected a rule: {lines:?}");
+        assert!(
+            lines[1].contains(UNICODE.hline),
+            "expected a rule: {lines:?}"
+        );
     }
 
     #[test]
@@ -674,7 +699,6 @@ mod tests {
         }
         assert!(lines[1].contains('…'), "clipped rows should say so");
     }
-
 
     #[test]
     fn status_bar_separates_segments_with_chevrons() {
@@ -747,8 +771,6 @@ mod tests {
         assert_eq!(out[0].spans[1].style.bg, Some(Color::Rgb(9, 9, 9)));
     }
 
-
-
     #[test]
     fn gauge_is_exact_at_the_ends() {
         assert_eq!(gauge(0.0, 8, &UNICODE).trim_end_matches('░'), "");
@@ -776,7 +798,12 @@ mod tests {
 
     #[test]
     fn key_values_use_two_columns_when_there_is_room() {
-        let pairs = [("/a", "does a"), ("/b", "does b"), ("/c", "does c"), ("/d", "does d")];
+        let pairs = [
+            ("/a", "does a"),
+            ("/b", "does b"),
+            ("/c", "does c"),
+            ("/d", "does d"),
+        ];
         let wide = key_value_rows(&pairs, 80, &ANSI);
         assert_eq!(wide.len(), 2, "four pairs should fold into two rows");
         let narrow = key_value_rows(&pairs, 20, &ANSI);
@@ -796,12 +823,7 @@ mod tests {
         let starts: Vec<usize> = rows
             .iter()
             .filter(|r| r.len() > 2)
-            .map(|r| {
-                r.iter()
-                    .take(3)
-                    .map(|s| s.content.width())
-                    .sum::<usize>()
-            })
+            .map(|r| r.iter().take(3).map(|s| s.content.width()).sum::<usize>())
             .collect();
         assert!(
             starts.windows(2).all(|w| w[0] == w[1]),

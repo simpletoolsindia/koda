@@ -45,11 +45,10 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      # Advisory only: reports formatting diffs without failing the pipeline.
-      # Flip `continue-on-error` to false once the tree is fully rustfmt-clean.
+      # The tree is rustfmt-clean, so drift fails the build rather than
+      # accumulating into a diff nobody wants to be the one to take.
       - name: Check formatting
         run: cargo fmt --all --check
-        continue-on-error: true
 
       # The tree is clippy-clean, so this is a hard gate now. Anything
       # deliberately kept carries a local #[allow] with the reason next to it.

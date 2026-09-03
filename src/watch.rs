@@ -98,7 +98,9 @@ impl Watcher {
             }
             out
         };
-        triggers.into_iter().find(|t| !self.seen.contains(&Self::key(t)))
+        triggers
+            .into_iter()
+            .find(|t| !self.seen.contains(&Self::key(t)))
     }
 }
 
@@ -128,7 +130,12 @@ fn strip_token<'a>(line: &'a str, token: &str) -> Option<&'a str> {
     let rest = lower.strip_suffix(&tok)?;
     // The char before the token must be whitespace (or start of line), so the
     // token stands alone.
-    if rest.chars().next_back().map(|c| !c.is_whitespace()).unwrap_or(false) {
+    if rest
+        .chars()
+        .next_back()
+        .map(|c| !c.is_whitespace())
+        .unwrap_or(false)
+    {
         return None;
     }
     Some(&line[..rest.len()])
@@ -153,7 +160,11 @@ fn clean_comment(s: &str) -> String {
             break;
         }
     }
-    out.trim().trim_end_matches("-->").trim_end_matches("*/").trim().to_string()
+    out.trim()
+        .trim_end_matches("-->")
+        .trim_end_matches("*/")
+        .trim()
+        .to_string()
 }
 
 /// Walk the workspace (respecting .gitignore) and collect every trigger.
@@ -271,7 +282,10 @@ mod tests {
         // The trigger token must be the last token on the line (aider's rule),
         // so a trailing block-comment close means no match.
         assert!(detect("<!-- fix the layout AI! -->").is_none());
-        assert_eq!(detect("<!-- fix the layout AI!").unwrap().1, "fix the layout");
+        assert_eq!(
+            detect("<!-- fix the layout AI!").unwrap().1,
+            "fix the layout"
+        );
     }
 
     #[test]

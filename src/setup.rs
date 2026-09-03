@@ -378,7 +378,13 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(90, 30)).unwrap();
         term.draw(|f| {
             let area = f.area();
-            draw(f, area, &s, &crate::theme::resolve("auto"), &crate::theme::UNICODE);
+            draw(
+                f,
+                area,
+                &s,
+                &crate::theme::resolve("auto"),
+                &crate::theme::UNICODE,
+            );
         })
         .unwrap();
 
@@ -398,7 +404,10 @@ mod tests {
         // drawn whatever the content does, so it proves nothing here.
         let images_at = text.find("images").expect("images row present");
         let key_at = text.find("api key").expect("api key row present");
-        assert!(images_at > key_at, "the new row is laid out after the others");
+        assert!(
+            images_at > key_at,
+            "the new row is laid out after the others"
+        );
     }
 
     /// Vision belongs beside the model because it is a fact about the model.
@@ -409,7 +418,10 @@ mod tests {
         assert!(Field::Vision.is_toggle());
         assert!(!Field::Model.is_toggle(), "the text fields still take text");
 
-        let cfg = Config { vision: "auto".into(), ..Config::default() };
+        let cfg = Config {
+            vision: "auto".into(),
+            ..Config::default()
+        };
         let mut s = Setup::new(&cfg);
         assert_eq!(s.value(Field::Vision), "auto", "seeded from the config");
 
