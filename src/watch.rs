@@ -108,12 +108,10 @@ impl Watcher {
 /// instruction (line with comment markers and the token removed), or None.
 pub fn detect(line: &str) -> Option<(Kind, String)> {
     let trimmed = line.trim_end();
-    let (kind, without_token) = if let Some(rest) = strip_token(trimmed, "AI!") {
-        (Kind::Do, rest)
-    } else if let Some(rest) = strip_token(trimmed, "AI?") {
-        (Kind::Ask, rest)
-    } else {
-        return None;
+    let (kind, without_token) = match strip_token(trimmed, "AI!") {
+        Some(rest) => (Kind::Do, rest),
+        // Neither token: `?` ends it here, which is what the else-return did.
+        None => (Kind::Ask, strip_token(trimmed, "AI?")?),
     };
     let instruction = clean_comment(without_token);
     if instruction.is_empty() {
