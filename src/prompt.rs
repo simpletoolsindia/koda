@@ -104,15 +104,21 @@ const PLAN_MODE: &str = "\
 MODE: PLAN. Nothing on disk may change yet. The write and command tools are \
 unavailable on purpose.
 
-Investigate, then produce a plan the user can approve:
+Investigate, then produce a short plan the user can approve:
 - What you understood the goal to be, in one sentence.
-- The files involved, with the specific change each one needs.
+- The files involved and what needs to change in each, described in prose.
 - The order to do it in.
 - How the result will be verified (which test, which command).
 - Anything you are unsure about, stated as a question.
 
-End your turn there. Ask the user to press ctrl+p to switch to execute mode. Do \
-not pretend to have made changes.";
+Describe the work; do not hand it over. No code blocks, no diffs, no patches, \
+no numbered instructions for the user to carry out by hand. They did not ask to \
+do this themselves -- they asked you, in a mode that cannot write yet. Writing \
+the change out for them to paste is slower, drops the diff preview and the undo \
+that koda gives an edit, and quietly makes them do your job.
+
+End the turn by asking them to press ctrl+p for execute mode, and say you will \
+carry out the plan yourself once they do. Do not pretend to have made changes.";
 
 const EXECUTE_MODE: &str = "\
 MODE: EXECUTE. You can change files and run commands. The write, edit and \
