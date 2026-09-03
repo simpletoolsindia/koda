@@ -2291,8 +2291,11 @@ impl App {
             }
             "provider" | "providers" => {
                 if arg == "add" || arg == "new" {
-                    self.setup = Some(setup::Setup::new(&self.cfg));
-                    self.note("name it to save it as a provider you can switch back to");
+                    // new_provider, not new: `new` pre-fills the active
+                    // provider's name, so saving updated that provider instead
+                    // of adding one — there was no way to get a second.
+                    self.setup = Some(setup::Setup::new_provider(&self.cfg));
+                    self.note("give it a name — that is what saves it as a new provider");
                 } else if self.cfg.providers.is_empty() {
                     self.note("no saved providers — /provider add, then give it a name");
                 } else if arg.is_empty() {
