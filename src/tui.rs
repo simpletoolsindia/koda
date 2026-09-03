@@ -36,7 +36,7 @@ use ratatui::crossterm::terminal::{
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Stdout, Write};
@@ -141,6 +141,22 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/copy", "copy last reply to the clipboard"),
     ("/cwd", "show the workspace root"),
     ("/quit", "exit koda"),
+];
+
+/// Actions on the text you have already typed, opened with `#`.
+///
+/// These are editor operations, not agent requests: nothing here reaches the
+/// model or costs a turn. The list is deliberately short — a palette people
+/// scroll is one they stop opening.
+const ACTIONS: &[(&str, &str)] = &[
+    ("#copy", "copy the whole prompt to the clipboard"),
+    ("#copyline", "copy the line the caret is on"),
+    ("#cutline", "delete the line the caret is on"),
+    ("#start", "move the caret to the beginning"),
+    ("#end", "move the caret to the end"),
+    ("#clear", "empty the input"),
+    ("#undo", "put back what the last action removed"),
+    ("#paste", "insert the clipboard's text"),
 ];
 
 struct Pending {
@@ -291,6 +307,8 @@ pub struct App {
     mention_sel: usize,
     /// Which row of the slash-command completion list is selected.
     cmd_sel: usize,
+    /// Highlighted row in the `#` action palette.
+    action_sel: usize,
     /// Whether the file index had finished at the last frame.
     files_ready: bool,
     /// Session picker: the list, and which row is selected.
@@ -344,6 +362,89 @@ impl App {
             // EnableMouseTracking: it clears all five modes, so it also cleans
             // up after a terminal left in a wider mode by something else.
             let _ = execute!(out, DisableMouseCapture);
+        }
+    }
+
+    /// The `#` action query at the caret: the `#` and anything typed after it.
+    ///
+    /// Anchored at the end of the buffer so it acts on a prompt already written
+    /// — you type the request, then reach for `#` — and so a `#` in the middle
+    /// of a sentence is left alone as ordinary text.
+    fn action_query(&self) -> Option<String> {
+        let buf = &self.editor.buf;
+        let hash = buf.rfind('#')?;
+        let tail = &buf[hash..];
+        // Only a bare word may follow, so "fix #3 in the parser" is not a query.
+        if tail[1..].chars().any(|c| c.is_whitespace()) {
+            return None;
+        }
+        Some(tail.to_string())
+    }
+
+    /// The actions matching what has been typed after `#`.
+    fn action_hits(&self) -> Vec<&'static (&'static str, &'static str)> {
+        let Some(q) = self.action_query() else {
+            return Vec::new();
+        };
+        ACTIONS.iter().filter(|(n, _)| n.starts_with(&q)).collect()
+    }
+
+    /// Run the chosen action, having first taken the `#…` query back out of the
+    /// buffer so the prompt is exactly what the user wrote.
+    fn apply_action(&mut self, name: &str) {
+        if let Some(q) = self.action_query() {
+            self.editor.backspace_n(q.len());
+        }
+        self.action_sel = 0;
+        match name {
+            "#copy" => {
+                let text = self.editor.buf.trim().to_string();
+                if text.is_empty() {
+                    self.note("nothing to copy");
+                } else {
+                    match copy_to_clipboard(&text) {
+                        Ok(()) => self.note(format!("copied {} characters", text.chars().count())),
+                        Err(e) => self.note(format!("copy failed: {e}")),
+                    }
+                }
+            }
+            "#copyline" => {
+                let line = self.editor.current_line().trim().to_string();
+                if line.is_empty() {
+                    self.note("this line is empty");
+                } else {
+                    match copy_to_clipboard(&line) {
+                        Ok(()) => self.note("copied the line"),
+                        Err(e) => self.note(format!("copy failed: {e}")),
+                    }
+                }
+            }
+            "#cutline" => {
+                self.editor.checkpoint();
+                let gone = self.editor.cut_line();
+                if gone.trim().is_empty() {
+                    self.note("cut an empty line");
+                } else {
+                    self.note("cut the line — #undo puts it back");
+                }
+            }
+            "#start" => self.editor.start(),
+            "#end" => self.editor.finish(),
+            "#clear" => {
+                self.editor.checkpoint();
+                self.editor.clear();
+                self.note("input cleared — #undo puts it back");
+            }
+            "#undo" => {
+                if !self.editor.undo() {
+                    self.note("nothing to undo");
+                }
+            }
+            "#paste" => match clipboard_text() {
+                Some(t) => self.paste_text(&t),
+                None => self.note("nothing on the clipboard"),
+            },
+            other => self.note(format!("unknown action {other}")),
         }
     }
 
@@ -992,6 +1093,37 @@ impl App {
         }
 
         // Interactive slash autocomplete: navigate and accept the command list.
+        // The `#` palette takes the arrows and enter while it is open, the way
+        // the `/` list below does. Esc closes it and leaves the text alone.
+        let actions = self.action_hits();
+        if !actions.is_empty() && !ctrl && !alt {
+            match key.code {
+                KeyCode::Up => {
+                    self.action_sel = self.action_sel.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.action_sel = (self.action_sel + 1).min(actions.len() - 1);
+                    return;
+                }
+                KeyCode::Esc => {
+                    // Take the query out but keep the prompt: the point of esc
+                    // is to change your mind, not to lose what you wrote.
+                    if let Some(q) = self.action_query() {
+                        self.editor.backspace_n(q.len());
+                    }
+                    self.action_sel = 0;
+                    return;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    let pick = actions[self.action_sel.min(actions.len() - 1)].0;
+                    self.apply_action(pick);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let cmds = self.command_matches();
         if cmds.len() > 1 && !ctrl && !alt {
             // If what's typed is already an exact command (e.g. "/mode" while
@@ -2907,8 +3039,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         f.set_cursor_position(Position::new(x.min(area.width.saturating_sub(1)), y));
     }
 
+    let actions = app.action_hits();
     let mention = app.mention_hits();
-    if !mention.is_empty() {
+    if !actions.is_empty() {
+        action_popup(f, app, input, &actions);
+    } else if !mention.is_empty() {
         mention_popup(f, app, input, &mention);
     } else if app.editor.buf.starts_with('/') && !app.editor.buf.contains(' ') {
         command_popup(f, app, input);
@@ -3475,6 +3610,61 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     }
 
     f.render_widget(Paragraph::new(lines), rect);
+}
+
+/// The `#` action palette, drawn above the input like the other popups.
+fn action_popup(
+    f: &mut Frame,
+    app: &App,
+    input: Rect,
+    hits: &[&'static (&'static str, &'static str)],
+) {
+    if hits.is_empty() || input.y == 0 {
+        return;
+    }
+    let t = &app.theme;
+    let rows = hits.len().min(8);
+    let h = rows as u16 + 2;
+    let y = input.y.saturating_sub(h);
+    let w = input.width.min(56);
+    let rect = Rect {
+        x: input.x,
+        y,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+
+    let sel = app.action_sel.min(hits.len().saturating_sub(1));
+    let lines: Vec<Line> = hits
+        .iter()
+        .take(rows)
+        .enumerate()
+        .map(|(i, (name, desc))| {
+            let on = i == sel;
+            let mark = if on { "▸ " } else { "  " };
+            Line::from(vec![
+                Span::styled(mark, t.fg(t.accent)),
+                Span::styled(
+                    format!("{:<11}", name),
+                    if on {
+                        t.emphasis(t.accent)
+                    } else {
+                        t.fg(t.accent)
+                    },
+                ),
+                Span::styled((*desc).to_string(), t.dim()),
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.dim())
+        .title(Span::styled(" edit ", t.dim()))
+        .title_bottom(Span::styled(" ↑↓ pick · enter run · esc cancel ", t.dim()));
+    f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 fn command_popup(f: &mut Frame, app: &App, input: Rect) {
@@ -4218,6 +4408,7 @@ pub async fn run(
         files: FileIndex::new(),
         mention_sel: 0,
         cmd_sel: 0,
+        action_sel: 0,
         files_ready: false,
         picker: None,
         setup: None,
@@ -4733,6 +4924,48 @@ mod tests {
         assert!(msg.contains("78 KB"), "{msg}");
         assert!(msg.contains("20000 tokens"), "{msg}");
         assert!(msg.contains("/settings"), "and says how to clear it: {msg}");
+    }
+
+    /// `#` acts on a prompt already written, so the query is anchored at the
+    /// end. A `#` mid-sentence is ordinary text -- "fix #3 in the parser" must
+    /// not pop a palette over what someone is typing.
+    #[test]
+    fn the_action_query_is_only_a_trailing_hash_word() {
+        let q = |buf: &str| {
+            let hash = buf.rfind('#')?;
+            let tail = &buf[hash..];
+            if tail[1..].chars().any(|c| c.is_whitespace()) {
+                return None;
+            }
+            Some(tail.to_string())
+        };
+        assert_eq!(q("fix the bug#"), Some("#".to_string()));
+        assert_eq!(q("fix the bug#cl"), Some("#cl".to_string()));
+        assert_eq!(q("#copy"), Some("#copy".to_string()));
+        assert_eq!(q("fix #3 in the parser"), None, "mid-sentence hash is text");
+        assert_eq!(q("no hash at all"), None);
+    }
+
+    /// Every action in the palette must be one apply_action handles; a row that
+    /// does nothing when chosen is worse than a row that is not there.
+    #[test]
+    fn every_listed_action_is_implemented() {
+        const HANDLED: &[&str] = &[
+            "#copy",
+            "#copyline",
+            "#cutline",
+            "#start",
+            "#end",
+            "#clear",
+            "#undo",
+            "#paste",
+        ];
+        for (name, desc) in ACTIONS {
+            assert!(HANDLED.contains(name), "{name} is listed but not handled");
+            assert!(!desc.is_empty(), "{name} needs a description");
+            assert!(name.starts_with('#'), "{name} should carry its prefix");
+        }
+        assert_eq!(ACTIONS.len(), HANDLED.len(), "handled but unlisted actions");
     }
 
     #[test]

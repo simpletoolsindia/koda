@@ -10,7 +10,15 @@ pub struct Editor {
     history: Vec<String>,
     hist_pos: Option<usize>,
     draft: String,
+    /// Snapshots for undo, most recent last. Only the actions that destroy text
+    /// push one: typing is its own undo (backspace), while "clear input" or
+    /// "cut line" are one keystroke that removes work.
+    undo: Vec<(String, usize)>,
 }
+
+/// How many undo steps to keep. Deep enough to recover a slip, shallow enough
+/// that a long session's input line is not an unbounded log.
+const UNDO_DEPTH: usize = 32;
 
 impl Editor {
     pub fn is_empty(&self) -> bool {
@@ -21,6 +29,67 @@ impl Editor {
         self.buf.clear();
         self.cursor = 0;
         self.hist_pos = None;
+    }
+
+    /// Remember the current text so `undo` can bring it back.
+    pub fn checkpoint(&mut self) {
+        if self.undo.last().map(|(b, _)| b.as_str()) == Some(self.buf.as_str()) {
+            return; // nothing changed since the last one
+        }
+        self.undo.push((self.buf.clone(), self.cursor));
+        if self.undo.len() > UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Restore the last checkpoint. Returns false when there is nothing to undo,
+    /// so the caller can say so rather than appear to have done nothing.
+    pub fn undo(&mut self) -> bool {
+        match self.undo.pop() {
+            Some((buf, cursor)) => {
+                self.buf = buf;
+                self.cursor = cursor.min(self.buf.len());
+                self.snap();
+                self.hist_pos = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The line the caret is on, without its newline.
+    pub fn current_line(&self) -> &str {
+        let (start, _) = self.line_pos();
+        let end = self.buf[start..]
+            .find('\n')
+            .map(|i| start + i)
+            .unwrap_or(self.buf.len());
+        &self.buf[start..end]
+    }
+
+    /// Remove the line the caret is on, newline included, and return it.
+    pub fn cut_line(&mut self) -> String {
+        let (start, _) = self.line_pos();
+        let end = self.buf[start..]
+            .find('\n')
+            .map(|i| start + i + 1)
+            .unwrap_or(self.buf.len());
+        let taken = self.buf[start..end].to_string();
+        self.buf.replace_range(start..end, "");
+        self.cursor = start.min(self.buf.len());
+        self.snap();
+        taken
+    }
+
+    /// Remove `n` bytes ending at the caret — used to take the `#…` query back
+    /// out once an action has been chosen.
+    pub fn backspace_n(&mut self, n: usize) {
+        let start = self.cursor.saturating_sub(n);
+        if start < self.cursor {
+            self.buf.replace_range(start..self.cursor, "");
+            self.cursor = start;
+            self.snap();
+        }
     }
 
     pub fn insert(&mut self, s: &str) {
@@ -315,6 +384,37 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_restores_what_an_action_removed() {
+        let mut e = Editor::default();
+        e.insert("important prompt text");
+        e.checkpoint();
+        e.clear();
+        assert!(e.buf.is_empty());
+        assert!(e.undo(), "there was something to undo");
+        assert_eq!(e.buf, "important prompt text");
+        assert!(!e.undo(), "and only the one step");
+    }
+
+    #[test]
+    fn cut_line_takes_the_caret_line_only() {
+        let mut e = Editor::default();
+        e.insert("first\nsecond\nthird");
+        e.home(); // start of "third"
+        assert_eq!(e.current_line(), "third");
+        let gone = e.cut_line();
+        assert_eq!(gone, "third");
+        assert_eq!(e.buf, "first\nsecond\n");
+    }
+
+    #[test]
+    fn backspace_n_removes_the_query_not_the_prompt() {
+        let mut e = Editor::default();
+        e.insert("fix the bug#cle");
+        e.backspace_n("#cle".len());
+        assert_eq!(e.buf, "fix the bug");
+    }
 
     #[test]
     fn edits_and_moves() {

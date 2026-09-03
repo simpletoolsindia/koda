@@ -223,6 +223,26 @@ next message is treated as the answer, not a new turn.
 
 ---
 
+## Editing what you typed — `#`
+
+Press `#` at the end of what you have written to open a small palette of actions
+on the text itself. None of them reach the model or cost a turn.
+
+| Action | What it does |
+| --- | --- |
+| `#copy` | Copy the whole prompt to the clipboard. |
+| `#copyline` | Copy the line the caret is on. |
+| `#cutline` | Delete that line (`#undo` puts it back). |
+| `#start` / `#end` | Move the caret to the beginning or the end. |
+| `#clear` | Empty the input (`#undo` puts it back). |
+| `#undo` | Restore what the last action removed. |
+| `#paste` | Insert the clipboard's text. |
+
+Type a few letters to narrow the list (`#cl` → `#clear`), `↑`/`↓` to pick,
+`enter` to run, `esc` to close and keep what you wrote. A `#` in the middle of a
+sentence is left alone as ordinary text, so `fix #3 in the parser` behaves
+normally.
+
 ## Running things yourself
 
 Two prefixes skip the agent entirely. Neither costs tokens, and neither enters
