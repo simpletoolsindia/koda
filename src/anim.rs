@@ -65,7 +65,10 @@ impl Motion {
 
 /// Terminals that mishandle synchronized output, where we stay conservative.
 pub fn sync_trustworthy() -> bool {
-    if std::env::var("TERM").map(|t| t.starts_with("screen")).unwrap_or(false) {
+    if std::env::var("TERM")
+        .map(|t| t.starts_with("screen"))
+        .unwrap_or(false)
+    {
         return false;
     }
     // Apple's Terminal.app ignores DEC 2026 and tears instead.
@@ -392,7 +395,10 @@ mod tests {
             seen[0] > seen[3] && seen[5] > seen[3],
             "endpoints should dwell longer than the middle: {seen:?}"
         );
-        assert!(seen.iter().all(|n| *n > 0), "every glyph should appear: {seen:?}");
+        assert!(
+            seen.iter().all(|n| *n > 0),
+            "every glyph should appear: {seen:?}"
+        );
     }
 
     #[test]
@@ -490,11 +496,7 @@ mod tests {
     #[test]
     fn eighth_bar_is_constant_width() {
         let widths: Vec<usize> = (0..=100)
-            .map(|p| {
-                eighth_bar(p as f32 / 100.0, 8, true)
-                    .chars()
-                    .count()
-            })
+            .map(|p| eighth_bar(p as f32 / 100.0, 8, true).chars().count())
             .collect();
         assert!(
             widths.iter().all(|w| *w == 8),

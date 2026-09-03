@@ -64,7 +64,11 @@ pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
                 Some(_) => {} // closing fence
                 None => {
                     let info = fence[3..].trim().to_string();
-                    let label = if info.is_empty() { "code".into() } else { info.clone() };
+                    let label = if info.is_empty() {
+                        "code".into()
+                    } else {
+                        info.clone()
+                    };
                     out.push(Line::from(Span::styled(format!("  ─ {label}"), dim())));
                     code_lang = Some(normalize_lang(&info));
                 }
@@ -80,7 +84,10 @@ pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
 
         // Tables: a `|`-delimited row followed by a `|---|` separator.
         if is_table_row(trimmed)
-            && all.get(i).map(|n| is_table_divider(n.trim())).unwrap_or(false)
+            && all
+                .get(i)
+                .map(|n| is_table_divider(n.trim()))
+                .unwrap_or(false)
         {
             let mut rows = vec![split_row(trimmed)];
             i += 1; // skip the divider
@@ -105,9 +112,7 @@ pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
             out.extend(wrap_spans(
                 vec![Span::styled(
                     rest.to_string(),
-                    Style::default()
-                        .fg(t.heading)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.heading).add_modifier(Modifier::BOLD),
                 )],
                 width,
                 0,
@@ -122,7 +127,10 @@ pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
         }
 
         // Block quote
-        if let Some(rest) = trimmed.strip_prefix("> ").or_else(|| trimmed.strip_prefix(">")) {
+        if let Some(rest) = trimmed
+            .strip_prefix("> ")
+            .or_else(|| trimmed.strip_prefix(">"))
+        {
             let mut spans = vec![Span::styled("│ ", dim())];
             spans.extend(inline(rest, Style::default().fg(t.muted), t));
             out.extend(wrap_spans(spans, width, 2));
@@ -239,13 +247,10 @@ fn is_table_row(s: &str) -> bool {
 
 fn is_table_divider(s: &str) -> bool {
     is_table_row(s)
-        && s.trim()
-            .trim_matches('|')
-            .split('|')
-            .all(|c| {
-                let c = c.trim();
-                !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')
-            })
+        && s.trim().trim_matches('|').split('|').all(|c| {
+            let c = c.trim();
+            !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')
+        })
 }
 
 fn split_row(s: &str) -> Vec<String> {
@@ -313,7 +318,8 @@ fn render_table(rows: &[Vec<String>], width: usize, t: &Theme) -> Vec<Line<'stat
             if shown_w > cw {
                 cell_spans = clip_spans(cell_spans, cw);
             }
-            let pad = cw.saturating_sub(cell_spans.iter().map(|s| s.content.width()).sum::<usize>());
+            let pad =
+                cw.saturating_sub(cell_spans.iter().map(|s| s.content.width()).sum::<usize>());
             spans.extend(cell_spans);
             if pad > 0 {
                 spans.push(Span::raw(" ".repeat(pad)));
@@ -406,7 +412,10 @@ fn strip_list(s: &str) -> Option<(usize, String, &str)> {
     let digits = body.chars().take_while(|c| c.is_ascii_digit()).count();
     if digits > 0 && digits <= 3 {
         let after = &body[digits..];
-        if let Some(rest) = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")) {
+        if let Some(rest) = after
+            .strip_prefix(". ")
+            .or_else(|| after.strip_prefix(") "))
+        {
             return Some((lead, format!("{}. ", &body[..digits]), rest));
         }
     }
@@ -473,7 +482,8 @@ fn inline(s: &str, base: Style, t: &Theme) -> Vec<Span<'static>> {
         if (c == '*' || c == '_') && i + 1 < bytes.len() && bytes[i + 1] != c {
             if let Some(end) = find_char(&bytes, i + 1, c) {
                 // Avoid mangling snake_case identifiers.
-                let looks_like_word = i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_');
+                let looks_like_word =
+                    i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '_');
                 if !looks_like_word {
                     flush(&mut buf, &mut spans);
                     let inner: String = bytes[i + 1..end].iter().collect();
@@ -646,23 +656,127 @@ fn keywords(lang: &str) -> &'static [&'static str] {
         "try", "while", "with", "yield",
     ];
     const JS: &[&str] = &[
-        "as", "async", "await", "break", "case", "catch", "class", "const", "continue", "default",
-        "delete", "do", "else", "export", "extends", "false", "finally", "for", "from", "function",
-        "if", "import", "in", "instanceof", "interface", "let", "new", "null", "of", "return",
-        "static", "super", "switch", "this", "throw", "true", "try", "type", "typeof", "undefined",
-        "var", "void", "while", "yield",
+        "as",
+        "async",
+        "await",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "from",
+        "function",
+        "if",
+        "import",
+        "in",
+        "instanceof",
+        "interface",
+        "let",
+        "new",
+        "null",
+        "of",
+        "return",
+        "static",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "undefined",
+        "var",
+        "void",
+        "while",
+        "yield",
     ];
     const GO: &[&str] = &[
-        "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
-        "for", "func", "go", "goto", "if", "import", "interface", "map", "nil", "package", "range",
-        "return", "select", "struct", "switch", "type", "var",
+        "break",
+        "case",
+        "chan",
+        "const",
+        "continue",
+        "default",
+        "defer",
+        "else",
+        "fallthrough",
+        "for",
+        "func",
+        "go",
+        "goto",
+        "if",
+        "import",
+        "interface",
+        "map",
+        "nil",
+        "package",
+        "range",
+        "return",
+        "select",
+        "struct",
+        "switch",
+        "type",
+        "var",
     ];
     const C: &[&str] = &[
-        "auto", "bool", "break", "case", "char", "class", "const", "continue", "default", "delete",
-        "do", "double", "else", "enum", "extern", "false", "float", "for", "goto", "if", "inline",
-        "int", "long", "namespace", "new", "nullptr", "private", "protected", "public", "return",
-        "short", "signed", "sizeof", "static", "struct", "switch", "template", "this", "throw",
-        "true", "try", "typedef", "unsigned", "using", "virtual", "void", "while",
+        "auto",
+        "bool",
+        "break",
+        "case",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "delete",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "inline",
+        "int",
+        "long",
+        "namespace",
+        "new",
+        "nullptr",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "struct",
+        "switch",
+        "template",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typedef",
+        "unsigned",
+        "using",
+        "virtual",
+        "void",
+        "while",
     ];
     const SH: &[&str] = &[
         "case", "do", "done", "elif", "else", "esac", "exit", "export", "fi", "for", "function",
@@ -955,8 +1069,14 @@ mod tests {
         assert!(text.iter().any(|l| l.contains("@@")), "{text:?}");
         let minus = text.iter().find(|l| l.contains("-    return 1")).unwrap();
         let plus = text.iter().find(|l| l.contains("+    return 2")).unwrap();
-        assert!(minus.trim_start().starts_with('2'), "old line number: {minus:?}");
-        assert!(plus.trim_start().starts_with('2'), "new line number: {plus:?}");
+        assert!(
+            minus.trim_start().starts_with('2'),
+            "old line number: {minus:?}"
+        );
+        assert!(
+            plus.trim_start().starts_with('2'),
+            "new line number: {plus:?}"
+        );
     }
 
     #[test]
@@ -970,7 +1090,10 @@ mod tests {
         let md = "| tool | time |\n|---|---|\n| read | 8ms |\n| edit | 120ms |";
         let lines = render(md, 60, &th());
         let text = text_of(&lines);
-        assert!(text[0].contains("tool") && text[0].contains("time"), "{text:?}");
+        assert!(
+            text[0].contains("tool") && text[0].contains("time"),
+            "{text:?}"
+        );
         assert!(text[1].contains('─'), "expected a header rule: {text:?}");
         // Columns line up: `time` and `8ms` start at the same offset.
         let h = text[0].find("time").unwrap();
@@ -986,11 +1109,20 @@ mod tests {
         let lines = render(md, 70, &th());
         let text = text_of(&lines);
         let joined = text.join("\n");
-        assert!(joined.contains("learning.rs"), "code cell text shown: {text:?}");
-        assert!(!joined.contains("`learning.rs`"), "backticks stripped: {text:?}");
+        assert!(
+            joined.contains("learning.rs"),
+            "code cell text shown: {text:?}"
+        );
+        assert!(
+            !joined.contains("`learning.rs`"),
+            "backticks stripped: {text:?}"
+        );
         assert!(joined.contains("new"), "bold cell text shown: {text:?}");
         assert!(!joined.contains("**new**"), "asterisks stripped: {text:?}");
-        assert!(text.iter().any(|l| l.contains('│')), "column separators present: {text:?}");
+        assert!(
+            text.iter().any(|l| l.contains('│')),
+            "column separators present: {text:?}"
+        );
     }
 
     #[test]
@@ -1002,7 +1134,11 @@ mod tests {
 
     #[test]
     fn links_show_the_label_not_the_url() {
-        let text = text_of(&render("see [the docs](https://example.com/x) now", 60, &th()));
+        let text = text_of(&render(
+            "see [the docs](https://example.com/x) now",
+            60,
+            &th(),
+        ));
         let joined = text.join(" ");
         assert!(joined.contains("the docs"), "{joined}");
         assert!(!joined.contains("example.com"), "{joined}");

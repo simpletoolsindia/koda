@@ -24,7 +24,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
     /// koda edited/created a file: (path, before, after). `before` empty = new.
-    Edit { path: String, before: String, after: String },
+    Edit {
+        path: String,
+        before: String,
+        after: String,
+    },
     /// A command koda ran and whether it succeeded.
     Command { command: String, ok: bool },
     /// The user denied an approval for a tool.
@@ -32,7 +36,11 @@ pub enum Observation {
     /// The user changed a file *after* koda wrote it. `koda_wrote` is what koda
     /// left; `user_has` is what the file holds now. The delta is the user's
     /// correction of koda's output — the richest "vibe" signal there is.
-    Correction { path: String, koda_wrote: String, user_has: String },
+    Correction {
+        path: String,
+        koda_wrote: String,
+        user_has: String,
+    },
 }
 
 /// A distilled rule. Candidate rules await the user's nod; accepted rules are
@@ -66,13 +74,50 @@ fn obsolete_generic_idiom(key: &str) -> bool {
     };
     matches!(
         name,
-        "body" | "build" | "chars" | "clone" | "collect" | "contains" | "count"
-            | "default" | "filter" | "find" | "first" | "from" | "get" | "insert"
-            | "into" | "is_empty" | "iter" | "last" | "len" | "line" | "load"
-            | "main" | "map" | "name" | "new" | "next" | "open" | "parse" | "path"
-            | "push" | "read" | "remove" | "run" | "save" | "skip" | "sort"
-            | "take" | "text" | "to_string" | "trim" | "unwrap" | "update"
-            | "value" | "write"
+        "body"
+            | "build"
+            | "chars"
+            | "clone"
+            | "collect"
+            | "contains"
+            | "count"
+            | "default"
+            | "filter"
+            | "find"
+            | "first"
+            | "from"
+            | "get"
+            | "insert"
+            | "into"
+            | "is_empty"
+            | "iter"
+            | "last"
+            | "len"
+            | "line"
+            | "load"
+            | "main"
+            | "map"
+            | "name"
+            | "new"
+            | "next"
+            | "open"
+            | "parse"
+            | "path"
+            | "push"
+            | "read"
+            | "remove"
+            | "run"
+            | "save"
+            | "skip"
+            | "sort"
+            | "take"
+            | "text"
+            | "to_string"
+            | "trim"
+            | "unwrap"
+            | "update"
+            | "value"
+            | "write"
     )
 }
 
@@ -543,7 +588,12 @@ fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
     let mut habits: BTreeMap<&'static str, (u32, &'static str)> = BTreeMap::new();
     // Also: a whole import line the user swapped, mined as a library preference.
     for o in obs {
-        if let Observation::Correction { koda_wrote, user_has, path } = o {
+        if let Observation::Correction {
+            koda_wrote,
+            user_has,
+            path,
+        } = o
+        {
             if !is_code_file(path) {
                 continue;
             }
@@ -673,8 +723,12 @@ fn def_lines(src: &str) -> Vec<&str> {
 /// parentheses — a Python `def f(a):` ends in a colon that says nothing about
 /// annotations, and counting it would make every signature look annotated.
 fn is_annotated_def(line: &str) -> bool {
-    let Some(open) = line.find('(') else { return false };
-    let Some(close) = line.rfind(')') else { return false };
+    let Some(open) = line.find('(') else {
+        return false;
+    };
+    let Some(close) = line.rfind(')') else {
+        return false;
+    };
     if close <= open {
         return false;
     }
@@ -699,11 +753,8 @@ fn aligned_changed_lines(koda: &str, user: &str) -> Vec<(String, String)> {
     let k: Vec<&str> = koda.lines().collect();
     let u: Vec<&str> = user.lines().collect();
     // Lines the user kept verbatim are not corrections; drop the common set.
-    let common: std::collections::HashSet<&str> = k
-        .iter()
-        .filter(|l| u.contains(l))
-        .copied()
-        .collect();
+    let common: std::collections::HashSet<&str> =
+        k.iter().filter(|l| u.contains(l)).copied().collect();
     let k_changed: Vec<String> = k
         .iter()
         .filter(|l| !common.contains(**l) && !l.trim().is_empty())
@@ -715,10 +766,7 @@ fn aligned_changed_lines(koda: &str, user: &str) -> Vec<(String, String)> {
         .map(|s| s.to_string())
         .collect();
     // Pair positionally; only the overlap length matters.
-    k_changed
-        .into_iter()
-        .zip(u_changed)
-        .collect()
+    k_changed.into_iter().zip(u_changed).collect()
 }
 
 /// Split a line into identifier-ish tokens (letters, digits, underscore, dot),
@@ -764,11 +812,10 @@ fn command_head(cmd: &str) -> String {
 /// gets mined pushes a real rule further down the /learn list.
 fn is_generic_command(cmd: &str) -> bool {
     const AMBIENT: &[&str] = &[
-        "awk", "cat", "cd", "chmod", "cp", "cut", "date", "df", "diff", "du", "echo",
-        "env", "export", "file", "find", "grep", "head", "hostname", "kill", "less",
-        "ln", "ls", "mkdir", "mv", "nano", "open", "printf", "ps", "pwd", "rg", "rm",
-        "sed", "sleep", "sort", "tail", "tee", "touch", "tr", "uniq", "vim", "wc",
-        "which", "who", "xargs",
+        "awk", "cat", "cd", "chmod", "cp", "cut", "date", "df", "diff", "du", "echo", "env",
+        "export", "file", "find", "grep", "head", "hostname", "kill", "less", "ln", "ls", "mkdir",
+        "mv", "nano", "open", "printf", "ps", "pwd", "rg", "rm", "sed", "sleep", "sort", "tail",
+        "tee", "touch", "tr", "uniq", "vim", "wc", "which", "who", "xargs",
     ];
     let Some(head) = cmd.split_whitespace().next() else {
         return true;
@@ -784,7 +831,13 @@ fn is_generic_command(cmd: &str) -> bool {
 
 fn slug(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -805,11 +858,12 @@ enum Casing {
 
 fn casing(name: &str) -> Casing {
     let has_underscore = name.contains('_');
-    let has_inner_upper = name
+    let has_inner_upper = name.chars().skip(1).any(|c| c.is_ascii_uppercase());
+    let first_lower = name
         .chars()
-        .skip(1)
-        .any(|c| c.is_ascii_uppercase());
-    let first_lower = name.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false);
+        .next()
+        .map(|c| c.is_ascii_lowercase())
+        .unwrap_or(false);
     if has_underscore && !has_inner_upper {
         Casing::Snake
     } else if !has_underscore && has_inner_upper && first_lower {
@@ -918,9 +972,17 @@ fn parse_rule_line(item: &str, accepted: bool) -> Option<Rule> {
 fn encode(obs: &Observation) -> Option<String> {
     // Minimal JSONL by hand — no serde dependency on this hot path, and the
     // format stays greppable. Strings are escaped for newlines and quotes.
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    let esc = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    };
     let line = match obs {
-        Observation::Edit { path, before, after } => {
+        Observation::Edit {
+            path,
+            before,
+            after,
+        } => {
             if path.trim().is_empty() {
                 return None;
             }
@@ -929,7 +991,9 @@ fn encode(obs: &Observation) -> Option<String> {
             let a: String = after.chars().take(4000).collect();
             format!(
                 r#"{{"t":"edit","path":"{}","before":"{}","after":"{}"}}"#,
-                esc(path), esc(&b), esc(&a)
+                esc(path),
+                esc(&b),
+                esc(&a)
             )
         }
         Observation::Command { command, ok } => {
@@ -941,7 +1005,11 @@ fn encode(obs: &Observation) -> Option<String> {
         Observation::Denied { tool } => {
             format!(r#"{{"t":"denied","tool":"{}"}}"#, esc(tool))
         }
-        Observation::Correction { path, koda_wrote, user_has } => {
+        Observation::Correction {
+            path,
+            koda_wrote,
+            user_has,
+        } => {
             if path.trim().is_empty() {
                 return None;
             }
@@ -949,7 +1017,9 @@ fn encode(obs: &Observation) -> Option<String> {
             let u: String = user_has.chars().take(4000).collect();
             format!(
                 r#"{{"t":"correction","path":"{}","koda_wrote":"{}","user_has":"{}"}}"#,
-                esc(path), esc(&k), esc(&u)
+                esc(path),
+                esc(&k),
+                esc(&u)
             )
         }
     };
@@ -961,8 +1031,16 @@ fn decode(line: &str) -> Option<Observation> {
     match v.get("t")?.as_str()? {
         "edit" => Some(Observation::Edit {
             path: v.get("path")?.as_str()?.to_string(),
-            before: v.get("before").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            after: v.get("after").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            before: v
+                .get("before")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            after: v
+                .get("after")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
         }),
         "cmd" => Some(Observation::Command {
             command: v.get("command")?.as_str()?.to_string(),
@@ -973,8 +1051,16 @@ fn decode(line: &str) -> Option<Observation> {
         }),
         "correction" => Some(Observation::Correction {
             path: v.get("path")?.as_str()?.to_string(),
-            koda_wrote: v.get("koda_wrote").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            user_has: v.get("user_has").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            koda_wrote: v
+                .get("koda_wrote")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            user_has: v
+                .get("user_has")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
         }),
         _ => None,
     }
@@ -989,13 +1075,28 @@ mod tests {
     /// a real rule could have used.
     #[test]
     fn ambient_shell_verbs_do_not_become_project_rules() {
-        for noise in ["cd /tmp", "cd /Users/sridhar/research/OmniRoute", "curl -s",
-                      "grep -rE", "ls -la", "cat README.md", "git status"] {
-            assert!(is_generic_command(noise), "{noise} teaches nothing about the project");
+        for noise in [
+            "cd /tmp",
+            "cd /Users/sridhar/research/OmniRoute",
+            "curl -s",
+            "grep -rE",
+            "ls -la",
+            "cat README.md",
+            "git status",
+        ] {
+            assert!(
+                is_generic_command(noise),
+                "{noise} teaches nothing about the project"
+            );
         }
         // Project-specific invocations are exactly what this should keep.
-        for real in ["cargo test --all", "npm run build:release", "just migrate",
-                     "./install.sh --system", "curl -s localhost:20128/v1/models"] {
+        for real in [
+            "cargo test --all",
+            "npm run build:release",
+            "just migrate",
+            "./install.sh --system",
+            "curl -s localhost:20128/v1/models",
+        ] {
             assert!(!is_generic_command(real), "{real} is worth remembering");
         }
     }
@@ -1038,7 +1139,9 @@ mod tests {
         l.accept(0).expect("accepted");
         l.induce_idioms(&[], &[]);
         assert!(
-            l.rules.iter().any(|r| r.accepted && r.text.contains("log_audit")),
+            l.rules
+                .iter()
+                .any(|r| r.accepted && r.text.contains("log_audit")),
             "an accepted rule survives a run that would not re-mine it"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -1055,7 +1158,10 @@ mod tests {
     fn observations_round_trip_through_the_log() {
         let d = tmp("roundtrip");
         let l = Learning::load(&d);
-        l.observe(&Observation::Command { command: "just test".into(), ok: true });
+        l.observe(&Observation::Command {
+            command: "just test".into(),
+            ok: true,
+        });
         l.observe(&Observation::Edit {
             path: "src/a.rs".into(),
             before: "".into(),
@@ -1063,21 +1169,45 @@ mod tests {
         });
         let got = l.observations();
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0], Observation::Command { command: "just test".into(), ok: true });
+        assert_eq!(
+            got[0],
+            Observation::Command {
+                command: "just test".into(),
+                ok: true
+            }
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]
     fn induces_command_that_works_and_command_to_avoid() {
         let obs = vec![
-            Observation::Command { command: "npm test".into(), ok: false },
-            Observation::Command { command: "npm test".into(), ok: false },
-            Observation::Command { command: "just test".into(), ok: true },
-            Observation::Command { command: "just test".into(), ok: true },
+            Observation::Command {
+                command: "npm test".into(),
+                ok: false,
+            },
+            Observation::Command {
+                command: "npm test".into(),
+                ok: false,
+            },
+            Observation::Command {
+                command: "just test".into(),
+                ok: true,
+            },
+            Observation::Command {
+                command: "just test".into(),
+                ok: true,
+            },
         ];
         let rules = induce_rules(&obs);
-        assert!(rules.iter().any(|r| r.key == "cmd.avoid.npm_test"), "{rules:?}");
-        assert!(rules.iter().any(|r| r.key == "cmd.use.just_test"), "{rules:?}");
+        assert!(
+            rules.iter().any(|r| r.key == "cmd.avoid.npm_test"),
+            "{rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.key == "cmd.use.just_test"),
+            "{rules:?}"
+        );
     }
 
     #[test]
@@ -1088,7 +1218,10 @@ mod tests {
             after: "fn apply_discount() {}\nfn read_file() {}\nfn write_out() {}".into(),
         }];
         let rules = induce_rules(&obs);
-        assert!(rules.iter().any(|r| r.key == "naming.fn.snake"), "{rules:?}");
+        assert!(
+            rules.iter().any(|r| r.key == "naming.fn.snake"),
+            "{rules:?}"
+        );
     }
 
     #[test]
@@ -1099,31 +1232,58 @@ mod tests {
             after: "fn one_two() {}\nfn threeFour() {}".into(),
         }];
         let rules = induce_rules(&obs);
-        assert!(!rules.iter().any(|r| r.key.starts_with("naming.fn")), "{rules:?}");
+        assert!(
+            !rules.iter().any(|r| r.key.starts_with("naming.fn")),
+            "{rules:?}"
+        );
     }
 
     #[test]
     fn induces_import_preference_above_threshold() {
         let after = "import httpx\nx = 1";
         let obs = vec![
-            Observation::Edit { path: "a.py".into(), before: "".into(), after: after.into() },
-            Observation::Edit { path: "b.py".into(), before: "".into(), after: after.into() },
-            Observation::Edit { path: "c.py".into(), before: "".into(), after: after.into() },
+            Observation::Edit {
+                path: "a.py".into(),
+                before: "".into(),
+                after: after.into(),
+            },
+            Observation::Edit {
+                path: "b.py".into(),
+                before: "".into(),
+                after: after.into(),
+            },
+            Observation::Edit {
+                path: "c.py".into(),
+                before: "".into(),
+                after: after.into(),
+            },
         ];
         let rules = induce_rules(&obs);
-        assert!(rules.iter().any(|r| r.key == "import.prefer.httpx"), "{rules:?}");
+        assert!(
+            rules.iter().any(|r| r.key == "import.prefer.httpx"),
+            "{rules:?}"
+        );
     }
 
     #[test]
     fn accept_promotes_a_candidate_into_the_brief() {
         let d = tmp("accept");
         let mut l = Learning::load(&d);
-        l.observe(&Observation::Command { command: "just test".into(), ok: true });
-        l.observe(&Observation::Command { command: "just test".into(), ok: true });
+        l.observe(&Observation::Command {
+            command: "just test".into(),
+            ok: true,
+        });
+        l.observe(&Observation::Command {
+            command: "just test".into(),
+            ok: true,
+        });
         assert!(l.induce() >= 1);
         assert!(l.brief().is_empty(), "candidates must not enter the prompt");
         assert!(l.accept(0).is_some());
-        assert!(l.brief().contains("just test"), "accepted rule enters the brief");
+        assert!(
+            l.brief().contains("just test"),
+            "accepted rule enters the brief"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1131,13 +1291,23 @@ mod tests {
     fn rules_round_trip_through_the_file() {
         let d = tmp("rulefile");
         let mut l = Learning::load(&d);
-        l.observe(&Observation::Command { command: "just build".into(), ok: true });
-        l.observe(&Observation::Command { command: "just build".into(), ok: true });
+        l.observe(&Observation::Command {
+            command: "just build".into(),
+            ok: true,
+        });
+        l.observe(&Observation::Command {
+            command: "just build".into(),
+            ok: true,
+        });
         l.induce();
         l.accept_all();
         assert!(l.save().unwrap());
         let reloaded = Learning::load(&d);
-        assert!(reloaded.brief().contains("just build"), "{:?}", reloaded.rules);
+        assert!(
+            reloaded.brief().contains("just build"),
+            "{:?}",
+            reloaded.rules
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1145,8 +1315,14 @@ mod tests {
     fn reject_drops_a_candidate() {
         let d = tmp("reject");
         let mut l = Learning::load(&d);
-        l.observe(&Observation::Command { command: "just test".into(), ok: true });
-        l.observe(&Observation::Command { command: "just test".into(), ok: true });
+        l.observe(&Observation::Command {
+            command: "just test".into(),
+            ok: true,
+        });
+        l.observe(&Observation::Command {
+            command: "just test".into(),
+            ok: true,
+        });
         l.induce();
         let before = l.candidates().len();
         assert!(before >= 1);
@@ -1172,10 +1348,16 @@ mod tests {
         )
         .unwrap();
         let l = Learning::load(&d);
-        assert!(l.rules.iter().any(|r| r.key == "idiom.symbol.len" && r.accepted));
+        assert!(l
+            .rules
+            .iter()
+            .any(|r| r.key == "idiom.symbol.len" && r.accepted));
         assert!(!l.rules.iter().any(|r| r.key == "idiom.symbol.map"));
         assert!(l.rules.iter().any(|r| r.key == "idiom.symbol.log_audit"));
-        assert!(l.dirty, "pruning should rewrite the rules file on the next save");
+        assert!(
+            l.dirty,
+            "pruning should rewrite the rules file on the next save"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1188,8 +1370,16 @@ mod tests {
         let n = l.induce_idioms(&idioms, &imports);
         assert_eq!(n, 2);
         let cands: Vec<String> = l.candidates().iter().map(|r| r.text.clone()).collect();
-        assert!(cands.iter().any(|t| t.contains("log_audit") && t.contains("load-bearing")), "{cands:?}");
-        assert!(cands.iter().any(|t| t.contains("internal_kit")), "{cands:?}");
+        assert!(
+            cands
+                .iter()
+                .any(|t| t.contains("log_audit") && t.contains("load-bearing")),
+            "{cands:?}"
+        );
+        assert!(
+            cands.iter().any(|t| t.contains("internal_kit")),
+            "{cands:?}"
+        );
         // Idempotent: re-mining the same idioms adds nothing new.
         assert_eq!(l.induce_idioms(&idioms, &imports), 0);
         std::fs::remove_dir_all(&d).ok();
@@ -1213,7 +1403,9 @@ mod tests {
         ];
         let rules = induce_rules(&obs);
         assert!(
-            rules.iter().any(|r| r.text.contains("prefer `log.audit` over `logging`")),
+            rules
+                .iter()
+                .any(|r| r.text.contains("prefer `log.audit` over `logging`")),
             "{rules:?}"
         );
     }
@@ -1232,7 +1424,11 @@ mod tests {
             .iter()
             .find(|r| r.key.starts_with("correction.sub"))
             .expect("a single correction should become a candidate rule");
-        assert!(rule.text.contains("httpx") && rule.text.contains("requests"), "{}", rule.text);
+        assert!(
+            rule.text.contains("httpx") && rule.text.contains("requests"),
+            "{}",
+            rule.text
+        );
     }
 
     #[test]
@@ -1299,7 +1495,9 @@ mod tests {
         }];
         let rules = induce_rules(&obs);
         assert!(
-            rules.iter().any(|r| r.key == "correction.style.annotate_signatures"),
+            rules
+                .iter()
+                .any(|r| r.key == "correction.style.annotate_signatures"),
             "the added type annotations should be learned: {rules:?}"
         );
         assert!(
@@ -1313,14 +1511,22 @@ mod tests {
         let annotated = "def f(a: int) -> int:\n    return a\n";
         let bare = "def f(a):\n    return a\n";
         // koda bare -> user annotated: learn it.
-        assert!(style_habits(bare, annotated).iter().any(|(k, _)| *k == "annotate_signatures"));
+        assert!(style_habits(bare, annotated)
+            .iter()
+            .any(|(k, _)| *k == "annotate_signatures"));
         // The reverse (the user removing annotations) is not this rule.
-        assert!(!style_habits(annotated, bare).iter().any(|(k, _)| *k == "annotate_signatures"));
+        assert!(!style_habits(annotated, bare)
+            .iter()
+            .any(|(k, _)| *k == "annotate_signatures"));
         // No docstring either way: no rule.
-        assert!(!style_habits(bare, annotated).iter().any(|(k, _)| *k == "docstrings"));
+        assert!(!style_habits(bare, annotated)
+            .iter()
+            .any(|(k, _)| *k == "docstrings"));
         // Rust signatures count as annotated too, so the rule never fires there.
         let rs = "pub fn f(a: u8) -> u8 {\n    a\n}\n";
-        assert!(!style_habits(rs, rs).iter().any(|(k, _)| *k == "annotate_signatures"));
+        assert!(!style_habits(rs, rs)
+            .iter()
+            .any(|(k, _)| *k == "annotate_signatures"));
     }
 
     #[test]

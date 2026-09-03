@@ -83,7 +83,10 @@ pub fn take_control() -> Vec<Control> {
 
 /// Whether anything is waiting, so the poll can skip the drain entirely.
 pub fn has_control() -> bool {
-    control_queue().lock().map(|q| !q.is_empty()).unwrap_or(false)
+    control_queue()
+        .lock()
+        .map(|q| !q.is_empty())
+        .unwrap_or(false)
 }
 
 /// What the *running* session is actually using. The config file is not the
@@ -106,7 +109,9 @@ fn runtime_slot() -> &'static Mutex<Option<Runtime>> {
 /// Publish the live values. Cheap to call on a timer: it only writes when
 /// something actually changed.
 pub fn publish_runtime(model: &str, endpoint: &str, mode: &str, auto_tier: &str) {
-    let Ok(mut slot) = runtime_slot().lock() else { return };
+    let Ok(mut slot) = runtime_slot().lock() else {
+        return;
+    };
     let same = slot.as_ref().is_some_and(|r| {
         r.model == model && r.endpoint == endpoint && r.mode == mode && r.auto_tier == auto_tier
     });
@@ -277,7 +282,9 @@ async fn handle(mut stream: TcpStream, ctx: Arc<Ctx>) -> std::io::Result<()> {
 
 /// Index just past the blank line that ends the request head, if it's there yet.
 fn find_head_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
         // Tolerate bare-LF clients (curl --http0.9, hand-typed requests).
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
 }
@@ -286,7 +293,8 @@ fn content_length(head: &str) -> usize {
     head.split("\r\n")
         .find_map(|line| {
             let (k, v) = line.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("content-length")
+            k.trim()
+                .eq_ignore_ascii_case("content-length")
                 .then(|| v.trim().parse::<usize>().ok())?
         })
         .unwrap_or(0)
@@ -328,7 +336,9 @@ async fn route(
                 Some(t) => (
                     "200 OK",
                     "application/json",
-                    serde_json::to_string(&t).unwrap_or_else(|_| "{}".into()).into_bytes(),
+                    serde_json::to_string(&t)
+                        .unwrap_or_else(|_| "{}".into())
+                        .into_bytes(),
                 ),
                 None => (
                     "404 Not Found",
@@ -371,28 +381,36 @@ async fn route(
             let json = save_settings(&ctx.root, body);
             ("200 OK", "application/json", json.into_bytes())
         }
-        ("GET", "/api/config") => {
-            ("200 OK", "application/json", config_json(&ctx.root).into_bytes())
-        }
+        ("GET", "/api/config") => (
+            "200 OK",
+            "application/json",
+            config_json(&ctx.root).into_bytes(),
+        ),
         ("POST", "/api/config") => {
             let json = save_config(&ctx.root, body);
             ("200 OK", "application/json", json.into_bytes())
         }
-        ("GET", "/api/memory") => {
-            ("200 OK", "application/json", memory_json(&ctx.root).into_bytes())
-        }
-        ("POST", "/api/memory") => {
-            ("200 OK", "application/json", post_memory(body).into_bytes())
-        }
-        ("GET", "/api/learning") => {
-            ("200 OK", "application/json", learning_json(&ctx.root).into_bytes())
-        }
-        ("POST", "/api/learning") => {
-            ("200 OK", "application/json", post_learning(body).into_bytes())
-        }
-        ("GET", "/api/sessions") => {
-            ("200 OK", "application/json", sessions_json(&ctx.root).into_bytes())
-        }
+        ("GET", "/api/memory") => (
+            "200 OK",
+            "application/json",
+            memory_json(&ctx.root).into_bytes(),
+        ),
+        ("POST", "/api/memory") => ("200 OK", "application/json", post_memory(body).into_bytes()),
+        ("GET", "/api/learning") => (
+            "200 OK",
+            "application/json",
+            learning_json(&ctx.root).into_bytes(),
+        ),
+        ("POST", "/api/learning") => (
+            "200 OK",
+            "application/json",
+            post_learning(body).into_bytes(),
+        ),
+        ("GET", "/api/sessions") => (
+            "200 OK",
+            "application/json",
+            sessions_json(&ctx.root).into_bytes(),
+        ),
         ("POST", p) if p.starts_with("/api/sessions/") => {
             let rest = p.trim_start_matches("/api/sessions/");
             let (id, action) = rest.split_once('/').unwrap_or((rest, "resume"));
@@ -415,7 +433,9 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn logs_json(query: &str, detail: &str) -> String {
-    let since: u64 = query_param(query, "since").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let since: u64 = query_param(query, "since")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     // The ring doesn't track a per-entry sequence, so derive a stable seq from
     // position by fetching a generous window and numbering it.
     let min = detail_to_level(detail);
@@ -565,7 +585,8 @@ fn save_config(root: &Path, body: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") }).to_string()
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
         }
     };
     let mut cfg = match crate::config::Config::load(root) {
@@ -698,7 +719,8 @@ fn post_memory(body: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") }).to_string()
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
         }
     };
     if let Some(note) = v.get("remember").and_then(|x| x.as_str()) {
@@ -732,8 +754,7 @@ fn learning_json(root: &Path) -> String {
     };
     let accepted: Vec<serde_json::Value> =
         l.rules.iter().filter(|r| r.accepted).map(rule).collect();
-    let candidates: Vec<serde_json::Value> =
-        l.candidates().into_iter().map(rule).collect();
+    let candidates: Vec<serde_json::Value> = l.candidates().into_iter().map(rule).collect();
     serde_json::json!({
         "accepted": accepted,
         "candidates": candidates,
@@ -748,7 +769,8 @@ fn post_learning(body: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") }).to_string()
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
         }
     };
     use crate::agent::LearnAction;
@@ -803,7 +825,10 @@ fn sessions_json(root: &Path) -> String {
 /// `resume` swaps the live conversation for a saved one; `fork` copies it first
 /// so the original stays untouched, then resumes the copy.
 fn session_action(root: &Path, id: &str, action: &str) -> String {
-    let Some(found) = crate::session::list(root).into_iter().find(|s| s.header.id == id) else {
+    let Some(found) = crate::session::list(root)
+        .into_iter()
+        .find(|s| s.header.id == id)
+    else {
         return serde_json::json!({ "ok": false, "error": format!("no session {id}") }).to_string();
     };
     match action {
@@ -881,7 +906,11 @@ fn codegraph_json(root: &Path) -> String {
                 refs,
             });
             // Edge: file "contains" this symbol (file nodes are implicit).
-            edges.push(GraphEdge { from: d.file.clone(), to: name.clone(), kind: "defines" });
+            edges.push(GraphEdge {
+                from: d.file.clone(),
+                to: name.clone(),
+                kind: "defines",
+            });
         }
     }
     let languages: Vec<(String, usize)> =
@@ -916,26 +945,62 @@ fn skills_json(root: &Path) -> String {
 fn save_skill(root: &Path, body: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(e) => return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") }).to_string(),
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
+        }
     };
-    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let when = v.get("when").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let bodytext = v.get("body").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let role = v.get("role").and_then(|x| x.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let when = v
+        .get("when")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let bodytext = v
+        .get("body")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let role = v
+        .get("role")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if name.is_empty() || when.is_empty() || bodytext.is_empty() {
-        return serde_json::json!({ "ok": false, "error": "name, when and body are required" }).to_string();
+        return serde_json::json!({ "ok": false, "error": "name, when and body are required" })
+            .to_string();
     }
-    let front_role = role.as_ref().map(|r| format!("role: {r}\n")).unwrap_or_default();
+    let front_role = role
+        .as_ref()
+        .map(|r| format!("role: {r}\n"))
+        .unwrap_or_default();
     let doc = format!("---\nname: {name}\n{front_role}when: {when}\n---\n\n{bodytext}\n");
     if crate::skills::parse(&doc).is_none() {
-        return serde_json::json!({ "ok": false, "error": "composed skill did not parse" }).to_string();
+        return serde_json::json!({ "ok": false, "error": "composed skill did not parse" })
+            .to_string();
     }
     let dir = root.join(".koda").join("skills");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return serde_json::json!({ "ok": false, "error": format!("mkdir: {e}") }).to_string();
     }
     // Sanitize the filename from the name.
-    let file: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    let file: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
     let path = dir.join(format!("{file}.md"));
     match std::fs::write(&path, doc) {
         Ok(()) => serde_json::json!({ "ok": true, "path": path.display().to_string() }).to_string(),
@@ -1007,11 +1072,10 @@ fn delete_skill(root: &Path, name: &str) -> String {
         .to_string();
     }
     match std::fs::remove_file(&target) {
-        Ok(()) => serde_json::json!({ "ok": true, "path": target.display().to_string() })
-            .to_string(),
-        Err(e) => {
-            serde_json::json!({ "ok": false, "error": format!("delete: {e}") }).to_string()
+        Ok(()) => {
+            serde_json::json!({ "ok": true, "path": target.display().to_string() }).to_string()
         }
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("delete: {e}") }).to_string(),
     }
 }
 
@@ -1053,13 +1117,12 @@ fn save_settings(root: &Path, body: &str) -> String {
         }
     };
     // Storing the unchanged built-in (or empty) means "use the built-in".
-    cfg.system_prompt = if prompt.trim().is_empty()
-        || prompt.trim() == crate::prompt::base_prompt().trim()
-    {
-        String::new()
-    } else {
-        prompt
-    };
+    cfg.system_prompt =
+        if prompt.trim().is_empty() || prompt.trim() == crate::prompt::base_prompt().trim() {
+            String::new()
+        } else {
+            prompt
+        };
     match crate::config::save(&cfg) {
         Ok(path) => serde_json::json!({
             "ok": true,
@@ -1216,7 +1279,9 @@ mod tests {
         let removed = delete_skill(&root, "temp-skill");
         assert!(removed.contains("\"ok\":true"), "{removed}");
         assert!(
-            crate::skills::load(&root).iter().all(|s| s.name != "temp-skill"),
+            crate::skills::load(&root)
+                .iter()
+                .all(|s| s.name != "temp-skill"),
             "skill should be gone after delete"
         );
 
@@ -1236,14 +1301,26 @@ mod tests {
     fn request_head_and_body_are_parsed_independently() {
         // The head isn't complete until the blank line arrives.
         assert_eq!(find_head_end(b"POST / HTTP/1.1\r\nHost: x\r\n"), None);
-        assert_eq!(find_head_end(b"POST / HTTP/1.1\r\nHost: x\r\n\r\nbody"), Some(28));
+        assert_eq!(
+            find_head_end(b"POST / HTTP/1.1\r\nHost: x\r\n\r\nbody"),
+            Some(28)
+        );
         // Bare-LF clients still work.
         assert!(find_head_end(b"GET / HTTP/1.1\nHost: x\n\n").is_some());
         // Content-Length is case-insensitive and defaults to zero.
-        assert_eq!(content_length("POST / HTTP/1.1\r\nContent-Length: 42\r\n"), 42);
-        assert_eq!(content_length("POST / HTTP/1.1\r\ncontent-length:  7 \r\n"), 7);
+        assert_eq!(
+            content_length("POST / HTTP/1.1\r\nContent-Length: 42\r\n"),
+            42
+        );
+        assert_eq!(
+            content_length("POST / HTTP/1.1\r\ncontent-length:  7 \r\n"),
+            7
+        );
         assert_eq!(content_length("GET / HTTP/1.1\r\nHost: x\r\n"), 0);
-        assert_eq!(content_length("POST / HTTP/1.1\r\nContent-Length: nonsense\r\n"), 0);
+        assert_eq!(
+            content_length("POST / HTTP/1.1\r\nContent-Length: nonsense\r\n"),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1364,7 +1441,10 @@ mod tests {
         crate::trace::clear();
         let t = crate::trace::begin_turn("execute", "test-model", "http://x/v1", "trace me");
         let s = crate::trace::open_step(t, crate::trace::StepKind::Model, "test-model");
-        crate::trace::append_sse(s, b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n");
+        crate::trace::append_sse(
+            s,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n",
+        );
         crate::trace::finish_model(
             s,
             crate::trace::ModelCall {
@@ -1464,7 +1544,10 @@ mod tests {
         let got = req(addr, "GET", "/api/config", "").await;
         assert!(got.contains("200 OK"), "{got}");
         assert!(got.contains("\"has_api_key\""), "{got}");
-        assert!(!got.contains("\"api_key\""), "the API key must not be served: {got}");
+        assert!(
+            !got.contains("\"api_key\""),
+            "the API key must not be served: {got}"
+        );
 
         // A valid edit is accepted, persisted, and queued for the live agent.
         let posted = req(
@@ -1496,9 +1579,17 @@ mod tests {
         let learn = req(addr, "GET", "/api/learning", "").await;
         assert!(learn.contains("\"candidates\""), "{learn}");
         // …and their writes queue for the agent.
-        let remembered = req(addr, "POST", "/api/memory", r#"{"remember":"use cargo test"}"#).await;
+        let remembered = req(
+            addr,
+            "POST",
+            "/api/memory",
+            r#"{"remember":"use cargo test"}"#,
+        )
+        .await;
         assert!(remembered.contains("\"ok\":true"), "{remembered}");
-        assert!(take_control().iter().any(|c| matches!(c, Control::Remember(_))));
+        assert!(take_control()
+            .iter()
+            .any(|c| matches!(c, Control::Remember(_))));
 
         // Sessions list (empty here) and an unknown id is a clean error.
         let sessions = req(addr, "GET", "/api/sessions", "").await;
@@ -1674,7 +1765,10 @@ mod tests {
 
         // The skill is listed…
         let before = req(addr, "GET", "/api/skills").await;
-        assert!(before.contains("web-temp"), "skill should be listed: {before}");
+        assert!(
+            before.contains("web-temp"),
+            "skill should be listed: {before}"
+        );
 
         // …DELETE removes it (200 + ok:true)…
         let del = req(addr, "DELETE", "/api/skills/web-temp").await;
@@ -1685,7 +1779,9 @@ mod tests {
         let after = req(addr, "GET", "/api/skills").await;
         assert!(!after.contains("web-temp"), "skill should be gone: {after}");
         assert!(
-            crate::skills::load(&root).iter().all(|s| s.name != "web-temp"),
+            crate::skills::load(&root)
+                .iter()
+                .all(|s| s.name != "web-temp"),
             "skill file should be removed"
         );
         std::fs::remove_dir_all(&root).ok();

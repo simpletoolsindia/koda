@@ -138,14 +138,23 @@ pub fn init(level: &str, to_file: bool) {
             let _ = std::fs::rename(&path, path.with_extension("log.1"));
         }
     }
-    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         s.written = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         s.file = Some(f);
         s.path = Some(path);
     }
 }
 
-pub fn push(level: Level, area: &'static str, message: impl Into<String>, fields: Vec<(String, String)>) {
+pub fn push(
+    level: Level,
+    area: &'static str,
+    message: impl Into<String>,
+    fields: Vec<(String, String)>,
+) {
     let Ok(mut s) = sink().lock() else { return };
     if level < s.min {
         return;
@@ -183,13 +192,10 @@ fn wall_clock() -> String {
 
 /// Most recent entries at or above `min`, oldest first.
 pub fn recent(min: Level, limit: usize) -> Vec<Entry> {
-    let Ok(s) = sink().lock() else { return Vec::new() };
-    let mut out: Vec<Entry> = s
-        .ring
-        .iter()
-        .filter(|e| e.level >= min)
-        .cloned()
-        .collect();
+    let Ok(s) = sink().lock() else {
+        return Vec::new();
+    };
+    let mut out: Vec<Entry> = s.ring.iter().filter(|e| e.level >= min).cloned().collect();
     if out.len() > limit {
         out.drain(..out.len() - limit);
     }

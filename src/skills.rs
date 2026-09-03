@@ -104,7 +104,9 @@ fn parse_file(path: &Path) -> Result<Skill, String> {
 pub fn parse(text: &str) -> Option<Skill> {
     let text = text.trim_start_matches('\u{feff}');
     let rest = text.strip_prefix("---")?;
-    let rest = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n"))?;
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))?;
     let end = rest.find("\n---")?;
     let (front, body) = rest.split_at(end);
     let body = body
@@ -124,7 +126,13 @@ pub fn parse(text: &str) -> Option<Skill> {
         match k.trim().to_ascii_lowercase().as_str() {
             "name" => name = v,
             "when" | "description" | "desc" => when = v,
-            "role" => role = if v.is_empty() { None } else { Some(v.to_ascii_lowercase()) },
+            "role" => {
+                role = if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_ascii_lowercase())
+                }
+            }
             _ => {}
         }
     }
@@ -190,7 +198,9 @@ pub fn roles(skills: &[Skill]) -> Vec<(String, String)> {
 /// Find a role-agent skill by its role name (e.g. "dev", "qa").
 pub fn find_role<'a>(skills: &'a [Skill], role: &str) -> Option<&'a Skill> {
     let want = role.trim().to_ascii_lowercase();
-    skills.iter().find(|s| s.role.as_deref() == Some(want.as_str()))
+    skills
+        .iter()
+        .find(|s| s.role.as_deref() == Some(want.as_str()))
 }
 
 /// Write a starter skill so `koda skills --init` gives the user something to edit.
@@ -254,8 +264,9 @@ mod tests {
 
     #[test]
     fn parses_frontmatter_and_body() {
-        let s = parse("---\nname: migrations\nwhen: Writing a migration\n---\nAlways add a down.\n")
-            .unwrap();
+        let s =
+            parse("---\nname: migrations\nwhen: Writing a migration\n---\nAlways add a down.\n")
+                .unwrap();
         assert_eq!(s.name, "migrations");
         assert_eq!(s.when, "Writing a migration");
         assert_eq!(s.body.trim(), "Always add a down.");
@@ -265,14 +276,18 @@ mod tests {
 
     #[test]
     fn parses_a_role_agent_and_finds_it() {
-        let s = parse("---\nname: qa-agent\nrole: QA\nwhen: Testing a change\n---\nRun the suite.\n")
-            .unwrap();
+        let s =
+            parse("---\nname: qa-agent\nrole: QA\nwhen: Testing a change\n---\nRun the suite.\n")
+                .unwrap();
         assert_eq!(s.role.as_deref(), Some("qa"), "role is lowercased");
         let skills = vec![s];
         assert!(find_role(&skills, "qa").is_some());
         assert!(find_role(&skills, "QA").is_some());
         assert!(find_role(&skills, "dev").is_none());
-        assert_eq!(roles(&skills), vec![("qa".to_string(), "Testing a change".to_string())]);
+        assert_eq!(
+            roles(&skills),
+            vec![("qa".to_string(), "Testing a change".to_string())]
+        );
     }
 
     #[test]

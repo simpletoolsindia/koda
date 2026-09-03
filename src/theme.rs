@@ -346,9 +346,9 @@ pub const NEON: Theme = Theme {
     border: rgb(58, 62, 110),
     border_focus: rgb(0, 245, 212),
     surface: rgb(26, 27, 54),
-    bg_user: Some(rgb(38, 26, 54)),      // faint magenta tint
-    bg_tool: Some(rgb(20, 24, 52)),      // deep indigo
-    bg_tool_err: Some(rgb(48, 22, 40)),  // faint red tint
+    bg_user: Some(rgb(38, 26, 54)),     // faint magenta tint
+    bg_tool: Some(rgb(20, 24, 52)),     // deep indigo
+    bg_tool_err: Some(rgb(48, 22, 40)), // faint red tint
     bg_panel: Some(rgb(24, 26, 58)),
     bg_selected: Some(rgb(52, 40, 92)),
     heading: rgb(0, 245, 212),
@@ -647,7 +647,10 @@ pub fn glyphs(configured: &str) -> Glyphs {
         _ => {
             let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|k| {
                 std::env::var(k)
-                    .map(|v| v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8"))
+                    .map(|v| {
+                        v.to_ascii_uppercase().contains("UTF-8")
+                            || v.to_ascii_uppercase().contains("UTF8")
+                    })
                     .unwrap_or(false)
             });
             if utf8 {
@@ -733,4 +736,3 @@ mod tests {
         assert_eq!(glyphs("unicode").ok, UNICODE.ok);
     }
 }
-

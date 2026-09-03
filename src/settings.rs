@@ -222,7 +222,11 @@ impl Settings {
                     .position(|t| *t == self.cfg.theme)
                     .unwrap_or(0);
                 let n = self.themes.len().max(1);
-                let next = if forward { (i + 1) % n } else { (i + n - 1) % n };
+                let next = if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                };
                 self.cfg.theme = self.themes[next].to_string();
             }
             Row::Motion => self.cfg.motion = !self.cfg.motion,
@@ -255,12 +259,12 @@ impl Settings {
             Row::Memory => self.cfg.memory = !self.cfg.memory,
             Row::WebSearch => self.cfg.web_search = !self.cfg.web_search,
             Row::SearchBackend => {
-                self.cfg.search_backend =
-                    if self.cfg.search_backend.eq_ignore_ascii_case("searxng") {
-                        "duckduckgo".into()
-                    } else {
-                        "searxng".into()
-                    };
+                self.cfg.search_backend = if self.cfg.search_backend.eq_ignore_ascii_case("searxng")
+                {
+                    "duckduckgo".into()
+                } else {
+                    "searxng".into()
+                };
             }
             Row::SearxUrl | Row::SystemPrompt => {} // handled above
             Row::WebFetch => self.cfg.web_fetch = !self.cfg.web_fetch,
@@ -313,7 +317,9 @@ impl Settings {
 
     /// Commit the inline editor to the selected row and close it.
     pub fn edit_commit(&mut self) {
-        let Some(val) = self.editing.take() else { return };
+        let Some(val) = self.editing.take() else {
+            return;
+        };
         match self.current() {
             Row::SearxUrl => {
                 self.cfg.searx_url = val.trim().to_string();
@@ -342,7 +348,13 @@ impl Settings {
     }
 
     fn value(&self, row: Row) -> String {
-        let on = |b: bool| if b { "on".to_string() } else { "off".to_string() };
+        let on = |b: bool| {
+            if b {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
+        };
         match row {
             Row::Mode => self.cfg.mode.to_string(),
             Row::Autonomy => self.cfg.auto_tier.label().to_lowercase(),
@@ -414,14 +426,23 @@ impl Settings {
             let value = if editing_here {
                 // Show the in-progress buffer with a caret.
                 let buf = self.editing.as_deref().unwrap_or("");
-                let shown: String = buf.chars().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
+                let shown: String = buf
+                    .chars()
+                    .rev()
+                    .take(40)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 format!("{shown}▏")
             } else {
                 self.value(*row)
             };
             let label_style = if selected { t.strong() } else { t.body() };
             let value_style = if editing_here {
-                Style::default().fg(t.accent_alt).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(t.accent_alt)
+                    .add_modifier(Modifier::BOLD)
             } else if selected {
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
             } else {
@@ -518,7 +539,9 @@ impl Settings {
             .border_style(t.fg(t.border_focus))
             .title(Span::styled(
                 " Edit system prompt ",
-                Style::default().fg(t.border_focus).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(t.border_focus)
+                    .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(
                 " enter = newline · ctrl+s save · ctrl+u clear · esc cancel ",
@@ -533,24 +556,36 @@ impl Settings {
 const DETAIL: [&str; 3] = ["simple", "medium", "high"];
 
 fn next_detail(cur: &str) -> String {
-    let i = DETAIL.iter().position(|r| r.eq_ignore_ascii_case(cur)).unwrap_or(1);
+    let i = DETAIL
+        .iter()
+        .position(|r| r.eq_ignore_ascii_case(cur))
+        .unwrap_or(1);
     DETAIL[(i + 1) % DETAIL.len()].to_string()
 }
 
 fn prev_detail(cur: &str) -> String {
-    let i = DETAIL.iter().position(|r| r.eq_ignore_ascii_case(cur)).unwrap_or(1);
+    let i = DETAIL
+        .iter()
+        .position(|r| r.eq_ignore_ascii_case(cur))
+        .unwrap_or(1);
     DETAIL[(i + DETAIL.len() - 1) % DETAIL.len()].to_string()
 }
 
 const REASONING: [&str; 4] = ["off", "low", "medium", "high"];
 
 fn next_reasoning(cur: &str) -> String {
-    let i = REASONING.iter().position(|r| r.eq_ignore_ascii_case(cur)).unwrap_or(0);
+    let i = REASONING
+        .iter()
+        .position(|r| r.eq_ignore_ascii_case(cur))
+        .unwrap_or(0);
     REASONING[(i + 1) % REASONING.len()].to_string()
 }
 
 fn prev_reasoning(cur: &str) -> String {
-    let i = REASONING.iter().position(|r| r.eq_ignore_ascii_case(cur)).unwrap_or(0);
+    let i = REASONING
+        .iter()
+        .position(|r| r.eq_ignore_ascii_case(cur))
+        .unwrap_or(0);
     REASONING[(i + REASONING.len() - 1) % REASONING.len()].to_string()
 }
 
@@ -572,9 +607,15 @@ mod tests {
     /// in both directions -- including from a value typed by hand into the TOML.
     #[test]
     fn vision_row_cycles_through_all_three_states() {
-        let cfg = Config { vision: "auto".into(), ..Config::default() };
+        let cfg = Config {
+            vision: "auto".into(),
+            ..Config::default()
+        };
         let mut s = Settings::new(&cfg);
-        s.sel = Row::ALL.iter().position(|r| *r == Row::Vision).expect("row exists");
+        s.sel = Row::ALL
+            .iter()
+            .position(|r| *r == Row::Vision)
+            .expect("row exists");
 
         s.change(true);
         assert_eq!(s.cfg.vision, "on");
@@ -589,7 +630,10 @@ mod tests {
         // A hand-edited value still lands in the cycle instead of sticking.
         s.cfg.vision = "TRUE".into();
         s.change(true);
-        assert_eq!(s.cfg.vision, "off", "\"TRUE\" is normalized to on, then advances");
+        assert_eq!(
+            s.cfg.vision, "off",
+            "\"TRUE\" is normalized to on, then advances"
+        );
     }
 
     fn settings() -> Settings {
@@ -603,12 +647,19 @@ mod tests {
     #[test]
     fn editing_system_prompt_seeds_the_builtin_when_empty() {
         let mut s = settings();
-        assert!(s.cfg.system_prompt.is_empty(), "default has no custom prompt");
+        assert!(
+            s.cfg.system_prompt.is_empty(),
+            "default has no custom prompt"
+        );
         select(&mut s, Row::SystemPrompt);
         s.change(true); // enter -> open editor
         let buf = s.editing.as_deref().unwrap_or("");
         assert!(!buf.is_empty(), "editor should be seeded, not blank");
-        assert_eq!(buf, crate::prompt::base_prompt(), "seeded with the built-in prompt");
+        assert_eq!(
+            buf,
+            crate::prompt::base_prompt(),
+            "seeded with the built-in prompt"
+        );
         assert!(s.editing_multiline(), "system prompt is a multi-line edit");
     }
 
@@ -619,7 +670,10 @@ mod tests {
         s.change(true);
         // Commit without changing anything -> stays "(built-in)".
         s.edit_commit();
-        assert!(s.cfg.system_prompt.is_empty(), "unchanged built-in stays empty");
+        assert!(
+            s.cfg.system_prompt.is_empty(),
+            "unchanged built-in stays empty"
+        );
     }
 
     #[test]
@@ -630,7 +684,11 @@ mod tests {
         s.edit_char('\n');
         s.edit_char('X');
         s.edit_commit();
-        assert!(s.cfg.system_prompt.ends_with('X'), "custom edit is stored: {:?}", s.cfg.system_prompt);
+        assert!(
+            s.cfg.system_prompt.ends_with('X'),
+            "custom edit is stored: {:?}",
+            s.cfg.system_prompt
+        );
         assert!(s.dirty);
     }
 

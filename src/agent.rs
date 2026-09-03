@@ -318,7 +318,12 @@ struct UndoEntry {
 }
 
 impl Agent {
-    pub fn new(cfg: Arc<Config>, root: PathBuf, cancel: Arc<AtomicBool>, notify: Arc<Notify>) -> anyhow::Result<Self> {
+    pub fn new(
+        cfg: Arc<Config>,
+        root: PathBuf,
+        cancel: Arc<AtomicBool>,
+        notify: Arc<Notify>,
+    ) -> anyhow::Result<Self> {
         let endpoint = cfg.endpoint();
         let client = Client::new(endpoint.clone(), cfg.api_key.clone())?;
         let text_mode = cfg.tool_protocol == ToolProtocol::Text;
@@ -348,8 +353,15 @@ impl Agent {
                 }
             });
         }
-        let system =
-            prompt::build_with_skills(&cfg, &root, text_mode, mode, &skills, &memory, &learning.brief());
+        let system = prompt::build_with_skills(
+            &cfg,
+            &root,
+            text_mode,
+            mode,
+            &skills,
+            &memory,
+            &learning.brief(),
+        );
         let ctx = ToolCtx {
             root,
             cfg: cfg.clone(),
@@ -481,7 +493,12 @@ impl Agent {
     }
 
     pub fn history_tokens(&self) -> usize {
-        self.system.len() / 4 + self.history.iter().map(|m| m.approx_tokens()).sum::<usize>()
+        self.system.len() / 4
+            + self
+                .history
+                .iter()
+                .map(|m| m.approx_tokens())
+                .sum::<usize>()
     }
 
     pub async fn models(&self) -> anyhow::Result<Vec<String>> {
@@ -686,7 +703,8 @@ impl Agent {
             Command::Learn(action) => {
                 if !self.cfg.learning {
                     let _ = tx.send(Event::Notice(
-                        "self-improvement is off — set `learning = true` in config or /settings".into(),
+                        "self-improvement is off — set `learning = true` in config or /settings"
+                            .into(),
                     ));
                     return;
                 }
@@ -719,7 +737,8 @@ impl Agent {
                         self.rebuild_system();
                         format!("accepted {n} rule(s) — koda will follow them from now on")
                     }
-                    LearnAction::Accept(Some(n)) => match self.learning.accept(n.saturating_sub(1)) {
+                    LearnAction::Accept(Some(n)) => match self.learning.accept(n.saturating_sub(1))
+                    {
                         Some(text) => {
                             self.rebuild_system();
                             format!("accepted: {text}")
@@ -1065,9 +1084,7 @@ impl Agent {
             });
         }
         if self.skills.is_empty() {
-            list.retain(|t| {
-                t.pointer("/function/name").and_then(|n| n.as_str()) != Some("skill")
-            });
+            list.retain(|t| t.pointer("/function/name").and_then(|n| n.as_str()) != Some("skill"));
         }
         if !self.cfg.memory {
             list.retain(|t| {
@@ -1078,9 +1095,10 @@ impl Agent {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("codegraph")
             });
-        } else if let Some(pos) = list.iter().position(|t| {
-            t.pointer("/function/name").and_then(|n| n.as_str()) == Some("codegraph")
-        }) {
+        } else if let Some(pos) = list
+            .iter()
+            .position(|t| t.pointer("/function/name").and_then(|n| n.as_str()) == Some("codegraph"))
+        {
             // Tool order is a meaningful prior for smaller models. Put the
             // structural index before generic search/read tools.
             let graph = list.remove(pos);
@@ -1145,7 +1163,10 @@ impl Agent {
     }
 
     /// One request/response round trip against the model.
-    async fn stream_step(&mut self, tx: &mpsc::UnboundedSender<Event>) -> anyhow::Result<StreamResult> {
+    async fn stream_step(
+        &mut self,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> anyhow::Result<StreamResult> {
         let mut messages = Vec::with_capacity(self.history.len() + 1);
         messages.push(Message::system(self.system.clone()));
         messages.extend(self.history.iter().cloned());
@@ -1171,7 +1192,8 @@ impl Agent {
         // Trace this call: the request goes in now (so a stalled call is
         // visible), the raw SSE streams in from the HTTP layer, and the parsed
         // result is attached when the step closes.
-        let step = crate::trace::open_step(self.trace_turn, crate::trace::StepKind::Model, &self.model);
+        let step =
+            crate::trace::open_step(self.trace_turn, crate::trace::StepKind::Model, &self.model);
         let request_json = if step.is_some() {
             serde_json::to_string_pretty(&req.to_json()).unwrap_or_default()
         } else {
@@ -1301,7 +1323,6 @@ impl Agent {
         })
     }
 
-
     fn next_call_id(&mut self) -> String {
         self.call_seq += 1;
         format!("call_{}", self.call_seq)
@@ -1396,7 +1417,11 @@ impl Agent {
     /// Run one tool call, recording it as a step in the turn's trace: the
     /// arguments, the outcome, whether the user was asked, and — for a write —
     /// the diff that was applied.
-    async fn execute(&mut self, call: &ToolCall, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
+    async fn execute(
+        &mut self,
+        call: &ToolCall,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
         let step = crate::trace::open_step(
             self.trace_turn,
             crate::trace::StepKind::Tool,
@@ -1429,7 +1454,11 @@ impl Agent {
         outcome
     }
 
-    async fn execute_inner(&mut self, call: &ToolCall, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
+    async fn execute_inner(
+        &mut self,
+        call: &ToolCall,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
         let name = call.function.name.clone();
         let args = call.args();
         if args.is_null() {
@@ -1529,7 +1558,10 @@ impl Agent {
             let names: Vec<&str> = tools::specs().iter().map(|s| s.name).collect();
             return tools::Outcome {
                 ok: false,
-                content: format!("ERROR: unknown tool `{name}`. Available: {}", names.join(", ")),
+                content: format!(
+                    "ERROR: unknown tool `{name}`. Available: {}",
+                    names.join(", ")
+                ),
                 summary: format!("unknown tool {name}"),
                 view: tools::ToolView::Plain,
             };
@@ -1542,10 +1574,11 @@ impl Agent {
             }
             return tools::Outcome {
                 ok: false,
-                content: "ERROR: the user denied this action. Ask what to do instead; do not retry."
-                    .into(),
+                content:
+                    "ERROR: the user denied this action. Ask what to do instead; do not retry."
+                        .into(),
                 summary: format!("{name}: denied"),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
 
@@ -1642,10 +1675,11 @@ impl Agent {
         if self.cfg.learning && self.depth == 0 {
             if name == "run_command" {
                 if let Some(cmd) = args_for_memory.get("command").and_then(|c| c.as_str()) {
-                    self.learning.observe(&crate::learning::Observation::Command {
-                        command: cmd.to_string(),
-                        ok: outcome.ok,
-                    });
+                    self.learning
+                        .observe(&crate::learning::Observation::Command {
+                            command: cmd.to_string(),
+                            ok: outcome.ok,
+                        });
                 }
             }
             // Phase 2: reading a file koda previously wrote reveals whether the
@@ -1965,7 +1999,10 @@ impl Agent {
                 touched,
                 if touched == 1 { "" } else { "s" },
                 if removed > 0 {
-                    format!(" ({removed} created file{} removed)", if removed == 1 { "" } else { "s" })
+                    format!(
+                        " ({removed} created file{} removed)",
+                        if removed == 1 { "" } else { "s" }
+                    )
                 } else {
                     String::new()
                 }
@@ -1980,7 +2017,11 @@ impl Agent {
     /// Put a question to the user and block this turn until they answer. In a
     /// subagent (no direct user) or headless run there is nobody to ask, so it
     /// fails cleanly and tells the model to decide for itself.
-    async fn ask_user(&mut self, args: &Value, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
+    async fn ask_user(
+        &mut self,
+        args: &Value,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
         let question = args
             .get("question")
             .and_then(|q| q.as_str())
@@ -2034,8 +2075,7 @@ impl Agent {
             }
             _ => tools::Outcome {
                 ok: false,
-                content: "ERROR: the user did not answer. Proceed with your best judgement."
-                    .into(),
+                content: "ERROR: the user did not answer. Proceed with your best judgement.".into(),
                 summary: "ask_user: no answer".into(),
                 view: tools::ToolView::Plain,
             },
@@ -2048,7 +2088,7 @@ impl Agent {
                 ok: false,
                 content: "ERROR: project memory is off (memory = false).".into(),
                 summary: "remember: disabled".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
         if let Some(drop) = args.get("forget").and_then(|f| f.as_str()) {
@@ -2066,13 +2106,17 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
-        let note = args.get("note").and_then(|n| n.as_str()).unwrap_or("").trim();
+        let note = args
+            .get("note")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .trim();
         if note.is_empty() {
             return tools::Outcome {
                 ok: false,
                 content: "ERROR: `note` must be a sentence stating a durable fact.".into(),
                 summary: "remember: empty".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
         let added = self.memory.remember(note);
@@ -2102,7 +2146,7 @@ impl Agent {
                           find_files instead."
                     .into(),
                 summary: "codegraph: disabled".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
         // If the startup scan has not landed yet, build it now rather than
@@ -2126,7 +2170,7 @@ impl Agent {
                               find_files instead."
                         .into(),
                     summary: "codegraph: unavailable".into(),
-    view: tools::ToolView::Plain,
+                    view: tools::ToolView::Plain,
                 };
             }
         }
@@ -2136,7 +2180,7 @@ impl Agent {
                 ok: false,
                 content: "ERROR: the code graph is unavailable. Use search instead.".into(),
                 summary: "codegraph: unavailable".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         };
         let query = args
@@ -2147,7 +2191,11 @@ impl Agent {
             .to_ascii_lowercase();
         let (content, summary) = match query.as_str() {
             "symbol" => {
-                let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("").trim();
+                let name = args
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .trim();
                 if name.is_empty() {
                     (
                         "ERROR: query=symbol needs `name`.".to_string(),
@@ -2158,7 +2206,11 @@ impl Agent {
                 }
             }
             "file" => {
-                let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("").trim();
+                let path = args
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .trim();
                 if path.is_empty() {
                     (
                         "ERROR: query=file needs `path`.".to_string(),
@@ -2230,7 +2282,9 @@ impl Agent {
             String::new()
         };
         let slug_ok = |s: &str| {
-            !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         };
         if !slug_ok(&name) {
             return err(
@@ -2318,7 +2372,11 @@ impl Agent {
                     "this is too thin to be a {what} ({} chars, {lines} line(s)). {need} For a \
                      single durable fact use `remember` instead.",
                     body.len(),
-                    what = if role.is_empty() { "skill" } else { "role brief" },
+                    what = if role.is_empty() {
+                        "skill"
+                    } else {
+                        "role brief"
+                    },
                     need = if role.is_empty() {
                         "A skill is a procedure: the steps, the exact commands, and what to check."
                     } else {
@@ -2351,9 +2409,10 @@ impl Agent {
         // Near-duplicate guard: a different name with the same trigger line just
         // splits the knowledge in two.
         if !existing {
-            let same_when = self.skills.iter().find(|s| {
-                s.name != name && s.when.trim().eq_ignore_ascii_case(when.trim())
-            });
+            let same_when = self
+                .skills
+                .iter()
+                .find(|s| s.name != name && s.when.trim().eq_ignore_ascii_case(when.trim()));
             if let Some(dup) = same_when {
                 return err(
                     format!(
@@ -2422,13 +2481,17 @@ impl Agent {
     }
 
     fn read_skill(&self, args: &Value) -> tools::Outcome {
-        let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("").trim();
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .trim();
         if self.skills.is_empty() {
             return tools::Outcome {
                 ok: false,
                 content: "ERROR: no skills are installed. Proceed without one.".into(),
                 summary: "skill: none installed".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
         match crate::skills::find(&self.skills, name) {
@@ -2457,13 +2520,16 @@ impl Agent {
         if !self.cfg.web_fetch {
             return tools::Outcome {
                 ok: false,
-                content: "ERROR: web fetch is off. The user can enable it in /settings."
-                    .into(),
+                content: "ERROR: web fetch is off. The user can enable it in /settings.".into(),
                 summary: "web_fetch: disabled".into(),
                 view: tools::ToolView::Plain,
             };
         }
-        let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").trim();
+        let url = args
+            .get("url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .trim();
         if url.is_empty() {
             return tools::Outcome {
                 ok: false,
@@ -2508,10 +2574,14 @@ impl Agent {
                           Answer from the repository instead."
                     .into(),
                 summary: "web_search: disabled".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("").trim();
+        let query = args
+            .get("query")
+            .and_then(|q| q.as_str())
+            .unwrap_or("")
+            .trim();
         let limit = args
             .get("limit")
             .and_then(|l| l.as_u64())
@@ -2531,7 +2601,7 @@ impl Agent {
                 ok: true,
                 content: crate::web::format_hits(query, &hits),
                 summary: format!("search \"{query}\" ({} results)", hits.len()),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             },
             Err(e) => {
                 crate::tel_warn!("web", "search failed", "detail" => format!("{e:#}"));
@@ -2548,14 +2618,18 @@ impl Agent {
     /// Run a delegated investigation in a fresh child agent and return its
     /// report. The child's tokens never touch this agent's context — that
     /// isolation is the whole point of delegating.
-    async fn delegate(&mut self, args: &Value, tx: &mpsc::UnboundedSender<Event>) -> tools::Outcome {
+    async fn delegate(
+        &mut self,
+        args: &Value,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
         if !self.cfg.subagents {
             return tools::Outcome {
                 ok: false,
                 content: "ERROR: delegation is disabled (subagents = false). Do the work yourself."
                     .into(),
                 summary: "delegate: disabled".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
         if self.depth >= self.cfg.max_subagent_depth {
@@ -2570,13 +2644,17 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
-        let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
+        let task = args
+            .get("task")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim();
         if task.is_empty() {
             return tools::Outcome {
                 ok: false,
                 content: "ERROR: `task` is required and must describe the investigation.".into(),
                 summary: "delegate: no task".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             };
         }
         let extra = args
@@ -2584,7 +2662,11 @@ impl Agent {
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .trim();
-        let role = args.get("role").and_then(|r| r.as_str()).unwrap_or("").trim();
+        let role = args
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .trim();
 
         crate::tel_info!(
             "subagent",
@@ -2640,7 +2722,7 @@ impl Agent {
                 content: "ERROR: the subagent produced no report. Investigate directly instead."
                     .into(),
                 summary: "delegate: no report".into(),
-    view: tools::ToolView::Plain,
+                view: tools::ToolView::Plain,
             },
         }
     }
@@ -2697,10 +2779,7 @@ impl Agent {
         if problems.is_empty() {
             report
         } else {
-            format!(
-                "{report}\n\n[unverified: {}]",
-                problems.join("; ")
-            )
+            format!("{report}\n\n[unverified: {}]", problems.join("; "))
         }
     }
 
@@ -2815,8 +2894,11 @@ impl Agent {
                         call.function.name, outcome.content
                     )));
                 } else {
-                    self.history
-                        .push(Message::tool(&call.id, &call.function.name, outcome.content));
+                    self.history.push(Message::tool(
+                        &call.id,
+                        &call.function.name,
+                        outcome.content,
+                    ));
                 }
             }
         }
@@ -2906,12 +2988,7 @@ impl Agent {
             ($after:expr) => {{
                 crate::trace::finish_compaction(trace_step, before, $after);
                 if own_turn {
-                    crate::trace::end_turn(
-                        self.trace_turn,
-                        crate::trace::Status::Ok,
-                        "",
-                        $after,
-                    );
+                    crate::trace::end_turn(self.trace_turn, crate::trace::Status::Ok, "", $after);
                     self.trace_turn = None;
                 }
             }};
@@ -2967,7 +3044,10 @@ impl Agent {
         if self.cancelled() {
             self.cancel.store(false, Ordering::Relaxed);
             let _ = tx.send(Event::Notice("compaction cancelled".into()));
-            let _ = tx.send(Event::Compacted { before, after: before });
+            let _ = tx.send(Event::Compacted {
+                before,
+                after: before,
+            });
             close_trace!(before);
             return;
         }
@@ -2994,7 +3074,10 @@ impl Agent {
                 // Trim leading tool/assistant messages so the tail opens on a
                 // user turn (a dangling tool result with no matching call
                 // confuses some servers).
-                while matches!(tail.first().map(|m| m.role), Some(Role::Tool) | Some(Role::Assistant)) {
+                while matches!(
+                    tail.first().map(|m| m.role),
+                    Some(Role::Tool) | Some(Role::Assistant)
+                ) {
                     tail.remove(0);
                 }
 
@@ -3016,18 +3099,26 @@ impl Agent {
                     s.rewrite(&self.history);
                 }
                 let after = self.history_tokens();
-                let _ = tx.send(Event::Notice(format!("compacted {before} → {after} tokens")));
+                let _ = tx.send(Event::Notice(format!(
+                    "compacted {before} → {after} tokens"
+                )));
                 let _ = tx.send(Event::Compacted { before, after });
                 close_trace!(after);
             }
             Ok(_) => {
                 let _ = tx.send(Event::Error("compaction produced no summary".into()));
-                let _ = tx.send(Event::Compacted { before, after: before });
+                let _ = tx.send(Event::Compacted {
+                    before,
+                    after: before,
+                });
                 close_trace!(before);
             }
             Err(e) => {
                 let _ = tx.send(Event::Error(format!("compaction failed: {e:#}")));
-                let _ = tx.send(Event::Compacted { before, after: before });
+                let _ = tx.send(Event::Compacted {
+                    before,
+                    after: before,
+                });
                 close_trace!(before);
             }
         }
@@ -3130,7 +3221,11 @@ fn required_params_hint(name: &str) -> String {
         .params
         .pointer("/required")
         .and_then(|r| r.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let params = if required.is_empty() {
         // No explicit `required`: list the declared property names instead.
@@ -3185,12 +3280,19 @@ pub fn label_for(name: &str, args: &Value) -> String {
         "read_file" => format!("read {}", s("path")),
         "write_file" => format!("write {}", s("path")),
         "edit_file" => format!("edit {}", s("path")),
-        "list_dir" => format!("list {}", if s("path").is_empty() { "." } else { s("path") }),
+        "list_dir" => format!(
+            "list {}",
+            if s("path").is_empty() { "." } else { s("path") }
+        ),
         "find_files" => format!("find {}", s("glob")),
         "search" => format!("search /{}/", s("pattern")),
         "run_command" => format!("$ {}", s("command")),
         "codegraph" => {
-            let q = if s("query").is_empty() { "overview" } else { s("query") };
+            let q = if s("query").is_empty() {
+                "overview"
+            } else {
+                s("query")
+            };
             match q {
                 "symbol" => format!("codegraph symbol {}", s("name")),
                 "file" => format!("codegraph file {}", s("path")),
@@ -3207,7 +3309,10 @@ pub fn label_for(name: &str, args: &Value) -> String {
         "about_creator" => "about the creator".to_string(),
         "remember" => match args.get("forget").and_then(|f| f.as_str()) {
             Some(f) => format!("forget {f}"),
-            None => format!("remember: {}", s("note").chars().take(50).collect::<String>()),
+            None => format!(
+                "remember: {}",
+                s("note").chars().take(50).collect::<String>()
+            ),
         },
         other => other.to_string(),
     }
@@ -3315,7 +3420,9 @@ mod tests {
         .unwrap();
 
         // A real file at a real line passes.
-        assert!(agent.check_citations("see real.rs:2 for the fix").is_empty());
+        assert!(agent
+            .check_citations("see real.rs:2 for the fix")
+            .is_empty());
         // A real file at an impossible line is caught.
         let bad_line = agent.check_citations("see real.rs:99");
         assert_eq!(bad_line.len(), 1, "{bad_line:?}");
@@ -3363,7 +3470,8 @@ mod tests {
 
     /// Undo reverts a whole turn's edits at once, and only the latest turn.
     #[test]
-    fn undo_reverts_a_whole_turn_not_one_file() {        let dir = std::env::temp_dir().join("koda-undo-test");
+    fn undo_reverts_a_whole_turn_not_one_file() {
+        let dir = std::env::temp_dir().join("koda-undo-test");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         // Pre-existing files with original content.
@@ -3396,7 +3504,10 @@ mod tests {
         // Undo turn 2: c.txt (created this turn) is removed; a/b untouched.
         let msg = agent.undo_last();
         assert!(msg.contains("undid last turn"), "{msg}");
-        assert!(!dir.join("c.txt").exists(), "created file should be removed");
+        assert!(
+            !dir.join("c.txt").exists(),
+            "created file should be removed"
+        );
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "A2");
         assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "B1");
 
@@ -3436,8 +3547,9 @@ mod tests {
         );
 
         // A refusal of the kind plan mode produces, now sitting in the history.
-        a.history
-            .push(Message::assistant("I'm still in Plan mode — I can't execute anything."));
+        a.history.push(Message::assistant(
+            "I'm still in Plan mode — I can't execute anything.",
+        ));
 
         a.set_mode(crate::config::Mode::Execute);
 
@@ -3465,7 +3577,10 @@ mod tests {
         let mut a = test_agent();
         assert!(a.history.is_empty());
         a.set_mode(crate::config::Mode::Plan);
-        assert!(a.history.is_empty(), "no marker before the conversation starts");
+        assert!(
+            a.history.is_empty(),
+            "no marker before the conversation starts"
+        );
     }
 
     /// A router alias carries no modality information: `auto` matches no name
@@ -3484,7 +3599,10 @@ mod tests {
         };
 
         with(&mut a, "auto");
-        assert!(!a.accepts_images(), "the name `auto` gives nothing to go on");
+        assert!(
+            !a.accepts_images(),
+            "the name `auto` gives nothing to go on"
+        );
         with(&mut a, "on");
         assert!(a.accepts_images(), "an explicit yes wins");
         with(&mut a, "off");
@@ -3494,7 +3612,10 @@ mod tests {
         a.model = "qwen2.5-vl:7b".into();
         assert!(!a.accepts_images(), "off overrides a positive guess");
         with(&mut a, "auto");
-        assert!(a.accepts_images(), "and auto still recognises a real vision name");
+        assert!(
+            a.accepts_images(),
+            "and auto still recognises a real vision name"
+        );
     }
 
     fn test_agent() -> Agent {
@@ -3537,7 +3658,10 @@ mod tests {
                     \"arguments\": {\"path\": \"a.rs\"}} and that's the plan.";
         let call = agent.parse_fenced_call(text).expect("should recover call");
         assert_eq!(call.function.name, "read_file");
-        assert_eq!(call.args().get("path").and_then(|p| p.as_str()), Some("a.rs"));
+        assert_eq!(
+            call.args().get("path").and_then(|p| p.as_str()),
+            Some("a.rs")
+        );
 
         // JSON that isn't a known tool must be ignored.
         assert!(agent
@@ -3550,7 +3674,9 @@ mod tests {
     fn parse_fenced_call_handles_json_fence() {
         let mut agent = test_agent();
         let text = "Here you go:\n```json\n{\"name\": \"list_dir\", \"arguments\": {\"path\": \".\"}}\n```";
-        let call = agent.parse_fenced_call(text).expect("should recover fenced call");
+        let call = agent
+            .parse_fenced_call(text)
+            .expect("should recover fenced call");
         assert_eq!(call.function.name, "list_dir");
     }
 
@@ -3558,11 +3684,26 @@ mod tests {
     /// so a small model can re-issue the call instead of hitting a hard error.
     #[test]
     fn bare_identifier_search_is_recognised_as_symbol_lookup() {
-        assert!(looks_like_symbol_search("search", &serde_json::json!({"pattern": "Agent::execute"})));
-        assert!(looks_like_symbol_search("search", &serde_json::json!({"pattern": "compact"})));
-        assert!(!looks_like_symbol_search("search", &serde_json::json!({"pattern": "error: connection reset"})));
-        assert!(!looks_like_symbol_search("search", &serde_json::json!({"pattern": "foo.*bar"})));
-        assert!(!looks_like_symbol_search("read_file", &serde_json::json!({"pattern": "compact"})));
+        assert!(looks_like_symbol_search(
+            "search",
+            &serde_json::json!({"pattern": "Agent::execute"})
+        ));
+        assert!(looks_like_symbol_search(
+            "search",
+            &serde_json::json!({"pattern": "compact"})
+        ));
+        assert!(!looks_like_symbol_search(
+            "search",
+            &serde_json::json!({"pattern": "error: connection reset"})
+        ));
+        assert!(!looks_like_symbol_search(
+            "search",
+            &serde_json::json!({"pattern": "foo.*bar"})
+        ));
+        assert!(!looks_like_symbol_search(
+            "read_file",
+            &serde_json::json!({"pattern": "compact"})
+        ));
     }
 
     /// A skill is how the agent keeps a procedure it worked out. The tool has to
@@ -3597,28 +3738,46 @@ mod tests {
 
         // Creating the same name again is refused: update it deliberately.
         let dup = a.manage_skill(&json!({ "name": "run-e2e-suite", "when": when, "body": body }));
-        assert!(!dup.ok && dup.content.contains("already exists"), "{}", dup.content);
+        assert!(
+            !dup.ok && dup.content.contains("already exists"),
+            "{}",
+            dup.content
+        );
         let upd = a.manage_skill(&json!({
             "name": "run-e2e-suite", "action": "update", "when": when,
             "body": format!("{body}4. Also run tests/tui_test.py for the TUI.\n")
         }));
         assert!(upd.ok, "{}", upd.content);
-        assert!(std::fs::read_to_string(&path).unwrap().contains("tui_test.py"));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("tui_test.py"));
 
         // A different name for the same situation splits the knowledge in two.
         let near = a.manage_skill(&json!({ "name": "e2e-again", "when": when, "body": body }));
-        assert!(!near.ok && near.content.contains("already covers"), "{}", near.content);
+        assert!(
+            !near.ok && near.content.contains("already covers"),
+            "{}",
+            near.content
+        );
 
         // A one-liner is a fact, not a procedure.
         let thin = a.manage_skill(&json!({
             "name": "too-thin", "when": "when running tests", "body": "run cargo test"
         }));
-        assert!(!thin.ok && thin.content.contains("too thin"), "{}", thin.content);
+        assert!(
+            !thin.ok && thin.content.contains("too thin"),
+            "{}",
+            thin.content
+        );
         // A trigger nobody can match later is refused too.
         let vague = a.manage_skill(&json!({
             "name": "vague-one", "when": "tests", "body": body
         }));
-        assert!(!vague.ok && vague.content.contains("`when`"), "{}", vague.content);
+        assert!(
+            !vague.ok && vague.content.contains("`when`"),
+            "{}",
+            vague.content
+        );
         // And a name that isn't a slug can't become a filename.
         let bad = a.manage_skill(&json!({
             "name": "../escape", "when": when, "body": body
@@ -3634,7 +3793,9 @@ mod tests {
                      and report exactly which checks changed state.\n"
         }));
         assert!(agent.ok, "{}", agent.content);
-        assert!(std::fs::read_to_string(dir.join("qa-agent.md")).unwrap().contains("role: qa"));
+        assert!(std::fs::read_to_string(dir.join("qa-agent.md"))
+            .unwrap()
+            .contains("role: qa"));
         assert!(
             crate::skills::find_role(&a.skills, "qa").is_some(),
             "a role skill must be delegatable"
@@ -3646,7 +3807,11 @@ mod tests {
         assert!(!path.exists());
         assert!(!a.skills.iter().any(|s| s.name == "run-e2e-suite"));
         let missing = a.manage_skill(&json!({ "name": "run-e2e-suite", "action": "delete" }));
-        assert!(!missing.ok && missing.content.contains("no skill"), "{}", missing.content);
+        assert!(
+            !missing.ok && missing.content.contains("no skill"),
+            "{}",
+            missing.content
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

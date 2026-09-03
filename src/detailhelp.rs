@@ -47,7 +47,11 @@ const KEYS: &[(&str, &str)] = &[
 
 /// Build the standalone HTML page from the command table and feature list.
 pub fn html(commands: &[(&str, &str)]) -> String {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
 
     let feature_cards: String = FEATURES
         .iter()

@@ -341,10 +341,7 @@ mod tests {
     fn round_trips_a_conversation() {
         let root = tmp("roundtrip");
         let mut store = Store::create(&root, "m1", "http://x/v1");
-        let history = vec![
-            Message::user("fix the bug"),
-            Message::assistant("done"),
-        ];
+        let history = vec![Message::user("fix the bug"), Message::assistant("done")];
         store.append(&history);
 
         let found = list(&root);
@@ -436,7 +433,10 @@ mod tests {
     fn fork_copies_history_under_a_new_id() {
         let root = tmp("fork");
         let mut store = Store::create(&root, "m1", "http://x/v1");
-        store.append(&[Message::user("original question"), Message::assistant("answer")]);
+        store.append(&[
+            Message::user("original question"),
+            Message::assistant("answer"),
+        ]);
         let src = store.path.clone();
 
         let dest = fork(&src, &root).unwrap();
@@ -445,7 +445,11 @@ mod tests {
         let (orig_h, orig_msgs) = read(&src).unwrap();
         let (fork_h, fork_msgs) = read(&dest).unwrap();
         assert_ne!(fork_h.id, orig_h.id, "fork must have a distinct id");
-        assert_eq!(fork_msgs.len(), orig_msgs.len(), "history must be identical");
+        assert_eq!(
+            fork_msgs.len(),
+            orig_msgs.len(),
+            "history must be identical"
+        );
         assert_eq!(fork_msgs[0].content, orig_msgs[0].content);
         // Both sessions are now listed.
         assert_eq!(list(&root).len(), 2);
@@ -456,7 +460,10 @@ mod tests {
     fn search_finds_sessions_by_content() {
         let root = tmp("search");
         let mut a = Store::create(&root, "m", "e");
-        a.append(&[Message::user("fix the DISCOUNT bug"), Message::assistant("done")]);
+        a.append(&[
+            Message::user("fix the DISCOUNT bug"),
+            Message::assistant("done"),
+        ]);
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let mut b = Store::create(&root, "m", "e");
         b.append(&[Message::user("add pagination")]);

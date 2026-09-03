@@ -141,10 +141,7 @@ impl FileIndex {
         let Some(files) = guard.as_ref() else {
             return Vec::new();
         };
-        rank(files, pattern, limit)
-            .into_iter()
-            .cloned()
-            .collect()
+        rank(files, pattern, limit).into_iter().cloned().collect()
     }
 
     pub fn len(&self) -> usize {

@@ -12,21 +12,21 @@ mod learning;
 mod llm;
 mod log;
 mod md;
-mod panel;
 mod memory;
+mod panel;
 mod prompt;
-mod theme;
 mod session;
 mod settings;
 mod setup;
 mod skills;
+mod theme;
 mod tools;
 mod trace;
 mod tui;
+mod view;
 mod watch;
 mod web;
 mod webui;
-mod view;
 
 use agent::{Agent, Approval, Command, Event};
 use anyhow::{bail, Context, Result};
@@ -209,7 +209,10 @@ async fn async_main(cli: Cli) -> Result<()> {
                     bail!("no model configured and the endpoint is unreachable: {e:#}");
                 }
                 eprintln!("koda: {e:#}");
-                eprintln!("koda: set a model with -m or in {}", config::config_path().display());
+                eprintln!(
+                    "koda: set a model with -m or in {}",
+                    config::config_path().display()
+                );
             }
         }
     }
@@ -220,8 +223,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     if cfg.web_ui && !cli.print {
         // The trace ring only pays for itself when something can display it.
         trace::set_enabled(true);
-        if let Some(addr) =
-            webui::start(root.clone(), cfg.web_ui_port, cfg.ui_detail.clone()).await
+        if let Some(addr) = webui::start(root.clone(), cfg.web_ui_port, cfg.ui_detail.clone()).await
         {
             eprintln!("koda: web UI at http://{addr}");
         }
@@ -364,7 +366,11 @@ async fn headless(
                 }
                 let _ = reply.send(decision);
             }
-            Event::AskUser { question, options: _, reply } => {
+            Event::AskUser {
+                question,
+                options: _,
+                reply,
+            } => {
                 // Headless has nobody to ask; dropping the sender makes the tool
                 // return its "no answer, proceed" result.
                 eprintln!("· agent asked: {question} (no user in headless mode)");
@@ -372,7 +378,9 @@ async fn headless(
             }
             Event::Notice(msg) => eprintln!("· {msg}"),
             Event::Compacting => eprintln!("· compacting context…"),
-            Event::Compacted { before, after } => eprintln!("· compacted {before} → {after} tokens"),
+            Event::Compacted { before, after } => {
+                eprintln!("· compacted {before} → {after} tokens")
+            }
             Event::SubActivity(_) => {}
             Event::Error(msg) => {
                 eprintln!("✗ {msg}");

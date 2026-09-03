@@ -143,7 +143,9 @@ impl std::str::FromStr for ToolProtocol {
             "auto" => Ok(Self::Auto),
             "native" => Ok(Self::Native),
             "text" => Ok(Self::Text),
-            other => Err(format!("unknown tool protocol `{other}` (auto|native|text)")),
+            other => Err(format!(
+                "unknown tool protocol `{other}` (auto|native|text)"
+            )),
         }
     }
 }
@@ -523,8 +525,8 @@ fn merge(dst: &mut toml::Table, src: toml::Table) {
 fn read_table(path: &Path) -> Result<Option<toml::Table>> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            let t: toml::Table = toml::from_str(&text)
-                .with_context(|| format!("parsing {}", path.display()))?;
+            let t: toml::Table =
+                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
             Ok(Some(t))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -558,8 +560,9 @@ impl Config {
         if let Some(t) = project_table(root)? {
             merge(&mut table, t);
         }
-        let mut cfg: Config =
-            toml::Value::Table(table).try_into().context("invalid koda config")?;
+        let mut cfg: Config = toml::Value::Table(table)
+            .try_into()
+            .context("invalid koda config")?;
         cfg.apply_env();
         Ok(cfg)
     }

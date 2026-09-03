@@ -213,7 +213,15 @@ impl Memory {
             return String::new();
         }
         let mut out = String::from("\n\nWhat you learned in this project before:\n");
-        for n in self.notes.iter().rev().take(20).collect::<Vec<_>>().iter().rev() {
+        for n in self
+            .notes
+            .iter()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
             let _ = writeln!(out, "- {n}");
         }
         let mut working: Vec<(&String, u32)> = self
@@ -316,7 +324,10 @@ mod tests {
     fn remembers_and_deduplicates() {
         let mut m = Memory::default();
         assert!(m.remember("tests run with just test"));
-        assert!(!m.remember("Tests run with just test"), "case-insensitive dedupe");
+        assert!(
+            !m.remember("Tests run with just test"),
+            "case-insensitive dedupe"
+        );
         assert!(!m.remember("   "));
         assert_eq!(m.notes.len(), 1);
     }
@@ -355,7 +366,10 @@ mod tests {
         let b = loaded.brief();
         assert!(b.contains("Files most often worked on here"), "{b}");
         assert!(b.contains("src/agent.rs"), "{b}");
-        assert!(!b.contains("src/tui.rs"), "single-edit file should not surface: {b}");
+        assert!(
+            !b.contains("src/tui.rs"),
+            "single-edit file should not surface: {b}"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 

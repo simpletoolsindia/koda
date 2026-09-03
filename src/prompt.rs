@@ -54,7 +54,8 @@ pub fn base_prompt() -> &'static str {
 /// Functional guardrail layered onto every prompt while the tool is enabled.
 /// Keep this outside `BASE`: a custom system prompt replaces the base, but must
 /// not accidentally remove the code-analysis workflow that makes koda precise.
-const CODEGRAPH_GUIDANCE: &str = "\n\nCODE ANALYSIS WORKFLOW (mandatory): for questions about where a symbol is \
+const CODEGRAPH_GUIDANCE: &str =
+    "\n\nCODE ANALYSIS WORKFLOW (mandatory): for questions about where a symbol is \
 defined or used, what calls it, file dependencies, project structure, or where \
 to make a change, call `codegraph` FIRST (`symbol`, `file`, or `overview`). Use \
 its file/line result to choose what to read. Use `search`/`find_files` first only \
@@ -320,7 +321,6 @@ fn dedup(v: &[&str]) -> Vec<String> {
     out
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +332,12 @@ mod tests {
             codegraph: true,
             ..Config::default()
         };
-        let prompt = build(&cfg, Path::new("/tmp/koda-prompt-test"), false, Mode::Execute);
+        let prompt = build(
+            &cfg,
+            Path::new("/tmp/koda-prompt-test"),
+            false,
+            Mode::Execute,
+        );
         assert!(prompt.starts_with("Custom concise reviewer."));
         assert!(prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
         assert!(prompt.contains("call `codegraph` FIRST"), "{prompt}");
@@ -345,7 +350,12 @@ mod tests {
             codegraph: false,
             ..Config::default()
         };
-        let prompt = build(&cfg, Path::new("/tmp/koda-prompt-test"), false, Mode::Execute);
+        let prompt = build(
+            &cfg,
+            Path::new("/tmp/koda-prompt-test"),
+            false,
+            Mode::Execute,
+        );
         assert!(!prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
         assert!(!prompt.contains("`codegraph`"), "{prompt}");
     }
