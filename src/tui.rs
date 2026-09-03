@@ -1698,6 +1698,17 @@ impl App {
             }
             return;
         }
+        // `$ code` runs Python the same way: straight to the interpreter, no
+        // agent and no tokens. Reaching for a calculator or a one-line parse
+        // should not cost a turn, and the answer is the interpreter's rather
+        // than a model's guess at what the interpreter would say.
+        if let Some(code) = trimmed.strip_prefix('$') {
+            let code = code.trim().to_string();
+            if !code.is_empty() {
+                self.run_python(&code);
+            }
+            return;
+        }
         // Expand any @pasteN placeholders back to the full pasted text before
         // this goes anywhere. Slash commands are expanded too (harmless — they
         // rarely contain one), then the buffer is cleared for the next turn.
@@ -1760,6 +1771,25 @@ impl App {
             return;
         }
         self.send(Command::Bang(cmd.to_string()));
+    }
+
+    /// Run a snippet of Python and show its output, without involving the agent.
+    ///
+    /// Routed through the same command path as `!`, so it inherits the approval
+    /// rules, the timeout and the transcript block -- and, like `!`, it never
+    /// enters the conversation the model sees.
+    fn run_python(&mut self, code: &str) {
+        self.transcript.user(format!("$ {code}"));
+        self.follow = true;
+        if self.busy {
+            self.note("busy — wait for the current turn, then try $ again");
+            return;
+        }
+        // -c takes the program as one argument, so the snippet is passed
+        // through a heredoc instead: it keeps quotes and newlines intact
+        // without a layer of shell escaping to get wrong.
+        let script = format!("{} <<'KODA_PY_EOF'\n{}\nKODA_PY_EOF", python_bin(), code);
+        self.send(Command::Bang(script));
     }
 
     fn slash(&mut self, rest: &str) {
@@ -2289,6 +2319,7 @@ impl App {
                 "attach a file, image, PDF, spreadsheet or doc",
             ),
             ("!git status", "run a shell command directly (no agent)"),
+            ("$ print(2**10)", "run Python directly (no agent)"),
             ("/detailhelp", "open the full feature guide in your browser"),
         ];
         let mut ex = Panel::new("Examples", width).footer("type a command, or just talk");
@@ -2461,6 +2492,25 @@ fn oversized_prompt_warning(prompt: &str) -> Option<String> {
     })
 }
 
+/// The Python to run for `$`. Prefers python3, since `python` is Python 2 on
+/// some older systems and absent entirely on others.
+fn python_bin() -> &'static str {
+    fn has(bin: &str) -> bool {
+        std::process::Command::new(bin)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    if has("python3") {
+        "python3"
+    } else {
+        "python"
+    }
+}
+
 /// A paste that is really a file path.
 ///
 /// Several terminals answer an image paste by writing the image to a temp file
@@ -2543,7 +2593,26 @@ fn clipboard_image(dest: &Path) -> Result<()> {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // Windows has no clipboard CLI of its own, so PowerShell and WinForms
+        // do the work: GetImage() returns the bitmap, Save() writes the PNG.
+        // Quoting the path in single quotes keeps a space in the temp path from
+        // splitting the argument.
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+             $i=[Windows.Forms.Clipboard]::GetImage(); \
+             if($i){{$i.Save('{}',[System.Drawing.Imaging.ImageFormat]::Png)}}",
+            dest.display()
+        );
+        let _ = Proc::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         // Wayland and X11 both hand the bytes back on stdout.
         for (bin, args) in [
@@ -2580,10 +2649,16 @@ fn clipboard_image(dest: &Path) -> Result<()> {
 fn clipboard_text() -> Option<String> {
     use std::process::{Command as Proc, Stdio};
     for (bin, args) in [
-        ("pbpaste", &[][..]),
-        ("wl-paste", &["--no-newline"]),
-        ("xclip", &["-selection", "clipboard", "-o"]),
-        ("xsel", &["--clipboard", "--output"]),
+        ("pbpaste", &[][..]), // macOS
+        // Windows: no clipboard CLI, so PowerShell reads it. -Raw keeps a
+        // multi-line paste in one piece instead of an array of lines.
+        (
+            "powershell",
+            &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        ),
+        ("wl-paste", &["--no-newline"]),               // Wayland
+        ("xclip", &["-selection", "clipboard", "-o"]), // X11
+        ("xsel", &["--clipboard", "--output"]),        // X11 alt
     ] {
         if let Ok(out) = Proc::new(bin).args(args).stderr(Stdio::null()).output() {
             if out.status.success() {

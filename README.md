@@ -345,6 +345,16 @@ leave koda to do:
 The command and its output appear in the transcript as a tool block, exactly
 like a command the agent runs, but the conversation context is untouched.
 
+`$` does the same for Python, so a calculation or a quick parse costs no turn
+and the answer is the interpreter's rather than a model's guess at it:
+
+```
+$ print(sum(range(1, 11)))
+$ import json; print(json.load(open("pkg.json"))["version"])
+```
+
+Like `!`, it never enters the conversation the model sees.
+
 ## Reading files: text, CSV, and images
 
 `read_file` returns numbered lines for text. CSV/TSV files are rendered as an
