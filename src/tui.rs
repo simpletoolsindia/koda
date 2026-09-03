@@ -393,14 +393,18 @@ impl App {
     /// trying to write a sentence in. `submit` swaps it back for the real path,
     /// which is what the attach step matches on.
     fn attach_image(&mut self, path: PathBuf) {
-        let kb = std::fs::metadata(&path)
-            .map(|m| m.len() / 1024)
-            .unwrap_or(0);
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         self.images.push(path);
         let n = self.images.len();
         self.editor.insert(&format!("@image{n} "));
+        // "0 KB" for a small screenshot reads like something went wrong.
+        let size = if bytes < 1024 {
+            format!("{bytes} B")
+        } else {
+            format!("{} KB", bytes / 1024)
+        };
         self.note(format!(
-            "pasted image ({kb} KB) as @image{n} — it attaches when you send"
+            "pasted image ({size}) as @image{n} — it attaches when you send"
         ));
     }
 
@@ -4378,24 +4382,12 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
                     return true;
                 }
             }
-            // Otherwise it's the chat composer. A large paste (long or
-            // multi-line) is stashed and shown as a short @pasteN token so the
-            // composer stays readable; it is expanded back to the full text on
-            // submit. Small pastes insert inline as before.
-            let trimmed = text.trim_end_matches('\n');
-            let big = trimmed.len() > 200 || trimmed.contains('\n');
-            if big {
-                app.pastes.push(trimmed.to_string());
-                let token = format!("@paste{}", app.pastes.len());
-                let lines = trimmed.lines().count().max(1);
-                app.editor.insert(&token);
-                app.note(format!(
-                    "pasted {} lines as {token} — it expands when you send",
-                    lines
-                ));
-            } else {
-                app.editor.insert(trimmed);
-            }
+            // Otherwise it's the chat composer, and this is the same routine
+            // ctrl+v uses. It has to be: this is the route a real paste takes,
+            // and for a while it was a copy of the logic rather than a call to
+            // it, so pasted-path detection worked only on the key binding that
+            // almost nobody presses.
+            app.paste_text(&text);
             true
         }
         // Emulators send two or three resize events for one drag; only the ones
