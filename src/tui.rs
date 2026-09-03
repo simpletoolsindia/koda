@@ -1013,6 +1013,13 @@ impl App {
                 let on = self.transcript.show_reasoning;
                 self.note(if on { "reasoning shown (stays until ctrl+t)" } else { "reasoning hidden" });
             }
+            // clippy suggests collapsing this into the match guard. Do not: see
+            // below.
+            #[allow(clippy::collapsible_match)]
+            // Not a match guard: pasting the image is the work, not a test for
+            // whether this arm applies. As a guard, a successful image paste
+            // makes the arm *not* match, and the literal "v" falls through to
+            // the catch-all and lands in the composer.
             KeyCode::Char('v') if ctrl => {
                 // Images first: that is the case the terminal cannot deliver on
                 // its own. Text then behaves exactly as a bracketed paste would.
@@ -2946,9 +2953,8 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
         &[("↑↓", "move"), ("enter", "choose"), ("esc", "cancel")]
     } else if app.plan_blocked {
         &[("ctrl+p", "switch to execute")]
-    } else if app.busy {
-        &[("esc", "interrupt")]
-    } else if app.compacting.is_some() {
+    } else if app.busy || app.compacting.is_some() {
+        // Two distinct states, one thing the user can do about either.
         &[("esc", "interrupt")]
     } else if !app.follow {
         &[("pgdn", "latest")]

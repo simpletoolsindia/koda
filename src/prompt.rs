@@ -327,9 +327,11 @@ mod tests {
 
     #[test]
     fn custom_prompt_keeps_codegraph_workflow_when_enabled() {
-        let mut cfg = Config::default();
-        cfg.system_prompt = "Custom concise reviewer.".into();
-        cfg.codegraph = true;
+        let cfg = Config {
+            system_prompt: "Custom concise reviewer.".into(),
+            codegraph: true,
+            ..Config::default()
+        };
         let prompt = build(&cfg, Path::new("/tmp/koda-prompt-test"), false, Mode::Execute);
         assert!(prompt.starts_with("Custom concise reviewer."));
         assert!(prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
@@ -338,9 +340,11 @@ mod tests {
 
     #[test]
     fn disabled_codegraph_is_not_advertised_in_prompt() {
-        let mut cfg = Config::default();
-        cfg.system_prompt = "Custom concise reviewer.".into();
-        cfg.codegraph = false;
+        let cfg = Config {
+            system_prompt: "Custom concise reviewer.".into(),
+            codegraph: false,
+            ..Config::default()
+        };
         let prompt = build(&cfg, Path::new("/tmp/koda-prompt-test"), false, Mode::Execute);
         assert!(!prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
         assert!(!prompt.contains("`codegraph`"), "{prompt}");

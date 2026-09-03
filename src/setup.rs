@@ -409,8 +409,7 @@ mod tests {
         assert!(Field::Vision.is_toggle());
         assert!(!Field::Model.is_toggle(), "the text fields still take text");
 
-        let mut cfg = Config::default();
-        cfg.vision = "auto".into();
+        let cfg = Config { vision: "auto".into(), ..Config::default() };
         let mut s = Setup::new(&cfg);
         assert_eq!(s.value(Field::Vision), "auto", "seeded from the config");
 

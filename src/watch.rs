@@ -98,12 +98,7 @@ impl Watcher {
             }
             out
         };
-        for t in triggers {
-            if !self.seen.contains(&Self::key(&t)) {
-                return Some(t);
-            }
-        }
-        None
+        triggers.into_iter().find(|t| !self.seen.contains(&Self::key(t)))
     }
 }
 

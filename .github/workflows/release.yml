@@ -51,12 +51,10 @@ jobs:
         run: cargo fmt --all --check
         continue-on-error: true
 
-      # Report-only for now: the tree has pre-existing style lints on current
-      # stable clippy. Tests below are the hard gate. To enforce clippy, restore
-      # `-- -D warnings` and remove `continue-on-error` after cleaning the lints.
+      # The tree is clippy-clean, so this is a hard gate now. Anything
+      # deliberately kept carries a local #[allow] with the reason next to it.
       - name: Clippy
-        run: cargo clippy --all-targets
-        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --all

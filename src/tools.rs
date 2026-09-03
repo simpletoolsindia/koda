@@ -579,7 +579,7 @@ pub fn openai_schema_for(allow: Option<&[&str]>) -> Vec<Value> {
 pub fn text_protocol_help_for(allow: Option<&[&str]>) -> String {
     let mut out = String::new();
     for s in specs()
-        .into_iter()
+        .iter()
         .filter(|s| allow.map(|a| a.contains(&s.name)).unwrap_or(true))
     {
         let params = s.params.get("properties").and_then(|p| p.as_object());
@@ -750,9 +750,9 @@ fn format_delimited(text: &str, delim: char) -> String {
     let _ = writeln!(out, "# delimited table ({} cols × {} rows)", cols, rows.len());
     for (ri, r) in rows.iter().enumerate() {
         let mut cells = Vec::with_capacity(cols);
-        for i in 0..cols {
+        for (i, w) in widths.iter().enumerate().take(cols) {
             let cell = r.get(i).map(|s| clip(s)).unwrap_or_default();
-            cells.push(format!("{:<width$}", cell, width = widths[i]));
+            cells.push(format!("{:<width$}", cell, width = w));
         }
         let _ = writeln!(out, "{}", cells.join(" | ").trim_end());
         if ri == 0 {
@@ -2635,8 +2635,8 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("big.csv"), "a,b\n1,2\n").unwrap();
-        let mut cfg = Config::default();
-        cfg.max_document_bytes = 4; // absurdly small so the tiny file trips it
+        // absurdly small so the tiny file trips it
+        let cfg = Config { max_document_bytes: 4, ..Config::default() };
         let c = ToolCtx { root: dir.clone(), cfg: Arc::new(cfg) };
         let out = read_file(&json!({"path": "big.csv"}), &c).unwrap();
         assert!(!out.ok);

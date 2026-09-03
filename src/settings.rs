@@ -572,8 +572,7 @@ mod tests {
     /// in both directions -- including from a value typed by hand into the TOML.
     #[test]
     fn vision_row_cycles_through_all_three_states() {
-        let mut cfg = Config::default();
-        cfg.vision = "auto".into();
+        let cfg = Config { vision: "auto".into(), ..Config::default() };
         let mut s = Settings::new(&cfg);
         s.sel = Row::ALL.iter().position(|r| *r == Row::Vision).expect("row exists");
 

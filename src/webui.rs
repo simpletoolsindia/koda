@@ -733,7 +733,7 @@ fn learning_json(root: &Path) -> String {
     let accepted: Vec<serde_json::Value> =
         l.rules.iter().filter(|r| r.accepted).map(rule).collect();
     let candidates: Vec<serde_json::Value> =
-        l.candidates().into_iter().map(|r| rule(r)).collect();
+        l.candidates().into_iter().map(rule).collect();
     serde_json::json!({
         "accepted": accepted,
         "candidates": candidates,
@@ -1588,7 +1588,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         // A fresh project uses the built-in prompt and exposes it to the UI.
         assert_eq!(v["using_builtin"], serde_json::Value::Bool(true));
-        assert!(v["builtin_prompt"].as_str().unwrap().len() > 0);
+        assert!(!v["builtin_prompt"].as_str().unwrap().is_empty());
     }
 
     #[test]

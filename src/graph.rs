@@ -1074,7 +1074,7 @@ impl Graph {
             return true;
         }
         let head = m
-            .split(|c| c == ':' || c == '/' || c == '.')
+            .split([':', '/', '.'])
             .find(|s| !s.is_empty())
             .unwrap_or("");
         if head.is_empty() {
