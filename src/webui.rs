@@ -175,6 +175,8 @@ struct SkillJson {
     name: String,
     when: String,
     role: Option<String>,
+    /// Which model this role runs on, when it names one.
+    model: Option<String>,
     body: String,
     source: String,
 }
@@ -359,6 +361,27 @@ async fn route(
             let name = url_decode(query_param(query, "name").unwrap_or(""));
             let json = symbol_json(&ctx.root, &name);
             ("200 OK", "application/json", json.into_bytes())
+        }
+        // The provider list, so the browser can offer real choices instead of a
+        // free-text box: which endpoints exist, and which models each reports.
+        ("GET", "/api/providers") => (
+            "200 OK",
+            "application/json",
+            providers_json(&ctx.root).into_bytes(),
+        ),
+        // What a given provider actually serves, so the browser can suggest
+        // real model ids. Blocking on the network, so it is its own endpoint
+        // rather than part of the provider list.
+        ("GET", p) if p.starts_with("/api/providers/") && p.ends_with("/models") => {
+            let name = url_decode(
+                p.trim_start_matches("/api/providers/")
+                    .trim_end_matches("/models"),
+            );
+            (
+                "200 OK",
+                "application/json",
+                provider_models_json(&ctx.root, &name).into_bytes(),
+            )
         }
         ("GET", "/api/skills") => {
             let json = skills_json(&ctx.root);
@@ -925,6 +948,71 @@ fn codegraph_json(root: &Path) -> String {
     .unwrap_or_else(|_| "{}".into())
 }
 
+/// The saved providers and the model each is configured with.
+///
+/// Deliberately does not include api_key: the browser never needs it, and a
+/// debug UI is exactly the wrong place to hand one out.
+fn providers_json(root: &Path) -> String {
+    // Loaded here rather than held on Ctx so the browser sees edits made in the
+    // TUI without the server restarting.
+    let cfg = crate::config::Config::load(root).unwrap_or_default();
+    let list: Vec<serde_json::Value> = cfg
+        .providers
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "base_url": p.base_url,
+                "model": p.model,
+                "vision": p.vision,
+                "has_api_key": !p.api_key.trim().is_empty(),
+                "active": p.name == cfg.active_provider,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "providers": list,
+        "active": cfg.active_provider,
+        // The session's own endpoint, for the "use whatever is selected" case.
+        "current_model": cfg.model,
+    })
+    .to_string()
+}
+
+/// Ask one provider for its model list.
+///
+/// Best-effort: a provider that is down or wrong answers with an empty list and
+/// an error string. The form still accepts a typed model id, so a suggestion
+/// failing must never be the reason someone cannot save an agent.
+fn provider_models_json(root: &Path, name: &str) -> String {
+    let cfg = crate::config::Config::load(root).unwrap_or_default();
+    let Some(p) = cfg.providers.iter().find(|p| p.name == name) else {
+        return serde_json::json!({ "models": [], "error": "no such provider" }).to_string();
+    };
+    let endpoint = p.base_url.trim_end_matches('/').to_string();
+    let key = p.api_key.clone();
+    let models = std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => return Err(e.to_string()),
+        };
+        rt.block_on(async move {
+            let client = crate::llm::Client::new(endpoint, key).map_err(|e| e.to_string())?;
+            client.models().await.map_err(|e| e.to_string())
+        })
+    })
+    .join()
+    .unwrap_or_else(|_| Err("model lookup panicked".into()));
+
+    match models {
+        Ok(list) => serde_json::json!({ "models": list }).to_string(),
+        Err(e) => serde_json::json!({ "models": [], "error": e }).to_string(),
+    }
+}
+
 fn skills_json(root: &Path) -> String {
     let skills = crate::skills::load(root);
     let out: Vec<SkillJson> = skills
@@ -933,6 +1021,7 @@ fn skills_json(root: &Path) -> String {
             name: s.name,
             when: s.when,
             role: s.role,
+            model: s.model,
             body: s.body,
             source: s.source.display().to_string(),
         })
@@ -973,6 +1062,11 @@ fn save_skill(root: &Path, body: &str) -> String {
         .and_then(|x| x.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if name.is_empty() || when.is_empty() || bodytext.is_empty() {
         return serde_json::json!({ "ok": false, "error": "name, when and body are required" })
             .to_string();
@@ -981,7 +1075,15 @@ fn save_skill(root: &Path, body: &str) -> String {
         .as_ref()
         .map(|r| format!("role: {r}\n"))
         .unwrap_or_default();
-    let doc = format!("---\nname: {name}\n{front_role}when: {when}\n---\n\n{bodytext}\n");
+    // A model line only means something for a role agent: a knowledge skill is
+    // read by whichever model is already running, and is never dispatched.
+    let front_model = model
+        .as_ref()
+        .filter(|_| role.is_some())
+        .map(|m| format!("model: {m}\n"))
+        .unwrap_or_default();
+    let doc =
+        format!("---\nname: {name}\n{front_role}{front_model}when: {when}\n---\n\n{bodytext}\n");
     if crate::skills::parse(&doc).is_none() {
         return serde_json::json!({ "ok": false, "error": "composed skill did not parse" })
             .to_string();

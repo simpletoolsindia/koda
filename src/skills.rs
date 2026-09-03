@@ -31,6 +31,13 @@ pub struct Skill {
     /// (e.g. "dev", "qa", "manager", "tester"). The body becomes that agent's
     /// operating instructions when the orchestrator delegates to the role.
     pub role: Option<String>,
+    /// Which model to run this role on, when it should not be the session's.
+    ///
+    /// A reviewer role wants a careful model and a scaffolding role wants a
+    /// fast one, and that is a property of the role rather than of whatever the
+    /// user happened to select. `provider/model` selects a saved provider too;
+    /// a bare model name uses the current endpoint.
+    pub model: Option<String>,
     pub source: PathBuf,
 }
 
@@ -118,6 +125,7 @@ pub fn parse(text: &str) -> Option<Skill> {
     let mut name = String::new();
     let mut when = String::new();
     let mut role = None;
+    let mut model = None;
     for line in front.lines() {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -133,6 +141,9 @@ pub fn parse(text: &str) -> Option<Skill> {
                     Some(v.to_ascii_lowercase())
                 }
             }
+            "model" => {
+                model = if v.is_empty() { None } else { Some(v) };
+            }
             _ => {}
         }
     }
@@ -141,6 +152,7 @@ pub fn parse(text: &str) -> Option<Skill> {
         when,
         body,
         role,
+        model,
         source: PathBuf::new(),
     })
 }
@@ -262,6 +274,27 @@ validate):
 mod tests {
     use super::*;
 
+    /// A role can name the model it runs on. `provider/model` selects a saved
+    /// provider's endpoint too, so a reviewer can live on a careful model while
+    /// the session stays on a fast one.
+    #[test]
+    fn a_role_can_declare_its_model() {
+        let doc = "---\nname: reviewer\nrole: reviewer\nmodel: omniroute/auto\n\
+                   when: reviewing a diff\n---\n\nRead the diff.\n";
+        let s = parse(doc).expect("parses");
+        assert_eq!(s.role.as_deref(), Some("reviewer"));
+        assert_eq!(s.model.as_deref(), Some("omniroute/auto"));
+
+        // A skill without one is unchanged -- every existing file keeps working.
+        let plain = parse("---\nname: n\nwhen: w\n---\n\nbody\n").expect("parses");
+        assert_eq!(plain.model, None);
+        assert_eq!(plain.role, None);
+
+        // An empty model line means "no preference", not an empty model name.
+        let blank = parse("---\nname: n\nrole: r\nmodel:\nwhen: w\n---\n\nbody\n").unwrap();
+        assert_eq!(blank.model, None);
+    }
+
     #[test]
     fn parses_frontmatter_and_body() {
         let s =
@@ -309,6 +342,7 @@ mod tests {
                 when: "doing a".into(),
                 body: "x".into(),
                 role: None,
+                model: None,
                 source: PathBuf::new(),
             },
             Skill {
@@ -316,6 +350,7 @@ mod tests {
                 when: "doing b".into(),
                 body: "y".into(),
                 role: None,
+                model: None,
                 source: PathBuf::new(),
             },
         ];
@@ -334,6 +369,7 @@ mod tests {
             when: "w".into(),
             body: "b".into(),
             role: None,
+            model: None,
             source: PathBuf::new(),
         }];
         assert!(find(&skills, "Migrations").is_some());

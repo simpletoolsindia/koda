@@ -2016,6 +2016,47 @@ impl Agent {
         }
     }
 
+    /// Point a subagent at the model a role asked for.
+    ///
+    /// `name` uses the session's endpoint. `provider/name` looks the provider up
+    /// and switches endpoint and key with it, so a role can live on a different
+    /// server entirely. An unknown provider is reported and ignored rather than
+    /// silently sending the work somewhere unintended.
+    fn apply_role_model(
+        &self,
+        child: &mut Agent,
+        spec: &str,
+        role: &str,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return;
+        }
+        if let Some((prov, model)) = spec.split_once('/') {
+            if let Some(p) = self.cfg.providers.iter().find(|p| p.name == prov) {
+                if !p.base_url.trim().is_empty() {
+                    child.set_endpoint(p.base_url.clone());
+                }
+                if !p.api_key.trim().is_empty() {
+                    child.client.set_api_key(p.api_key.clone());
+                }
+                let m = if model.is_empty() {
+                    p.model.clone()
+                } else {
+                    model.to_string()
+                };
+                child.set_model(m.clone());
+                let _ = tx.send(Event::Notice(format!("{role} → {prov}/{m}")));
+                return;
+            }
+            // Not a provider: a model name can contain a slash
+            // ("dva/claude-opus"), so fall through and use it whole.
+        }
+        child.set_model(spec.to_string());
+        let _ = tx.send(Event::Notice(format!("{role} → {spec}")));
+    }
+
     fn undo_last(&mut self) -> String {
         let Some(&last_turn) = self.undo.last().map(|e| &e.turn) else {
             return "nothing to undo in this session".into();
@@ -2764,6 +2805,14 @@ impl Agent {
                          instructions:\n\n{}\n",
                         role, skill.body
                     );
+                    // A role can name the model it should run on: a reviewer
+                    // wants a careful one, a scaffolder a fast one, and that is
+                    // a property of the role rather than of whatever the user
+                    // happens to have selected. `provider/model` picks a saved
+                    // provider's endpoint too.
+                    if let Some(spec) = skill.model.clone() {
+                        self.apply_role_model(&mut child, &spec, role, tx);
+                    }
                 }
                 None => {
                     let _ = writeln!(
