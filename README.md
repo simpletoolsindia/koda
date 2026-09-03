@@ -345,6 +345,11 @@ leave koda to do:
 The command and its output appear in the transcript as a tool block, exactly
 like a command the agent runs, but the conversation context is untouched.
 
+Press `#` at the end of a prompt for a palette of actions on the text you have
+typed — copy it, copy or cut the current line, jump to the start or end, clear,
+undo, paste. Narrow with a few letters (`#cl` → `#clear`), `enter` to run. None
+of it reaches the model.
+
 `$` does the same for Python, so a calculation or a quick parse costs no turn
 and the answer is the interpreter's rather than a model's guess at it:
 
