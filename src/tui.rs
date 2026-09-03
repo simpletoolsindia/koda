@@ -2284,7 +2284,10 @@ impl App {
             ),
             ("/settings", "edit everything (system prompt, web UI, …)"),
             ("/theme tokyo-night", "switch palette by name"),
-            ("@src/main.rs", "attach a file (or image) to your message"),
+            (
+                "@src/main.rs",
+                "attach a file, image, PDF, spreadsheet or doc",
+            ),
             ("!git status", "run a shell command directly (no agent)"),
             ("/detailhelp", "open the full feature guide in your browser"),
         ];
