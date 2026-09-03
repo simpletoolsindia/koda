@@ -133,8 +133,14 @@ function Uninstall {
         # Deleting is not the safe default; without a console there is no way to
         # ask, so refuse rather than assume yes.
         if ([Environment]::UserInteractive) {
-            $ans = Read-Host "  Remove $exe? [y/N]"
-            if ($ans -notmatch '^[Yy]') { Info "left alone"; return }
+            # $(...) ends the variable name: "$exe?" parses as a variable
+            # called "exe?", which is null, and the prompt loses the path.
+            $ans = Read-Host "  Remove $($exe)? [y/N]"
+            # Require a positive yes rather than testing for "not no". Read-Host
+            # returns $null when there is no console to read from, and
+            # `$null -notmatch ...` does not evaluate to $true -- the guard did
+            # not fire and the binary was deleted with no answer given.
+            if (-not ($ans -match '^[Yy]')) { Info "left alone"; return }
         } elseif (-not $env:KODA_UNINSTALL_YES) {
             Warn "not interactive, so nothing was removed"
             Warn "re-run in a console, or set KODA_UNINSTALL_YES=1 to confirm"
@@ -150,12 +156,14 @@ function Uninstall {
     # endpoint, model and API key, which are tedious to set up again and nothing
     # to do with the binary being present.
     $cfg = if ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME "koda" }
-           else { Join-Path $env:APPDATA "koda" }
-    if (Test-Path $cfg) {
+           elseif ($env:APPDATA) { Join-Path $env:APPDATA "koda" }
+           else { $null }
+    if ($cfg -and (Test-Path $cfg)) {
         if ([Environment]::UserInteractive) {
-            $ans = Read-Host "  Also delete your settings at $cfg? [y/N]"
+            $ans = Read-Host "  Also delete your settings at $($cfg)? [y/N]"
             if ($ans -match '^[Yy]') { Remove-Item $cfg -Recurse -Force; Ok "removed $cfg" }
             else { Info "kept your settings at $cfg" }
+            # (this one already required a positive match, so it was safe)
         } else {
             Info "your settings are kept at $cfg"
         }

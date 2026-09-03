@@ -223,6 +223,20 @@ next message is treated as the answer, not a new turn.
 
 ---
 
+## Running things yourself
+
+Two prefixes skip the agent entirely. Neither costs tokens, and neither enters
+the conversation the model sees — the output is yours, not context.
+
+| Prefix | What it runs |
+| --- | --- |
+| `!` | A shell command: `!git status`, `!npm test`, `!git commit -am wip`. |
+| `$` | Python: `$ print(sum(range(1, 11)))`, `$ import json; print(json.load(open("p.json"))["version"])`. |
+
+`$` uses `python3` when it is on your PATH and falls back to `python`. Both show
+their output in the transcript as a tool block, exactly like a command the agent
+ran.
+
 ## Slash commands
 
 These are the exact command names koda recognizes. Type `/` to see them all;
