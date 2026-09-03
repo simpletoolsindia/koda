@@ -379,8 +379,16 @@ function App() {
           </button>
           <button type="button" onClick={() => setShowLogs(v => !v)} aria-pressed={showLogs}
             className="control px-2.5 text-[12px]" title="Toggle live logs (L)">Logs</button>
+          {/* Agents and the prompt used to be reachable only by opening
+              "Manage" -- which lands on Code Graph -- and noticing the tabs.
+              They are the two things people come here to change, so they get
+              their own buttons. */}
+          <button type="button" onClick={() => openManage('skills')}
+            className="control px-2.5 text-[12px]" title="Create and edit agents and skills">Agents</button>
+          <button type="button" onClick={() => openManage('prompt')}
+            className="control px-2.5 text-[12px]" title="View and edit the system prompt">Prompt</button>
           <button type="button" onClick={() => openManage('graph')}
-            className="control px-2.5 text-[12px]" title="Graph, skills, prompt, raw captures">Manage</button>
+            className="control px-2.5 text-[12px]" title="Code graph and raw captures">Manage</button>
         </div>
       </header>
 
