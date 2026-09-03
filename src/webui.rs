@@ -991,6 +991,9 @@ fn provider_models_json(root: &Path, name: &str) -> String {
     };
     let endpoint = p.base_url.trim_end_matches('/').to_string();
     let key = p.api_key.clone();
+    // The provider's own TLS setting, not the global one: this is the endpoint
+    // being asked, so it is the endpoint whose trust rules apply.
+    let insecure = p.insecure_tls || cfg.insecure_tls;
     let models = std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1000,7 +1003,8 @@ fn provider_models_json(root: &Path, name: &str) -> String {
             Err(e) => return Err(e.to_string()),
         };
         rt.block_on(async move {
-            let client = crate::llm::Client::new(endpoint, key).map_err(|e| e.to_string())?;
+            let client =
+                crate::llm::Client::with_tls(endpoint, key, insecure).map_err(|e| e.to_string())?;
             client.models().await.map_err(|e| e.to_string())
         })
     })

@@ -325,7 +325,7 @@ impl Agent {
         notify: Arc<Notify>,
     ) -> anyhow::Result<Self> {
         let endpoint = cfg.endpoint();
-        let client = Client::new(endpoint.clone(), cfg.api_key.clone())?;
+        let client = Client::with_tls(endpoint.clone(), cfg.api_key.clone(), cfg.insecure_tls)?;
         let text_mode = cfg.tool_protocol == ToolProtocol::Text;
         let mode = cfg.mode;
         let skills = crate::skills::load(&root);
@@ -591,9 +591,10 @@ impl Agent {
             }
             Command::Compact => self.compact(tx).await,
             Command::ProbeModels(url) => {
-                let probe = match Client::new(
+                let probe = match Client::with_tls(
                     url.trim_end_matches('/').to_string(),
                     self.cfg.api_key.clone(),
+                    self.cfg.insecure_tls,
                 ) {
                     Ok(c) => c,
                     Err(e) => {

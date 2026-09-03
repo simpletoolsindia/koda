@@ -345,6 +345,15 @@ leave koda to do:
 The command and its output appear in the transcript as a tool block, exactly
 like a command the agent runs, but the conversation context is untouched.
 
+**Internal servers.** If your endpoint sits behind a proxy that re-signs TLS
+with a private CA, `insecure_tls = true` (globally or on one provider) accepts
+the certificate. It disables the check that the server is who it says it is, so
+prefer installing the CA; koda warns at startup whenever it is on.
+
+**Context budget.** `context_tokens` defaults to `110000` and is editable on
+`/setup`. A provider can carry its own, since context size belongs to the model
+behind the endpoint.
+
 **Multiple providers.** Give an endpoint a name in `/provider add` and it is
 saved; `/provider <name>` switches, `/settings` cycles, and the name replaces
 the host in the status bar. A provider names its own URL, key, model and image
