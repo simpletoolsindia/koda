@@ -345,6 +345,11 @@ leave koda to do:
 The command and its output appear in the transcript as a tool block, exactly
 like a command the agent runs, but the conversation context is untouched.
 
+**Multiple providers.** Give an endpoint a name in `/provider add` and it is
+saved; `/provider <name>` switches, `/settings` cycles, and the name replaces
+the host in the status bar. A provider names its own URL, key, model and image
+support, and anything it leaves out falls through to your top-level settings.
+
 Press `#` at the end of a prompt for a palette of actions on the text you have
 typed — copy it, copy or cut the current line, jump to the start or end, clear,
 undo, paste. Narrow with a few letters (`#cl` → `#clear`), `enter` to run. None
