@@ -353,7 +353,11 @@ aligned table with a header rule, so the model reads columns reliably. Images
 `.png .jpg .jpeg .gif .webp .bmp .tiff .avif .svg` are recognized.
 
 PDF, Word and Excel are read too, and are on by default: `.pdf`, `.docx`,
-`.xlsx .xlsm .xls .ods`, alongside `.csv .tsv .tab`. They add 1.4 MB to the
+`.xlsx .xlsm .xls .ods`, alongside `.csv .tsv .tab`. Mention one with `@` and
+its text comes with your message — `@report.pdf summarise this`, `@data.csv
+which row is highest?` — so the model answers straight away instead of spending
+a turn asking to read what you just pointed at. Mentions of ordinary source
+files are left alone for the agent to fetch when it needs them. They add 1.4 MB to the
 binary, which is the price of "read this spreadsheet" working when it is asked.
 A packager who wants the smaller build can use `--no-default-features`. The
 design is in [docs/spec-doc-parsing.md](docs/spec-doc-parsing.md).

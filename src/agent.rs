@@ -1873,6 +1873,8 @@ impl Agent {
         // The raw `@token`s whose images made it onto the wire, so the text can
         // be cleaned of them afterwards.
         let mut attached: Vec<String> = Vec::new();
+        // Extracted document text, folded into the message below.
+        let mut doc_blocks: Vec<String> = Vec::new();
         // OCR'd text blocks, appended to the message when the model can't see
         // images (and OCR is enabled) so the content isn't simply lost.
         let mut ocr_blocks: Vec<String> = Vec::new();
@@ -1883,7 +1885,13 @@ impl Agent {
             };
             let raw = raw.trim_end_matches(['.', ',', ')', ':', ';']);
             let path = std::path::Path::new(raw);
-            if !tools::is_image_path(path) {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let doc = tools::DocKind::from_ext(&ext);
+            if !tools::is_image_path(path) && doc.is_none() {
                 continue;
             }
             let full = if path.is_absolute() {
@@ -1891,6 +1899,37 @@ impl Agent {
             } else {
                 self.ctx.root.join(path)
             };
+            // A document mention is read here rather than left for the model to
+            // fetch with read_file. `@report.pdf summarise this` is a request to
+            // have read it, and making the model spend a turn asking for what
+            // the user already pointed at is a round trip for nothing.
+            if let Some(kind) = doc {
+                match std::fs::read(&full) {
+                    Ok(bytes) if bytes.len() > self.cfg.max_document_bytes => {
+                        let _ = tx.send(Event::Notice(format!(
+                            "{raw} is {} bytes, over max_document_bytes — ask me to read it instead",
+                            bytes.len()
+                        )));
+                    }
+                    Ok(bytes) => match tools::read_document(kind, &bytes) {
+                        Ok(text) => {
+                            let _ = tx.send(Event::Notice(format!("attached {raw}")));
+                            attached.push(raw.to_string());
+                            doc_blocks.push(format!(
+                                "[contents of {raw}]\n{}",
+                                tools::truncate(&text, self.cfg.max_file_bytes)
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Notice(format!("could not read {raw}: {e}")));
+                        }
+                    },
+                    Err(e) => {
+                        let _ = tx.send(Event::Notice(format!("could not open {raw}: {e}")));
+                    }
+                }
+                continue;
+            }
             // Path 1 — a vision model: attach the image as a data URL, capped at
             // the file-read ceiling so a huge asset can't blow up the request.
             if vision {
@@ -1930,6 +1969,17 @@ impl Agent {
                     self.model
                 )));
             }
+        }
+        if !doc_blocks.is_empty() {
+            // Same shape as the OCR path: the text the user pointed at, folded
+            // into their message, with the mention itself removed so the model
+            // reads content rather than a filename.
+            let stripped = Self::strip_attached_paths(input, &attached);
+            let combined = format!("{stripped}\n\n{}", doc_blocks.join("\n\n"));
+            if images.is_empty() {
+                return Message::user(combined);
+            }
+            return Message::user_with_images(combined, images);
         }
         if !ocr_blocks.is_empty() {
             // Fold OCR'd text into the message so the model actually receives it.
@@ -3670,6 +3720,47 @@ mod tests {
             Agent::strip_attached_paths("look at @/tmp/other.png", &[]),
             "look at @/tmp/other.png"
         );
+    }
+
+    /// `@report.pdf summarise this` is a request to have read it. Leaving the
+    /// mention as text made the model spend a turn calling read_file for a file
+    /// the user had already pointed at -- and a model told not to use tools
+    /// simply could not answer.
+    #[test]
+    fn a_document_mention_is_read_into_the_message() {
+        let a = test_agent();
+        let (tx, _rx) = mpsc::unbounded_channel::<Event>();
+        std::fs::write(a.ctx.root.join("data.csv"), "name,qty\nwidget,3\n").unwrap();
+
+        let msg = a.user_message("@data.csv how many widgets?", &tx);
+        let text = format!("{msg:?}");
+        assert!(
+            text.contains("how many widgets?"),
+            "the question survives: {text}"
+        );
+        assert!(
+            text.contains("contents of data.csv"),
+            "the file is read in: {text}"
+        );
+        assert!(text.contains("widget"), "and its rows are there: {text}");
+        assert!(
+            !text.contains("@data.csv"),
+            "the mention itself is gone, so the model reads content not a filename: {text}"
+        );
+    }
+
+    /// A mention of something that is neither image nor document is left alone:
+    /// the model may still want to read_file it, and guessing at every @token
+    /// would pull whole source trees into the prompt.
+    #[test]
+    fn a_plain_file_mention_is_left_for_the_model_to_fetch() {
+        let a = test_agent();
+        let (tx, _rx) = mpsc::unbounded_channel::<Event>();
+        std::fs::write(a.ctx.root.join("main.rs"), "fn main() {}\n").unwrap();
+        let msg = a.user_message("@main.rs what does this do?", &tx);
+        let text = format!("{msg:?}");
+        assert!(text.contains("@main.rs"), "left as a mention: {text}");
+        assert!(!text.contains("contents of main.rs"), "not inlined: {text}");
     }
 
     fn test_agent() -> Agent {
