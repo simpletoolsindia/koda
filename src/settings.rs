@@ -35,6 +35,8 @@ pub enum Row {
     SearxUrl,
     WebFetch,
     Browser,
+    BrowserHeadless,
+    BrowserChannel,
     Ocr,
     Codegraph,
     Debug,
@@ -47,7 +49,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 26] = [
+    pub const ALL: [Row; 28] = [
         Row::Provider,
         Row::InsecureTls,
         Row::Mode,
@@ -66,6 +68,8 @@ impl Row {
         Row::SearxUrl,
         Row::WebFetch,
         Row::Browser,
+        Row::BrowserHeadless,
+        Row::BrowserChannel,
         Row::Ocr,
         Row::Codegraph,
         Row::Debug,
@@ -96,6 +100,8 @@ impl Row {
             Row::SearxUrl => "searxng url",
             Row::WebFetch => "web fetch",
             Row::Browser => "browser",
+            Row::BrowserHeadless => "browser window",
+            Row::BrowserChannel => "browser build",
             Row::Ocr => "image ocr",
             Row::Codegraph => "code graph",
             Row::Debug => "debug capture",
@@ -127,6 +133,8 @@ impl Row {
             Row::SearxUrl => "3) enter to edit your SearXNG address",
             Row::WebFetch => "let the agent GET a URL and read it as text",
             Row::Browser => "open pages in a real browser (needs playwright)",
+            Row::BrowserHeadless => "hidden · visible — show the window to watch or sign in",
+            Row::BrowserChannel => "chrome · msedge · bundled — which browser to drive",
             Row::Ocr => "OCR images (tesseract) when the model can't see them",
             Row::Codegraph => "scan the project into a symbol graph on open",
             Row::Debug => "dump raw requests/responses to the debug dir",
@@ -301,6 +309,22 @@ impl Settings {
             Row::SearxUrl | Row::SystemPrompt => {} // handled above
             Row::WebFetch => self.cfg.web_fetch = !self.cfg.web_fetch,
             Row::Browser => self.cfg.browser = !self.cfg.browser,
+            Row::BrowserHeadless => self.cfg.browser_headless = !self.cfg.browser_headless,
+            Row::BrowserChannel => {
+                // A short cycle of the ones people have. Anything else -- a path
+                // to Brave, say -- is set in the config and shown as-is rather
+                // than being cycled away by accident.
+                const CH: [&str; 3] = ["chrome", "msedge", ""];
+                let cur = self.cfg.browser_channel.trim().to_string();
+                let i = CH.iter().position(|c| *c == cur).unwrap_or(0);
+                let n = CH.len();
+                let next = if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                };
+                self.cfg.browser_channel = CH[next].to_string();
+            }
             Row::Ocr => self.cfg.ocr = !self.cfg.ocr,
             Row::Codegraph => self.cfg.codegraph = !self.cfg.codegraph,
             Row::Debug => {
@@ -430,6 +454,29 @@ impl Settings {
             }
             Row::WebFetch => on(self.cfg.web_fetch),
             Row::Browser => on(self.cfg.browser),
+            // Named by what you see, not by the flag: "headless: on" makes a
+            // reader translate before they know whether a window appears.
+            Row::BrowserChannel => {
+                let c = self.cfg.browser_channel.trim();
+                if c.is_empty() {
+                    "bundled chromium".to_string()
+                } else if c.contains('/') {
+                    // A path: show the app name, which is what identifies it.
+                    c.rsplit('/')
+                        .find(|s| !s.is_empty())
+                        .unwrap_or(c)
+                        .to_string()
+                } else {
+                    c.to_string()
+                }
+            }
+            Row::BrowserHeadless => {
+                if self.cfg.browser_headless {
+                    "hidden".to_string()
+                } else {
+                    "visible".to_string()
+                }
+            }
             Row::Ocr => on(self.cfg.ocr),
             Row::Codegraph => on(self.cfg.codegraph),
             Row::Debug => on(self.cfg.debug),

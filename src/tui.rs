@@ -1658,6 +1658,8 @@ impl App {
             || cfg.searx_url != self.cfg.searx_url
             || cfg.web_fetch != self.cfg.web_fetch
             || cfg.browser != self.cfg.browser
+            || cfg.browser_headless != self.cfg.browser_headless
+            || cfg.browser_channel != self.cfg.browser_channel
             || cfg.ocr != self.cfg.ocr
             || cfg.vision != self.cfg.vision
             || cfg.insecure_tls != self.cfg.insecure_tls
