@@ -223,6 +223,38 @@ next message is treated as the answer, not a new turn.
 
 ---
 
+## Browsing live pages
+
+`web_fetch` does a plain HTTP GET, which is enough for a docs page and useless
+for anything that renders client-side — you get an empty shell, a spinner, or a
+cookie wall. The **browser** setting adds a `browse` tool that opens the URL in a
+real headless Chromium and reads the page after its JavaScript has run.
+
+It is **off by default**: it needs Node and Playwright installed and is far
+slower than a fetch. Turn it on in `/settings` → **browser**, or:
+
+```toml
+browser = true
+browser_path = ""   # only if koda cannot find Playwright itself
+```
+
+Install what it needs:
+
+```sh
+npm i -D playwright && npx playwright install chromium
+```
+
+koda looks for Playwright in `browser_path` first, then the project's
+`node_modules`, then the global npm root, then the npx cache — which is usually
+where it is, because `npx playwright` is how most people first run it. If none
+of those has it, `browse` says so and names the install command rather than
+failing obscurely.
+
+The tool takes a `url` and an optional `wait_for` CSS selector for a page that
+fills in late. Only `http` and `https` are accepted. What comes back is page
+text, and the agent is told to treat it as untrusted data rather than
+instructions.
+
 ## Watching files for `AI!` comments
 
 `/watch` scans for comments ending in a trigger and acts on them when koda is
