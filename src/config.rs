@@ -265,6 +265,20 @@ pub struct Config {
     #[serde(default)]
     pub insecure_tls: bool,
 
+    /// Let the agent open pages in a real browser (Playwright).
+    ///
+    /// Off by default: it needs Node and Playwright installed, launches a real
+    /// Chromium, and is far slower than `web_fetch`. Worth it when the page only
+    /// exists after its JavaScript has run, which is most of the modern web.
+    #[serde(default)]
+    pub browser: bool,
+    /// Where Playwright's `node_modules` lives, when koda cannot find it.
+    ///
+    /// Empty means look in the usual places: the project, the global npm root,
+    /// then the npx cache. Set it when Playwright is somewhere else.
+    #[serde(default)]
+    pub browser_path: String,
+
     /// Whether the model accepts images: "auto" | "on" | "off".
     ///
     /// "auto" guesses from the model name, which is all you can do for a plain
@@ -489,6 +503,8 @@ impl Default for Config {
             providers: Vec::new(),
             active_provider: String::new(),
             insecure_tls: false,
+            browser: false,
+            browser_path: String::new(),
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,

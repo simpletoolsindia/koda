@@ -34,6 +34,7 @@ pub enum Row {
     SearchBackend,
     SearxUrl,
     WebFetch,
+    Browser,
     Ocr,
     Codegraph,
     Debug,
@@ -46,7 +47,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 25] = [
+    pub const ALL: [Row; 26] = [
         Row::Provider,
         Row::InsecureTls,
         Row::Mode,
@@ -64,6 +65,7 @@ impl Row {
         Row::SearchBackend,
         Row::SearxUrl,
         Row::WebFetch,
+        Row::Browser,
         Row::Ocr,
         Row::Codegraph,
         Row::Debug,
@@ -93,6 +95,7 @@ impl Row {
             Row::SearchBackend => "search backend",
             Row::SearxUrl => "searxng url",
             Row::WebFetch => "web fetch",
+            Row::Browser => "browser",
             Row::Ocr => "image ocr",
             Row::Codegraph => "code graph",
             Row::Debug => "debug capture",
@@ -123,6 +126,7 @@ impl Row {
             Row::SearchBackend => "2) duckduckgo (no setup) or searxng",
             Row::SearxUrl => "3) enter to edit your SearXNG address",
             Row::WebFetch => "let the agent GET a URL and read it as text",
+            Row::Browser => "open pages in a real browser (needs playwright)",
             Row::Ocr => "OCR images (tesseract) when the model can't see them",
             Row::Codegraph => "scan the project into a symbol graph on open",
             Row::Debug => "dump raw requests/responses to the debug dir",
@@ -296,6 +300,7 @@ impl Settings {
             }
             Row::SearxUrl | Row::SystemPrompt => {} // handled above
             Row::WebFetch => self.cfg.web_fetch = !self.cfg.web_fetch,
+            Row::Browser => self.cfg.browser = !self.cfg.browser,
             Row::Ocr => self.cfg.ocr = !self.cfg.ocr,
             Row::Codegraph => self.cfg.codegraph = !self.cfg.codegraph,
             Row::Debug => {
@@ -424,6 +429,7 @@ impl Settings {
                 }
             }
             Row::WebFetch => on(self.cfg.web_fetch),
+            Row::Browser => on(self.cfg.browser),
             Row::Ocr => on(self.cfg.ocr),
             Row::Codegraph => on(self.cfg.codegraph),
             Row::Debug => on(self.cfg.debug),

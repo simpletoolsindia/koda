@@ -1104,6 +1104,10 @@ impl Agent {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("web_fetch")
             });
         }
+        // Advertising browse while it is off would spend a turn on a refusal.
+        if !self.cfg.browser {
+            list.retain(|t| t.pointer("/function/name").and_then(|n| n.as_str()) != Some("browse"));
+        }
         if !self.cfg.subagents {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("delegate")
@@ -1637,6 +1641,14 @@ impl Agent {
             "manage_skill" | "manage_agent" => self.manage_skill(&args),
             "web_search" => self.web_search(&args).await,
             "web_fetch" => self.web_fetch(&args).await,
+            "browse" if !self.cfg.browser => tools::Outcome {
+                ok: false,
+                content: "ERROR: the browser is off. Turn on `browser` in /settings, or use \
+                          web_fetch for a page that does not need JavaScript."
+                    .into(),
+                summary: "browse: disabled".into(),
+                view: tools::ToolView::Plain,
+            },
             "todo" => {
                 let items = tools::parse_todos(&args);
                 if items.is_empty() {

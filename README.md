@@ -345,6 +345,12 @@ leave koda to do:
 The command and its output appear in the transcript as a tool block, exactly
 like a command the agent runs, but the conversation context is untouched.
 
+**Live pages.** `web_fetch` is a plain GET; the **browser** setting (off by
+default, `/settings`) adds a `browse` tool that opens a URL in a real headless
+Chromium via Playwright and reads it after its JavaScript has run — for the
+single-page apps and dashboards a fetch returns empty. Needs
+`npm i -D playwright && npx playwright install chromium`.
+
 **Internal servers.** If your endpoint sits behind a proxy that re-signs TLS
 with a private CA, `insecure_tls = true` (globally or on one provider) accepts
 the certificate. It disables the check that the server is who it says it is, so
