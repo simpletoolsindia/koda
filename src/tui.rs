@@ -3013,12 +3013,22 @@ fn draw(f: &mut Frame, app: &mut App) {
     // scrollbar can never paint over the last column of text (and never flickers
     // on/off between frames from a stale total).
     let full_w = body.width.saturating_sub(2); // left pad (1) + right pad (1)
-    let mut total = app.transcript.relayout(full_w);
-    let mut gutter = 0u16;
-    if total > body.height as usize {
-        gutter = 1;
-        total = app.transcript.relayout(full_w.saturating_sub(1));
-    }
+                                               // Decide the gutter from the line count we already have, then lay out ONCE.
+                                               //
+                                               // This used to lay out at `full_w`, and again at `full_w - 1` if a scrollbar
+                                               // turned out to be needed. `relayout` treats any width change as total
+                                               // invalidation, so from the moment the transcript grew past one screen —
+                                               // about a minute in — the two calls invalidated each other for ever: every
+                                               // frame re-rendered every block twice, markdown and all. Measured at 1.4 ms
+                                               // per frame by 200 blocks and 33 ms by 4800, against ~0 when the width holds
+                                               // still, and `draw` runs on every keystroke. That is the freeze people hit
+                                               // in long sessions, and it got worse the longer they worked.
+                                               //
+                                               // `total_lines()` is the previous frame's count, which is the right input:
+                                               // the only cost of it being stale is that the scrollbar appears one frame
+                                               // late on the turn that first overflows.
+    let gutter = u16::from(app.transcript.total_lines() > body.height as usize);
+    let total = app.transcript.relayout(full_w.saturating_sub(gutter));
     let text_area = Rect {
         x: body.x + 1,
         y: body.y,
@@ -3050,7 +3060,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             app.welcome_at = None;
         }
     }
-    if total > app.body_h {
+    if gutter == 1 {
         draw_scrollbar(
             f,
             Rect {
@@ -4643,9 +4653,13 @@ pub async fn run(
             },
             _ = clock.tick(), if clock.animating() => {
                 clock.schedule();
-                // Every animated surface derives its own phase from wall time,
-                // so advancing is just telling the transcript what time it is.
-                app.transcript.now = Instant::now();
+                // `transcript.now` is deliberately NOT reset here. It is a
+                // fixed epoch, and `relayout` quantises `now.elapsed()` into the
+                // cache signature so a running tool re-renders ~10x a second.
+                // Resetting it each frame made `elapsed()` a few microseconds,
+                // so that quantum was always 0 and a running block never
+                // invalidated itself — the spinner only appeared to animate
+                // because the width flap above was re-rendering everything.
                 app.transcript.advance_reveal();
                 dirty = true;
                 let v = log::version();

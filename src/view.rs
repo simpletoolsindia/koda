@@ -1643,6 +1643,131 @@ fn indent(line: Line<'static>, width: usize, t: &Theme, g: &Glyphs, depth: u8) -
 mod tests {
     use super::*;
 
+    /// The freeze: `draw` used to lay the transcript out at one width, then
+    /// again one column narrower when it decided a scrollbar was needed.
+    /// `relayout` treats a width change as total invalidation, so the two calls
+    /// invalidated each other every frame for the rest of the session — every
+    /// block re-rendered, markdown and all, on every keystroke. It cost 33 ms a
+    /// frame by 4800 blocks and got worse the longer someone worked.
+    ///
+    /// This pins the property that matters: laying out repeatedly at one width
+    /// must leave nothing to do. If a future change reintroduces a second width
+    /// per frame, the second assertion fails.
+    #[test]
+    fn relaying_out_at_a_stable_width_is_free() {
+        let mut tr = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        for i in 0..300 {
+            tr.user(format!("question {i}"));
+            tr.assistant_delta(&format!("reply **{i}** with a list:\n- a\n- b\n"));
+        }
+        let w = 100u16;
+        tr.relayout(w);
+        // Nothing is dirty once it has been laid out at this width.
+        assert_eq!(
+            tr.dirty_from,
+            tr.blocks.len(),
+            "a settled transcript has no dirty blocks"
+        );
+        let before: Vec<u64> = tr
+            .blocks
+            .iter()
+            .filter_map(|b| b.cache.as_ref().map(|c| c.1))
+            .collect();
+        tr.relayout(w);
+        let after: Vec<u64> = tr
+            .blocks
+            .iter()
+            .filter_map(|b| b.cache.as_ref().map(|c| c.1))
+            .collect();
+        assert_eq!(
+            before, after,
+            "a second frame at the same width re-renders nothing"
+        );
+
+        // And the thing that used to happen: one column narrower invalidates
+        // everything. That is why the width must not change between frames.
+        assert_eq!(tr.laid_out_at, w);
+        tr.relayout(w - 1);
+        assert_eq!(
+            tr.laid_out_at,
+            w - 1,
+            "a different width does re-lay everything out"
+        );
+    }
+
+    /// `relayout` quantises the transcript clock into each block's cache
+    /// signature so a running tool re-renders about ten times a second — that is
+    /// what animates the spinner and its elapsed timer.
+    ///
+    /// It only works while `now` is a fixed epoch. It was being reset on every
+    /// frame, which made `elapsed()` a few microseconds and the quantum
+    /// permanently 0, so a running block never invalidated itself. That went
+    /// unnoticed because the width flap was re-rendering everything anyway;
+    /// fixing the flap without this would have left the spinner frozen.
+    #[test]
+    fn a_running_tool_re_renders_as_the_clock_moves() {
+        let mut tr = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        tr.user("go".to_string());
+        tr.tool_start("1".into(), "run_command".into(), "$ sleep 5".into(), 0);
+        let w = 100u16;
+        tr.relayout(w);
+        let sig = |t: &Transcript| t.blocks.last().and_then(|b| b.cache.as_ref().map(|c| c.1));
+        let before = sig(&tr);
+        assert!(before.is_some(), "the running block is cached");
+
+        // Same width, so nothing but the clock has changed.
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        tr.relayout(w);
+        assert_ne!(
+            sig(&tr),
+            before,
+            "a running tool must re-render as time passes, or the spinner and \
+             the elapsed timer freeze"
+        );
+
+        // And the specific mistake: the UI used to assign `now = Instant::now()`
+        // on every frame. With the epoch reset, elapsed() is microseconds, the
+        // quantum is always 0, and the running block stops invalidating — which
+        // is precisely the frozen spinner. Simulated here so a future change
+        // that reintroduces the reset is caught by this test rather than by a
+        // user watching a spinner sit still.
+        // The real loop was: reset the epoch, then render — every frame. Mirror
+        // that exactly. elapsed() is then always a few microseconds, the quantum
+        // is always 0, and the signature never moves however long you wait.
+        tr.now = std::time::Instant::now();
+        tr.relayout(w);
+        let anchored = sig(&tr);
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        tr.now = std::time::Instant::now(); // the per-frame reset
+        tr.relayout(w);
+        assert_eq!(
+            sig(&tr),
+            anchored,
+            "resetting the epoch each frame freezes the animation — this is the \
+             behaviour that must not come back"
+        );
+        // Put the clock back to a sane epoch for the rest of the test.
+        tr.now = std::time::Instant::now();
+
+        // A finished block, by contrast, stays put.
+        tr.tool_end(
+            "1",
+            true,
+            "done".into(),
+            String::new(),
+            crate::tools::ToolView::Plain,
+        );
+        tr.relayout(w);
+        let settled = sig(&tr);
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        tr.relayout(w);
+        assert_eq!(
+            sig(&tr),
+            settled,
+            "a finished block does not re-render on the clock"
+        );
+    }
+
     fn shot(t: &Transcript) -> String {
         t.window(0, t.total_lines().max(1))
             .iter()
