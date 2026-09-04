@@ -250,6 +250,15 @@ where it is, because `npx playwright` is how most people first run it. If none
 of those has it, `browse` says so and names the install command rather than
 failing obscurely.
 
+The tool is called `browse`, and its description says it is the Playwright /
+browser tool — so asking koda to "use Playwright" or "open this in a browser"
+finds it, rather than getting a literal answer about having no tool by that name.
+
+When `web_fetch` comes back with almost no text, koda adds a note saying the page
+probably renders with JavaScript, and points at `browse` — or at the setting, if
+the browser is off. A near-empty page otherwise looks like a real one that
+happens to be short, and the model reasons about the wrong thing.
+
 The tool takes a `url` and an optional `wait_for` CSS selector for a page that
 fills in late. Only `http` and `https` are accepted. What comes back is page
 text, and the agent is told to treat it as untrusted data rather than
