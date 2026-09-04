@@ -278,6 +278,24 @@ pub struct Config {
     /// then the npx cache. Set it when Playwright is somewhere else.
     #[serde(default)]
     pub browser_path: String,
+    /// Which browser `browse` should drive.
+    ///
+    /// A Playwright channel name (`chrome`, `msedge`, `chrome-beta`) uses the
+    /// copy already installed on the machine; an absolute path drives any other
+    /// Chromium build, which is how Brave or Arc get used. Empty falls back to
+    /// the Chromium Playwright downloads for itself.
+    ///
+    /// Defaults to `chrome`, because a browser you already have is the one you
+    /// meant. If it is not there, koda quietly uses the bundled Chromium rather
+    /// than failing -- the point is to read the page.
+    #[serde(default = "default_browser_channel")]
+    pub browser_channel: String,
+    /// Run the browser without a window. On by default, because that is what
+    /// you want when an agent is doing the browsing. Turn it off to watch the
+    /// page as it works, or to sign in somewhere by hand first -- headed runs
+    /// share the same profile, so a session survives into later ones.
+    #[serde(default = "yes")]
+    pub browser_headless: bool,
 
     /// Whether the model accepts images: "auto" | "on" | "off".
     ///
@@ -505,6 +523,8 @@ impl Default for Config {
             insecure_tls: false,
             browser: false,
             browser_path: String::new(),
+            browser_headless: true,
+            browser_channel: default_browser_channel(),
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,
@@ -539,6 +559,17 @@ impl Default for Config {
             watch_interval_ms: default_watch_ms(),
         }
     }
+}
+
+fn default_browser_channel() -> String {
+    "chrome".into()
+}
+
+/// serde default for a flag that should be on unless someone says otherwise.
+/// Needed because `#[serde(default)]` on a bool gives false, and a config
+/// written before this field existed would then open a visible browser window.
+fn yes() -> bool {
+    true
 }
 
 /// The default command shell for the current OS: `cmd` on Windows, the user's

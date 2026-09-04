@@ -250,6 +250,32 @@ where it is, because `npx playwright` is how most people first run it. If none
 of those has it, `browse` says so and names the install command rather than
 failing obscurely.
 
+### Which browser, and whether you see it
+
+```toml
+browser = true
+browser_channel = "chrome"   # chrome · msedge · a path · "" for the bundled one
+browser_headless = true      # false to watch the window
+```
+
+Both are rows in `/settings` (**browser build**, **browser window**).
+
+`browser_channel` defaults to `chrome`, so koda drives the Chrome you already
+have rather than downloading a second browser. A bare name is a Playwright
+channel (`chrome`, `msedge`); an absolute path drives any other Chromium build,
+which is how Brave or Arc get used:
+
+```toml
+browser_channel = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+```
+
+If the browser you named will not start, koda says so and uses the bundled
+Chromium instead — the point is to read the page, not to fail because a
+preference could not be met.
+
+Turning `browser_headless` off opens a real window, which is worth doing when
+you want to watch what the agent is looking at, or to sign in somewhere first.
+
 The tool is called `browse`, and its description says it is the Playwright /
 browser tool — so asking koda to "use Playwright" or "open this in a browser"
 finds it, rather than getting a literal answer about having no tool by that name.

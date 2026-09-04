@@ -2219,9 +2219,22 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     // become script.
     let script = format!(
         "const {{ chromium }} = require('playwright');\n\
-         const url = {url}, waitFor = {wait};\n\
+         const url = {url}, waitFor = {wait}, headless = {headless}, channel = {chan};\n\
+         async function open() {{\n\
+           if (channel) {{\n\
+             const o = {{ headless }};\n\
+             // A path drives any Chromium build (Brave, Arc); a bare name is a\n\
+             // Playwright channel for a browser already installed.\n\
+             if (channel.includes('/')) o.executablePath = channel; else o.channel = channel;\n\
+             try {{ return await chromium.launch(o); }} catch (e) {{\n\
+               process.stderr.write('koda: ' + channel + ' would not start (' +\n\
+                 String((e && e.message) || e).split('\\n')[0] + '); using the bundled Chromium\\n');\n\
+             }}\n\
+           }}\n\
+           return await chromium.launch({{ headless }});\n\
+         }}\n\
          (async () => {{\n\
-           const b = await chromium.launch({{ headless: true }});\n\
+           const b = await open();\n\
            try {{\n\
              const p = await b.newPage();\n\
              await p.goto(url, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});\n\
@@ -2234,6 +2247,9 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
          }})().catch(e => {{ process.stderr.write(String((e && e.message) || e)); process.exit(1); }});\n",
         url = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into()),
         wait = serde_json::to_string(&wait_for).unwrap_or_else(|_| "\"\"".into()),
+        headless = ctx.cfg.browser_headless,
+        chan = serde_json::to_string(ctx.cfg.browser_channel.trim())
+            .unwrap_or_else(|_| "\"\"".into()),
     );
 
     let path = std::env::temp_dir().join(format!("koda-browse-{}.cjs", std::process::id()));
