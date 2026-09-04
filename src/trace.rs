@@ -20,6 +20,13 @@ use std::time::Instant;
 
 /// Turns kept in memory. Enough to look back over a working session.
 const MAX_TURNS: usize = 50;
+/// Steps kept per turn. The module claims to be bounded on both axes and this
+/// is the second one: a turn runs up to `max_steps` model calls, and each of
+/// those can request an unbounded number of tools, so `steps` grew without a
+/// ceiling while carrying a capped-but-large payload each. Dropping the middle
+/// keeps the shape of a turn — how it opened and how it ended — which is what
+/// the waterfall is read for.
+const MAX_STEPS: usize = 300;
 /// The request body is the biggest payload (it contains the whole history), so
 /// it gets a larger budget than the rest.
 const CAP_REQUEST: usize = 128 * 1024;
@@ -249,6 +256,29 @@ pub fn open_step(turn: Option<u64>, kind: StepKind, label: &str) -> Option<StepR
     let mut out = None;
     with_turn(id, |t| {
         let seq = t.steps.len();
+        // Keep the head and the tail rather than refusing to record: a turn that
+        // ran away is exactly the one worth looking at, and its last steps are
+        // where the trouble is. One marker records what was dropped.
+        if t.steps.len() >= MAX_STEPS {
+            let keep_head = MAX_STEPS / 4;
+            let drop_to = t.steps.len() - (MAX_STEPS - keep_head) + 1;
+            let dropped = drop_to - keep_head;
+            t.steps.drain(keep_head..drop_to);
+            t.steps.insert(
+                keep_head,
+                Step {
+                    seq: keep_head,
+                    kind: StepKind::Compaction,
+                    label: format!("… {dropped} steps dropped to bound this turn"),
+                    started: now(),
+                    ms: 0,
+                    running: false,
+                    model: None,
+                    tool: None,
+                    note: None,
+                },
+            );
+        }
         t.steps.push(Step {
             seq,
             kind,
