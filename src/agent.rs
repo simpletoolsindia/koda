@@ -2703,9 +2703,26 @@ impl Agent {
         match crate::web::fetch_url(url, 20).await {
             Ok(text) => {
                 let bytes = text.len();
+                // A page that renders client-side comes back as a near-empty
+                // shell, and nothing about that says so -- the model reasons
+                // about a blank page believing it read the real one. Name the
+                // way out, which differs depending on whether it is available.
+                let thin = text.trim().len() < 400;
+                let hint = if !thin {
+                    String::new()
+                } else if self.cfg.browser {
+                    "\n\n[koda: very little text — this page probably renders with \
+                     JavaScript. Try the `browse` tool, which runs it in a real browser.]"
+                        .to_string()
+                } else {
+                    "\n\n[koda: very little text — this page probably renders with \
+                     JavaScript. A real browser would read it; the user can enable one \
+                     with `browser` in /settings.]"
+                        .to_string()
+                };
                 tools::Outcome {
                     ok: true,
-                    content: tools::truncate(&text, cap),
+                    content: format!("{}{hint}", tools::truncate(&text, cap)),
                     summary: format!("fetched {url} ({bytes} bytes)"),
                     view: tools::ToolView::Plain,
                 }
