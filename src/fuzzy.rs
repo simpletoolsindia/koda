@@ -108,26 +108,50 @@ impl FileIndex {
 
     /// True while a scan is in flight, and only then.
     pub fn scanning(&self) -> bool {
-        self.started.load(Ordering::Relaxed) && !self.ready()
+        self.started.load(Ordering::Acquire)
     }
 
     /// Kick off a scan if one has not run. Cheap to call repeatedly.
+    ///
+    /// "Cheap" needs the in-flight check to be real. This used to test only
+    /// `ready()` — whether a scan had *finished* — so while one was running
+    /// every call started another. `draw` reaches here on every frame whenever
+    /// an `@token` sits in the composer, and a scan in flight keeps the frame
+    /// clock armed, so it fed itself: tens of full `WalkBuilder` walks per
+    /// second over the whole repo, each slowing the others down.
     pub fn ensure(&self, root: &Path) {
         if self.ready() {
             return;
         }
-        self.started.store(true, Ordering::Relaxed);
+        // Claim the scan atomically; everyone who loses just returns. AcqRel so
+        // the winner's writes are visible to whoever observes `started` next.
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return; // a scan is already running
+        }
         let slot = self.inner.clone();
+        let started = self.started.clone();
         let root = root.to_path_buf();
         std::thread::spawn(move || {
             let files = scan(&root);
             if let Ok(mut w) = slot.write() {
                 *w = Some(files);
             }
+            // Released last, so `scanning()` is false only once the result is
+            // actually visible — otherwise the UI could see "not scanning, not
+            // ready" and start another walk.
+            started.store(false, Ordering::Release);
         });
     }
 
     /// Force a rescan next time it is needed.
+    ///
+    /// Leaves `started` alone: if a scan is in flight it will finish and clear
+    /// the flag itself, and the next `ensure` after that re-scans. Clearing it
+    /// here would let a second scan start alongside the first.
     pub fn invalidate(&self) {
         if let Ok(mut w) = self.inner.write() {
             *w = None;
@@ -181,6 +205,46 @@ fn scan(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ensure` used to check only whether a scan had *finished*, so while one
+    /// was running every call started another. `draw` reaches it on every frame
+    /// whenever an `@token` is in the composer, and a scan in flight keeps the
+    /// frame clock armed — so it fed itself into a storm of whole-repo walks.
+    #[test]
+    fn ensure_starts_one_scan_no_matter_how_often_it_is_called() {
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+        static SCANS: AtomicUsize = AtomicUsize::new(0);
+
+        let dir = std::env::temp_dir().join(format!("koda-fuzzy-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("f{i}.rs")), "fn main() {}\n").unwrap();
+        }
+
+        let idx = FileIndex::new();
+        // Hammer it the way a redrawing UI would, before any scan can finish.
+        for _ in 0..200 {
+            idx.ensure(&dir);
+        }
+        assert!(idx.scanning() || idx.ready(), "a scan was started");
+
+        // Wait for it, then confirm the flag is released and the result landed.
+        for _ in 0..200 {
+            if idx.ready() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(idx.ready(), "the scan completed");
+        assert!(!idx.scanning(), "and the in-flight flag was released");
+
+        // Once ready, further calls do nothing at all.
+        idx.ensure(&dir);
+        assert!(!idx.scanning());
+        let _ = SCANS.load(O::Relaxed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn files() -> Vec<String> {
         [

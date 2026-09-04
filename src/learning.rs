@@ -235,6 +235,45 @@ impl Learning {
         {
             let _ = writeln!(f, "{line}");
         }
+        self.rotate_observations();
+    }
+
+    /// Keep the observation log to a working set.
+    ///
+    /// It had no bound at all, and `induce` re-reads and re-parses the whole
+    /// file at the end of every turn — so a project accumulated a file that both
+    /// grew for ever on disk and made every turn end more slowly than the last.
+    /// Mining only looks for repetition, so the recent past is what carries the
+    /// signal; the oldest entries are the ones worth dropping.
+    fn rotate_observations(&self) {
+        const MAX_OBSERVATIONS: usize = 4_000;
+        let path = obs_path(&self.root);
+        // Checking length by lines would mean reading the file on every
+        // observation, which is the cost being avoided. Size is a cheap proxy;
+        // only then is the trim worth doing.
+        const SIZE_TRIGGER: u64 = 4 * 1024 * 1024;
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        if meta.len() < SIZE_TRIGGER {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() <= MAX_OBSERVATIONS {
+            return;
+        }
+        let kept = lines[lines.len() - MAX_OBSERVATIONS..].join("\n");
+        // Write beside and rename, so a crash mid-write cannot leave a
+        // half-truncated log where a whole one used to be.
+        let tmp = path.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, format!("{kept}\n")).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 
     /// Read the observation log back (for mining and tests).

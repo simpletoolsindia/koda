@@ -3028,6 +3028,13 @@ fn draw(f: &mut Frame, app: &mut App) {
                                                // the only cost of it being stale is that the scrollbar appears one frame
                                                // late on the turn that first overflows.
     let gutter = u16::from(app.transcript.total_lines() > body.height as usize);
+    // Bound the transcript before laying it out. Scroll is measured in lines, so
+    // it moves down by however many were dropped — otherwise the view would jump
+    // backwards by exactly the evicted run.
+    let dropped = app.transcript.trim_blocks();
+    if dropped > 0 {
+        app.scroll = app.scroll.saturating_sub(dropped);
+    }
     let total = app.transcript.relayout(full_w.saturating_sub(gutter));
     let text_area = Rect {
         x: body.x + 1,

@@ -156,6 +156,35 @@ impl Transcript {
         self.dirty_from = 0;
     }
 
+    /// Drop the oldest blocks so a long session cannot grow without limit,
+    /// returning how many lines went so the caller can hold the view still.
+    ///
+    /// Nothing ever removed a block before: `blocks` grew for the life of the
+    /// session, and each one keeps its rendered lines as well as its text —
+    /// measured at about twenty times the raw size. That was roughly 4-5 MB an
+    /// hour of ordinary use, and a single large file read added half a megabyte
+    /// on its own.
+    ///
+    /// Evicting in one chunk rather than one block at a time keeps the full
+    /// re-layout this forces to once every `CHUNK` blocks instead of every turn.
+    pub fn trim_blocks(&mut self) -> usize {
+        const MAX_BLOCKS: usize = 4_000;
+        const CHUNK: usize = 500;
+        if self.blocks.len() <= MAX_BLOCKS {
+            return 0;
+        }
+        let drop = CHUNK.min(self.blocks.len());
+        // Offsets are still valid here, so the line count of the dropped run is
+        // where the first surviving block starts.
+        let lines = self.blocks[drop].offset;
+        self.blocks.drain(..drop);
+        // Every offset shifts, so everything must be re-offset. The cached
+        // renders survive — only the positions changed.
+        self.dirty_from = 0;
+        self.total = self.total.saturating_sub(lines);
+        lines
+    }
+
     fn push(&mut self, item: Item) {
         self.blocks.push(Block {
             item,
@@ -1642,6 +1671,69 @@ fn indent(line: Line<'static>, width: usize, t: &Theme, g: &Glyphs, depth: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing ever removed a transcript block, and each keeps its rendered
+    /// lines as well as its text — about twenty times the raw size. A long
+    /// session grew for ever. Eviction has to keep the view still: scroll is in
+    /// lines, so the caller shifts it by however many were dropped.
+    #[test]
+    fn a_long_transcript_is_bounded_and_keeps_its_offsets_straight() {
+        let mut tr = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        for i in 0..4_600 {
+            tr.user(format!("message {i}"));
+        }
+        let w = 100u16;
+        tr.relayout(w);
+        let before_blocks = tr.blocks.len();
+        let before_lines = tr.total_lines();
+
+        let dropped = tr.trim_blocks();
+        assert!(dropped > 0, "an over-long transcript is trimmed");
+        assert!(tr.blocks.len() < before_blocks, "blocks actually went");
+        tr.relayout(w);
+
+        // The offsets must still be a correct running total, or `window`'s
+        // binary search lands on the wrong block.
+        let mut expect = 0usize;
+        for b in &tr.blocks {
+            assert_eq!(b.offset, expect, "offsets are contiguous after eviction");
+            expect += b.cache.as_ref().map(|c| c.2.len()).unwrap_or(0);
+        }
+        assert_eq!(tr.total_lines(), expect, "the total matches the blocks");
+        assert_eq!(
+            before_lines - dropped,
+            tr.total_lines(),
+            "the reported drop matches the lines actually removed"
+        );
+
+        // The newest content survives; the oldest is what went.
+        // The tail, not one line of it: a block renders with padding, so the
+        // final line is often blank.
+        let tail: String = tr
+            .window(tr.total_lines().saturating_sub(6), 6)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            tail.contains("4599"),
+            "the newest message survives: {tail:?}"
+        );
+        let head: String = tr
+            .window(0, 6)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            !head.contains("message 0"),
+            "the oldest is what went: {head:?}"
+        );
+
+        // A transcript under the cap is left completely alone.
+        let mut small = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        small.user("hello".into());
+        small.relayout(w);
+        assert_eq!(small.trim_blocks(), 0, "a short transcript is not touched");
+    }
 
     /// The freeze: `draw` used to lay the transcript out at one width, then
     /// again one column narrower when it decided a scrollbar was needed.

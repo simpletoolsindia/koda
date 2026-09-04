@@ -994,22 +994,35 @@ fn provider_models_json(root: &Path, name: &str) -> String {
     // The provider's own TLS setting, not the global one: this is the endpoint
     // being asked, so it is the endpoint whose trust rules apply.
     let insecure = p.insecure_tls || cfg.insecure_tls;
-    let models = std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => return Err(e.to_string()),
-        };
-        rt.block_on(async move {
-            let client =
-                crate::llm::Client::with_tls(endpoint, key, insecure).map_err(|e| e.to_string())?;
-            client.models().await.map_err(|e| e.to_string())
-        })
-    })
-    .join()
-    .unwrap_or_else(|_| Err("model lookup panicked".into()));
+    // Bounded, because this join blocks a worker on one of a two-thread runtime
+    // and the LLM client deliberately has no total timeout (local generation can
+    // be slow). An endpoint that accepts the connection and then says nothing
+    // would otherwise hold this thread for ever; two such requests and the TUI's
+    // event loop never runs again. A model list is not worth that.
+    const LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = (|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(async move {
+                let client = crate::llm::Client::with_tls(endpoint, key, insecure)
+                    .map_err(|e| e.to_string())?;
+                client.models().await.map_err(|e| e.to_string())
+            })
+        })();
+        // The receiver may already have given up; nothing to do about that.
+        let _ = tx.send(out);
+    });
+    let models = match rx.recv_timeout(LOOKUP_TIMEOUT) {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "the provider did not answer within {}s",
+            LOOKUP_TIMEOUT.as_secs()
+        )),
+    };
 
     match models {
         Ok(list) => serde_json::json!({ "models": list }).to_string(),

@@ -132,6 +132,17 @@ impl Store {
         Ok(())
     }
 
+    /// Account for messages dropped from the *front* of the history.
+    ///
+    /// `written` is an index into `history`, and trimming for context removes
+    /// from the front — so without this the index points at different messages
+    /// afterwards and `append` skips everything between. A trim of five silently
+    /// cost five messages out of the session file, or stopped recording
+    /// altogether when `written` ran past the end.
+    pub fn forget(&mut self, dropped: usize) {
+        self.written = self.written.saturating_sub(dropped);
+    }
+
     /// Append whatever part of `history` is not on disk yet.
     pub fn append(&mut self, history: &[Message]) {
         if !self.enabled || history.len() <= self.written {
@@ -203,6 +214,42 @@ pub fn read(path: &Path) -> Result<(Header, Vec<Message>)> {
 }
 
 /// Newest first.
+/// Header, message count, and first user line — without parsing the bodies.
+///
+/// `list` used to call `read`, which deserializes every record of every
+/// session, tool outputs and all. A picker needs a title and a count, and the
+/// files hold megabytes of transcript; on a project with a long history that
+/// was seconds of frozen UI on `/resume`, and the same work again every few
+/// seconds for the web UI's poll. Only the header and the first user line are
+/// parsed here; the rest are counted.
+fn summarize(path: &Path) -> Option<(Header, usize, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let header: Header = serde_json::from_str(lines.next()?).ok()?;
+
+    let mut count = 0usize;
+    let mut title: Option<String> = None;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        count += 1;
+        // Parse a record only until the first user message is found. The cheap
+        // substring test keeps the common case to a memchr over the line.
+        if title.is_none() && line.contains("\"role\":\"user\"") {
+            if let Ok(Record::Msg(m)) = serde_json::from_str::<Record>(line) {
+                if m.role == Role::User {
+                    if let Some(c) = m.content {
+                        let one_line = c.split('\n').next().unwrap_or("").trim().to_string();
+                        title = Some(one_line.chars().take(70).collect());
+                    }
+                }
+            }
+        }
+    }
+    Some((header, count, title.unwrap_or_else(|| "(no prompt)".into())))
+}
+
 pub fn list(root: &Path) -> Vec<Summary> {
     let Ok(entries) = std::fs::read_dir(dir(root)) else {
         return Vec::new();
@@ -213,22 +260,13 @@ pub fn list(root: &Path) -> Vec<Summary> {
         if path.extension().map(|x| x != "jsonl").unwrap_or(true) {
             continue;
         }
-        let Ok((header, messages)) = read(&path) else {
+        let Some((header, count, title)) = summarize(&path) else {
             continue;
         };
         // A session with no exchange is noise in the picker.
-        if messages.is_empty() {
+        if count == 0 {
             continue;
         }
-        let title = messages
-            .iter()
-            .find(|m| m.role == Role::User)
-            .and_then(|m| m.content.clone())
-            .map(|c| {
-                let one_line = c.split('\n').next().unwrap_or("").trim().to_string();
-                one_line.chars().take(70).collect::<String>()
-            })
-            .unwrap_or_else(|| "(no prompt)".into());
         let modified = e
             .metadata()
             .and_then(|m| m.modified())
@@ -239,7 +277,7 @@ pub fn list(root: &Path) -> Vec<Summary> {
         out.push(Summary {
             header,
             path,
-            messages: messages.len(),
+            messages: count,
             title,
             modified,
         });
@@ -329,6 +367,120 @@ pub fn ago(then: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `written` is an index into `history`, and trimming for context removes
+    /// from the *front*. Without telling the recorder, `history[written..]`
+    /// points at different messages afterwards and everything between is never
+    /// written — the session file silently loses the middle of the conversation.
+    #[test]
+    fn trimming_history_does_not_lose_messages_from_the_session_file() {
+        let root = std::env::temp_dir().join(format!("koda-sesstrim-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(dir(&root)).unwrap();
+
+        let mut s = Store::create(&root, "m", "e");
+        let mut history: Vec<Message> =
+            (0..10).map(|i| Message::user(format!("msg-{i}"))).collect();
+        s.append(&history);
+
+        // The agent trims the four oldest, then the conversation continues.
+        let dropped = 4;
+        history.drain(0..dropped);
+        s.forget(dropped);
+        history.push(Message::user("msg-10"));
+        s.append(&history);
+
+        let (_h, msgs) = read(&s.path).expect("readable");
+        let texts: Vec<String> = msgs.iter().filter_map(|m| m.content.clone()).collect();
+        assert!(
+            texts.iter().any(|t| t == "msg-10"),
+            "the message after the trim was recorded: {texts:?}"
+        );
+        // Nothing between the trim and the new message went missing, and
+        // nothing was written twice.
+        let dupes = texts.len() - texts.iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(dupes, 0, "no message recorded twice: {texts:?}");
+        for i in 0..10 {
+            assert!(
+                texts.iter().any(|t| t == &format!("msg-{i}")),
+                "msg-{i} is still in the file: {texts:?}"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `list` builds the /resume picker and answers the web UI's poll. It used
+    /// to call `read`, deserializing every record of every session — tool
+    /// outputs included — to get a title and a count. Session files run to
+    /// megabytes, so on a project with history that was seconds of frozen UI.
+    #[test]
+    fn listing_sessions_does_not_parse_whole_transcripts() {
+        use std::time::Instant;
+        let root = std::env::temp_dir().join(format!("koda-sesslist-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let d = dir(&root);
+        std::fs::create_dir_all(&d).unwrap();
+
+        // 12 sessions, each with a big transcript, as a real project accrues.
+        let bulk = "x".repeat(20_000);
+        for f in 0..12 {
+            let mut out = String::new();
+            out.push_str(
+                &serde_json::to_string(&Record::Header(Header {
+                    id: format!("s{f}"),
+                    started: 1,
+                    model: "m".into(),
+                    endpoint: "e".into(),
+                    cwd: "/r".into(),
+                }))
+                .unwrap(),
+            );
+            out.push('\n');
+            out.push_str(
+                &serde_json::to_string(&Record::Msg(Message::user(format!(
+                    "the first prompt of session {f}"
+                ))))
+                .unwrap(),
+            );
+            out.push('\n');
+            for _ in 0..60 {
+                out.push_str(
+                    &serde_json::to_string(&Record::Msg(Message::assistant(bulk.clone()))).unwrap(),
+                );
+                out.push('\n');
+            }
+            std::fs::write(d.join(format!("s{f}.jsonl")), out).unwrap();
+        }
+
+        let t0 = Instant::now();
+        let got = list(&root);
+        let cheap = t0.elapsed();
+
+        assert_eq!(got.len(), 12, "every session is listed");
+        assert!(
+            got[0].title.starts_with("the first prompt"),
+            "{}",
+            got[0].title
+        );
+        assert_eq!(
+            got[0].messages, 61,
+            "counted without deserializing each one"
+        );
+
+        // The old path, for comparison: read() on every file.
+        let t1 = Instant::now();
+        for s in &got {
+            let _ = read(&s.path);
+        }
+        let full = t1.elapsed();
+        eprintln!("  list(): {cheap:?}   full read of the same files: {full:?}");
+        assert!(
+            cheap * 2 < full,
+            "listing should be far cheaper than parsing every record \
+             (list {cheap:?} vs read {full:?})"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("koda-session-{tag}"));

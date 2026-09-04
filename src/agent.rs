@@ -846,7 +846,15 @@ impl Agent {
             }
             steps += 1;
 
-            self.trim();
+            // Trimming removes from the front of `history`, and the session
+            // recorder indexes into it — tell it, or it silently skips whatever
+            // fell off before it was written.
+            let dropped = self.trim();
+            if dropped > 0 {
+                if let Some(s) = self.session.as_mut() {
+                    s.forget(dropped);
+                }
+            }
             let result = match self.stream_step(tx).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -3032,7 +3040,12 @@ impl Agent {
             if self.cancelled() {
                 break;
             }
-            self.trim();
+            let dropped = self.trim();
+            if dropped > 0 {
+                if let Some(s) = self.session.as_mut() {
+                    s.forget(dropped);
+                }
+            }
             let result = match self.stream_step(tx).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -3307,7 +3320,13 @@ impl Agent {
 
     /// Drop the oldest messages until the history fits the configured budget,
     /// keeping tool results attached to their calls.
-    fn trim(&mut self) {
+    /// Drop the oldest history until it fits the context budget.
+    ///
+    /// Returns how many messages went. The session recorder indexes into
+    /// `history` to know what it has already written, and this removes from the
+    /// *front*, so it has to be told — see `Session::forget`.
+    fn trim(&mut self) -> usize {
+        let before = self.history.len();
         let reserve = self.system.len() / 4 + 1024;
         let budget = self.cfg.context_tokens.saturating_sub(reserve).max(1024);
         loop {
@@ -3325,6 +3344,7 @@ impl Agent {
                 self.history.remove(0);
             }
         }
+        before - self.history.len()
     }
 }
 
