@@ -2976,6 +2976,20 @@ fn git_branch(root: &Path) -> Option<String> {
 
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    // Paint the whole frame in the theme's base surface colour before anything
+    // else. Every other style in the app only ever sets a *foreground* colour
+    // — text, borders, panels — and relies on this fill for contrast. Without
+    // it, text renders against whatever background the user's terminal
+    // happens to have, which is invisible for a light palette (dark text meant
+    // for a light page, shown on a typically dark terminal) and just lucky for
+    // the dark ones. `Color::Reset` (ansi, mono) means "use the terminal's own
+    // colours, unmodified" and is left alone on purpose.
+    if app.theme.surface != Color::Reset {
+        f.render_widget(
+            Block::default().style(Style::default().bg(app.theme.surface)),
+            area,
+        );
+    }
     // Record it here as well as on resize: the first frame never sees a resize
     // event, and layout decisions elsewhere need the real width.
     app.last_size = (area.width, area.height);
