@@ -460,9 +460,10 @@ impl Settings {
                 let c = self.cfg.browser_channel.trim();
                 if c.is_empty() {
                     "bundled chromium".to_string()
-                } else if c.contains('/') {
+                } else if c.contains('/') || c.contains('\\') {
                     // A path: show the app name, which is what identifies it.
-                    c.rsplit('/')
+                    // Backslash counts too, or a Windows path shows in full.
+                    c.rsplit(['/', '\\'])
                         .find(|s| !s.is_empty())
                         .unwrap_or(c)
                         .to_string()

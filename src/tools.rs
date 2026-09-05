@@ -2171,10 +2171,19 @@ pub fn playwright_dir(root: &Path, configured: &str) -> Option<PathBuf> {
     if let Some(d) = has(root.join("node_modules")) {
         return Some(d);
     }
-    if let Ok(out) = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
-    {
+    // npm on Windows is npm.cmd, a batch file, which CreateProcess will not run
+    // directly — it has to go through the command interpreter. Elsewhere npm is
+    // a real executable and is invoked as one.
+    let npm = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "npm", "root", "-g"]);
+        c
+    } else {
+        let mut c = std::process::Command::new("npm");
+        c.args(["root", "-g"]);
+        c
+    };
+    if let Ok(out) = { npm }.output() {
         let g = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !g.is_empty() {
             if let Some(d) = has(PathBuf::from(g)) {
@@ -2225,7 +2234,10 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
              const o = {{ headless }};\n\
              // A path drives any Chromium build (Brave, Arc); a bare name is a\n\
              // Playwright channel for a browser already installed.\n\
-             if (channel.includes('/')) o.executablePath = channel; else o.channel = channel;\n\
+             // A separator means a path to a browser binary; a bare word is a\n\
+             // Playwright channel. Backslash counts, or a Windows path like\n\
+             // C:\\\\Program Files\\\\...\\\\chrome.exe would be read as a channel name.\n\
+             if (/[\\/\\\\]/.test(channel)) o.executablePath = channel; else o.channel = channel;\n\
              try {{ return await chromium.launch(o); }} catch (e) {{\n\
                process.stderr.write('koda: ' + channel + ' would not start (' +\n\
                  String((e && e.message) || e).split('\\n')[0] + '); using the bundled Chromium\\n');\n\
