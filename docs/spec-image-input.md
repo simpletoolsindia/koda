@@ -47,13 +47,21 @@ Dependency stance: reuse `tools::base64_encode`; Cargo.toml unchanged.
   wrong answer.
 - `Agent::user_message` now branches on capability:
   - vision model → attach the image as a data URL (as before);
-  - non-vision + `ocr = true` → run `tools::ocr_image` (shells out to the
-    `tesseract` CLI, `tesseract <img> stdout`) and fold the recognized text into
-    the message as an `[OCR text of …]` block;
+  - non-vision + `ocr = true` + `ocr_model` set → "vision relay": ask that
+    model (`Client::describe_image`, a one-shot non-streaming multimodal
+    request) to transcribe the image and describe any non-text content, and
+    fold its reply into the message the same way; falls through to tesseract
+    below on an empty reply or an error;
+  - non-vision + `ocr = true` (no vision relay, or it failed) → run
+    `tools::ocr_image` (shells out to the `tesseract` CLI, `tesseract <img>
+    stdout`) and fold the recognized text into the message as an `[OCR text
+    of …]` block;
   - non-vision + OCR off → skip the image with a notice pointing at `/settings`.
-- `ocr` config flag (default false) + a **image ocr** settings toggle. No new
-  Rust dependency; if tesseract isn't installed, `ocr_image` returns a clear,
-  actionable error and the image is skipped.
+- `ocr` config flag (default false) + a **image ocr** settings toggle, and an
+  `ocr_model` string (default empty) + an **ocr vision model** settings row —
+  naming a model there also turns `ocr` on. No new Rust dependency; if
+  tesseract isn't installed, `ocr_image` returns a clear, actionable error and
+  the image is skipped (unless the vision relay already supplied text).
 
 Extensions were also broadened to png/jpg/jpeg/gif/webp/bmp/tiff/avif/svg.
 Still open (lower priority): bare-path (non-`@`) attach, magic-byte MIME sniff,

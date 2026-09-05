@@ -352,6 +352,17 @@ pub struct Config {
     #[serde(default)]
     pub ocr: bool,
 
+    /// When set, OCR (above) tries this model first, as a "vision relay": the
+    /// image is sent to this model (often on the same endpoint — most routers
+    /// and local servers host several models) and its reply — a transcription
+    /// plus a description of anything that isn't text — is handed to the
+    /// active model in place of the picture. A vision-capable model reads
+    /// layout, tables, handwriting, and screenshots far better than classic
+    /// OCR, so this is tried first when set; tesseract remains the offline
+    /// fallback if it's empty, unset, or the request fails. Empty by default.
+    #[serde(default)]
+    pub ocr_model: String,
+
     /// Attempts per request before giving up (1 = no retry).
     pub max_retries: u32,
     /// "debug" | "info" | "warn" | "error"
@@ -537,6 +548,7 @@ impl Default for Config {
             search_results: 6,
             web_fetch: false,
             ocr: false,
+            ocr_model: String::new(),
             max_retries: 3,
             log_level: "info".into(),
             log_to_file: true,
@@ -899,6 +911,16 @@ web_fetch = false
 # send that instead. Off by default; needs tesseract installed
 # (brew install tesseract / apt install tesseract-ocr). Toggle in /settings.
 ocr = false
+
+# When set, OCR above tries this model first instead of tesseract: the image is
+# sent to it as a normal vision request and its reply (a transcription plus a
+# description of anything that isn't text) is handed to the active model in
+# its place. Often a model on the very same endpoint — most routers and local
+# servers host several — so this needs no extra setup beyond a name, e.g.
+# "gpt-4o-mini" or "qwen2-vl". A multimodal model reads layout, tables,
+# handwriting and screenshots far better than classic OCR. Empty = tesseract
+# only. Set in /settings.
+ocr_model = ""
 
 # Transient failures (connection reset, 429, 5xx, empty stream) are retried
 # with backoff before the agent gives up.

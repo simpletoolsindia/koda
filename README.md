@@ -409,6 +409,15 @@ error still reaches a text-only model. Needs tesseract installed
 says so and skips the image. koda detects vision capability from the model name,
 so a vision model still gets the real image.
 
+Tesseract only reads printed text, and misses layout, tables, handwriting and
+anything that isn't text. Set `ocr_model` (in `/settings`, next to `ocr`) to a
+vision-capable model name — often one already reachable on the same endpoint,
+since most routers and local servers host several — and koda tries that first:
+it sends the image there, asks for a verbatim transcription plus a short
+description of any non-text content, and hands the reply to your active model
+in place of the picture. Tesseract remains the offline fallback if `ocr_model`
+is unset or the request fails.
+
 ## Reasoning effort
 
 Thinking models can be told how hard to think. `/reason` cycles

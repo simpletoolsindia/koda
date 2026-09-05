@@ -893,7 +893,8 @@ right file, which the model then reads properly.
 ## Themes and appearance
 
 `/theme` switches the palette live and, with no argument, shows a swatch of each
-so you can pick by eye. The `--theme` flag and `theme` config key set it at
+so you can pick by eye. The choice is saved to the config file immediately, so
+it survives a restart. The `--theme` flag and `theme` config key set it at
 start.
 
 Available palettes: `dark`, `neon`, `ansi`, `catppuccin-mocha`, `tokyo-night`,
