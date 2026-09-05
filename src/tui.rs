@@ -1661,6 +1661,7 @@ impl App {
             || cfg.browser_headless != self.cfg.browser_headless
             || cfg.browser_channel != self.cfg.browser_channel
             || cfg.ocr != self.cfg.ocr
+            || cfg.ocr_model != self.cfg.ocr_model
             || cfg.vision != self.cfg.vision
             || cfg.insecure_tls != self.cfg.insecure_tls
             || cfg.context_tokens != self.cfg.context_tokens
@@ -2510,7 +2511,18 @@ impl App {
         match theme::by_name(arg) {
             Some(t) => {
                 self.set_theme(t);
-                self.note(format!("theme → {}", t.name));
+                // Without this, the palette only lived in memory: it looked
+                // switched for the rest of the session, then silently reverted
+                // on the next launch (and any subsequent /settings save would
+                // overwrite it back, since that path reads from self.cfg too).
+                self.cfg.theme = t.name.to_string();
+                match crate::config::save(&self.cfg) {
+                    Ok(_) => self.note(format!("theme → {}", t.name)),
+                    Err(e) => self.note(format!(
+                        "theme → {} (not saved: {e})",
+                        t.name
+                    )),
+                }
             }
             None => self.note(format!(
                 "unknown theme `{arg}` — one of: {}",

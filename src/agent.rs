@@ -823,7 +823,7 @@ impl Agent {
             );
             let _ = tx.send(Event::TurnStart);
         }
-        self.history.push(self.user_message(&input, tx));
+        self.history.push(self.user_message(&input, tx).await);
 
         self.auto_compact(tx).await;
 
@@ -1914,7 +1914,26 @@ impl Agent {
         }
     }
 
-    fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
+    /// "Vision relay" OCR: hand the image to a vision-capable model (named in
+    /// `cfg.ocr_model`, often reachable on the very same endpoint) and ask it
+    /// to transcribe any text and briefly describe anything that isn't text.
+    /// A multimodal model reads layout, tables, handwriting, and screenshots
+    /// far better than classic OCR, so this is tried before tesseract when a
+    /// model is configured.
+    async fn vision_ocr(&self, path: &std::path::Path) -> anyhow::Result<String> {
+        let url = tools::image_data_url(path, self.cfg.max_file_bytes)?;
+        const PROMPT: &str = "Transcribe every piece of visible text in this \
+            image verbatim, preserving layout and reading order (tables, \
+            labels, code, etc). Then, on a new line, briefly describe any \
+            non-text visual content (diagrams, photos, UI elements) that a \
+            reader would need to understand the image. Do not add commentary \
+            beyond that.";
+        self.client
+            .describe_image(&self.cfg.ocr_model, &url, PROMPT)
+            .await
+    }
+
+    async fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
         let mut images = Vec::new();
         // The raw `@token`s whose images made it onto the wire, so the text can
         // be cleaned of them afterwards.
@@ -1991,21 +2010,50 @@ impl Agent {
                 }
                 continue;
             }
-            // Path 2 — the model isn't vision-capable. If OCR is on, extract the
-            // image's text with tesseract and inject that instead; otherwise say
-            // why the image was skipped.
+            // Path 2 — the model isn't vision-capable. If OCR is on, try a
+            // vision-relay model first (better on layout, tables, handwriting,
+            // screenshots), then fall back to tesseract; otherwise say why the
+            // image was skipped.
             if self.cfg.ocr {
-                match tools::ocr_image(&full) {
-                    Ok(text) if !text.is_empty() => {
-                        let _ = tx.send(Event::Notice(format!("OCR'd image {raw}")));
-                        ocr_blocks.push(format!("[OCR text of {raw}]\n{text}"));
+                let mut text: Option<String> = None;
+                if !self.cfg.ocr_model.trim().is_empty() {
+                    match self.vision_ocr(&full).await {
+                        Ok(t) if !t.trim().is_empty() => {
+                            let _ = tx.send(Event::Notice(format!(
+                                "OCR'd image {raw} (via {})",
+                                self.cfg.ocr_model
+                            )));
+                            text = Some(t);
+                        }
+                        Ok(_) => {
+                            let _ = tx.send(Event::Notice(format!(
+                                "vision OCR found no text in {raw}, trying tesseract"
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Notice(format!(
+                                "vision OCR failed for {raw} ({e}), trying tesseract"
+                            )));
+                        }
                     }
-                    Ok(_) => {
-                        let _ = tx.send(Event::Notice(format!("OCR found no text in {raw}")));
+                }
+                if text.is_none() {
+                    match tools::ocr_image(&full) {
+                        Ok(t) if !t.is_empty() => {
+                            let _ = tx.send(Event::Notice(format!("OCR'd image {raw}")));
+                            text = Some(t);
+                        }
+                        Ok(_) => {
+                            let _ =
+                                tx.send(Event::Notice(format!("OCR found no text in {raw}")));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Event::Notice(format!("could not OCR {raw}: {e}")));
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(Event::Notice(format!("could not OCR {raw}: {e}")));
-                    }
+                }
+                if let Some(text) = text {
+                    ocr_blocks.push(format!("[OCR text of {raw}]\n{text}"));
                 }
             } else {
                 // Name the way out. "isn't vision-capable" is a dead end when
@@ -3850,13 +3898,13 @@ mod tests {
     /// mention as text made the model spend a turn calling read_file for a file
     /// the user had already pointed at -- and a model told not to use tools
     /// simply could not answer.
-    #[test]
-    fn a_document_mention_is_read_into_the_message() {
+    #[tokio::test]
+    async fn a_document_mention_is_read_into_the_message() {
         let a = test_agent();
         let (tx, _rx) = mpsc::unbounded_channel::<Event>();
         std::fs::write(a.ctx.root.join("data.csv"), "name,qty\nwidget,3\n").unwrap();
 
-        let msg = a.user_message("@data.csv how many widgets?", &tx);
+        let msg = a.user_message("@data.csv how many widgets?", &tx).await;
         let text = format!("{msg:?}");
         assert!(
             text.contains("how many widgets?"),
@@ -3876,12 +3924,12 @@ mod tests {
     /// A mention of something that is neither image nor document is left alone:
     /// the model may still want to read_file it, and guessing at every @token
     /// would pull whole source trees into the prompt.
-    #[test]
-    fn a_plain_file_mention_is_left_for_the_model_to_fetch() {
+    #[tokio::test]
+    async fn a_plain_file_mention_is_left_for_the_model_to_fetch() {
         let a = test_agent();
         let (tx, _rx) = mpsc::unbounded_channel::<Event>();
         std::fs::write(a.ctx.root.join("main.rs"), "fn main() {}\n").unwrap();
-        let msg = a.user_message("@main.rs what does this do?", &tx);
+        let msg = a.user_message("@main.rs what does this do?", &tx).await;
         let text = format!("{msg:?}");
         assert!(text.contains("@main.rs"), "left as a mention: {text}");
         assert!(!text.contains("contents of main.rs"), "not inlined: {text}");

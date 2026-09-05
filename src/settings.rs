@@ -38,6 +38,7 @@ pub enum Row {
     BrowserHeadless,
     BrowserChannel,
     Ocr,
+    OcrModel,
     Codegraph,
     Debug,
     WebUi,
@@ -49,7 +50,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 28] = [
+    pub const ALL: [Row; 29] = [
         Row::Provider,
         Row::InsecureTls,
         Row::Mode,
@@ -71,6 +72,7 @@ impl Row {
         Row::BrowserHeadless,
         Row::BrowserChannel,
         Row::Ocr,
+        Row::OcrModel,
         Row::Codegraph,
         Row::Debug,
         Row::WebUi,
@@ -103,6 +105,7 @@ impl Row {
             Row::BrowserHeadless => "browser window",
             Row::BrowserChannel => "browser build",
             Row::Ocr => "image ocr",
+            Row::OcrModel => "ocr vision model",
             Row::Codegraph => "code graph",
             Row::Debug => "debug capture",
             Row::WebUi => "web ui",
@@ -135,7 +138,8 @@ impl Row {
             Row::Browser => "open pages in a real browser (needs playwright)",
             Row::BrowserHeadless => "hidden · visible — show the window to watch or sign in",
             Row::BrowserChannel => "chrome · msedge · bundled — which browser to drive",
-            Row::Ocr => "OCR images (tesseract) when the model can't see them",
+            Row::Ocr => "OCR images (tesseract, or the model below) when the model can't see them",
+            Row::OcrModel => "enter a vision model to try before tesseract · empty = tesseract only",
             Row::Codegraph => "scan the project into a symbol graph on open",
             Row::Debug => "dump raw requests/responses to the debug dir",
             Row::WebUi => "serve the React log/debug UI on 127.0.0.1 (restart to apply)",
@@ -148,7 +152,7 @@ impl Row {
 
     /// Whether this row's value is free text edited inline (enter opens editor).
     fn editable(&self) -> bool {
-        matches!(self, Row::SearxUrl | Row::SystemPrompt)
+        matches!(self, Row::SearxUrl | Row::SystemPrompt | Row::OcrModel)
     }
 }
 
@@ -197,6 +201,7 @@ impl Settings {
             if forward {
                 self.editing = Some(match row {
                     Row::SearxUrl => self.cfg.searx_url.clone(),
+                    Row::OcrModel => self.cfg.ocr_model.clone(),
                     // Editing the system prompt: seed the textarea with the
                     // current custom prompt, or the built-in one when none is
                     // set, so the user edits from real text instead of a blank.
@@ -306,7 +311,7 @@ impl Settings {
                     "searxng".into()
                 };
             }
-            Row::SearxUrl | Row::SystemPrompt => {} // handled above
+            Row::SearxUrl | Row::SystemPrompt | Row::OcrModel => {} // handled above
             Row::WebFetch => self.cfg.web_fetch = !self.cfg.web_fetch,
             Row::Browser => self.cfg.browser = !self.cfg.browser,
             Row::BrowserHeadless => self.cfg.browser_headless = !self.cfg.browser_headless,
@@ -383,6 +388,13 @@ impl Settings {
                 // Entering a URL implies you want that backend.
                 if !self.cfg.searx_url.is_empty() {
                     self.cfg.search_backend = "searxng".into();
+                }
+            }
+            Row::OcrModel => {
+                self.cfg.ocr_model = val.trim().to_string();
+                // Naming a vision model implies you want OCR fallback on.
+                if !self.cfg.ocr_model.is_empty() {
+                    self.cfg.ocr = true;
                 }
             }
             Row::SystemPrompt => {
@@ -479,6 +491,13 @@ impl Settings {
                 }
             }
             Row::Ocr => on(self.cfg.ocr),
+            Row::OcrModel => {
+                if self.cfg.ocr_model.is_empty() {
+                    "(tesseract only)".to_string()
+                } else {
+                    self.cfg.ocr_model.clone()
+                }
+            }
             Row::Codegraph => on(self.cfg.codegraph),
             Row::Debug => on(self.cfg.debug),
             Row::WebUi => {
@@ -799,5 +818,28 @@ mod tests {
         select(&mut s, Row::SearxUrl);
         s.change(true);
         assert!(!s.editing_multiline(), "url field is single-line");
+    }
+
+    /// Naming a vision model is a clear enough signal to want it used — nobody
+    /// types a model name in and then expects OCR to stay off.
+    #[test]
+    fn setting_an_ocr_model_turns_ocr_on() {
+        let mut s = settings();
+        assert!(!s.cfg.ocr, "off by default");
+        select(&mut s, Row::OcrModel);
+        s.change(true); // enter -> open editor
+        s.edit_char('x');
+        s.edit_commit();
+        assert_eq!(s.cfg.ocr_model, "x");
+        assert!(s.cfg.ocr, "naming a model turns ocr on");
+        assert!(s.dirty);
+    }
+
+    #[test]
+    fn ocr_model_edit_is_single_line() {
+        let mut s = settings();
+        select(&mut s, Row::OcrModel);
+        s.change(true);
+        assert!(!s.editing_multiline(), "model field is single-line");
     }
 }

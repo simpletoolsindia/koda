@@ -504,6 +504,54 @@ impl Client {
         Ok(out)
     }
 
+    /// Ask a vision-capable model to read an image, as a one-shot, non-streaming
+    /// request. This is the "vision relay" OCR path: when the active chat model
+    /// can't see images itself, the picture is routed through a model that can
+    /// (often on the very same endpoint — most routers and local servers host
+    /// several models), and its reply is handed to the text-only model as if it
+    /// had read the image directly. A multimodal model reads layout, tables,
+    /// handwriting, and screenshots far better than classic OCR, so this is
+    /// tried first and tesseract (`tools::ocr_image`) is the offline fallback.
+    pub async fn describe_image(&self, model: &str, image_url: &str, prompt: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "model": model,
+            "stream": false,
+            "temperature": 0.0,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+        });
+        let resp = self
+            .req(reqwest::Method::POST, "/chat/completions")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| classify_transport(&self.endpoint, &e))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(classify_status(status, &text, model).into());
+        }
+        let v: Value = serde_json::from_str(&text).context("parsing vision OCR response")?;
+        let content = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("empty response from vision model `{model}`"));
+        }
+        Ok(content)
+    }
+
     /// Stream a completion, retrying transient failures with backoff.
     ///
     /// `attempts` counts total tries. A retry only happens when nothing has
