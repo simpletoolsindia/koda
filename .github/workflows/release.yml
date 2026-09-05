@@ -72,18 +72,32 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             cross: false
+            smoke: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
+            smoke: false
+          # Both macOS targets build on Apple Silicon. macos-13 is the Intel
+          # runner, and GitHub is retiring that pool — a release queued behind
+          # it for seven hours, twice, while the other four targets finished in
+          # minutes. macOS carries the SDK for both architectures, so
+          # cross-compiling x86_64 from arm64 needs no extra linker and produces
+          # the same Mach-O x86_64 binary.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             cross: false
+            # Built on arm64, so it cannot be run here without Rosetta, which
+            # the runner image does not promise. Cross-built binaries are not
+            # smoke-tested; the native arm64 build covers macOS.
+            smoke: false
           - target: aarch64-apple-darwin
             os: macos-14
             cross: false
+            smoke: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cross: false
+            smoke: true
 
     steps:
       - uses: actions/checkout@v4
@@ -151,7 +165,7 @@ jobs:
 
       # -- Smoke test: the freshly built binary must at least run --------------
       - name: Smoke test (Unix)
-        if: runner.os != 'Windows' && matrix.cross == false
+        if: runner.os != 'Windows' && matrix.smoke
         run: ./target/${{ matrix.target }}/release/koda --help
 
       - name: Smoke test (Windows)
