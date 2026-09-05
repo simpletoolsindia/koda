@@ -1961,11 +1961,28 @@ impl App {
             self.note("busy — wait for the current turn, then try $ again");
             return;
         }
-        // -c takes the program as one argument, so the snippet is passed
-        // through a heredoc instead: it keeps quotes and newlines intact
-        // without a layer of shell escaping to get wrong.
-        let script = format!("{} <<'KODA_PY_EOF'\n{}\nKODA_PY_EOF", python_bin(), code);
-        self.send(Command::Bang(script));
+        // The snippet goes to a file, and the file to the interpreter. A heredoc
+        // read more tidily and only works in a POSIX shell — on Windows the
+        // shell is cmd, which has none, so `$` was silently broken there. A file
+        // also sidesteps every quoting question: nothing in the code has to
+        // survive a shell on its way to Python.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("koda-snippet-{stamp}.py"));
+        if let Err(e) = std::fs::write(&path, code) {
+            self.transcript
+                .error(format!("could not write the snippet: {e}"));
+            return;
+        }
+        // Quoted because a temp path can contain spaces; cmd and sh both read
+        // double quotes the same way here.
+        self.send(Command::Bang(format!(
+            "\"{}\" \"{}\"",
+            python_bin(),
+            path.display()
+        )));
     }
 
     fn slash(&mut self, rest: &str) {
