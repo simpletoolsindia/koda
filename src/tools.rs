@@ -486,6 +486,24 @@ fn build_specs() -> Vec<Spec> {
             mutating: true,
         },
         Spec {
+            name: "view_image",
+            desc: "Look at a local image file (PNG/JPEG/GIF/WebP) and get a description of \
+                   what it shows. This is how you 'see' an image you cannot otherwise read — \
+                   a screenshot you captured with `browse action=screenshot`, an image you \
+                   downloaded, or any picture in the workspace. read_file cannot show you an \
+                   image (it only returns bytes); use this instead. Optionally say what to \
+                   look for.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "path": str_prop("Path to the local image file, relative to the workspace."),
+                    "prompt": str_prop("Optional: what to look for or describe in the image.")
+                },
+                "required": ["path"]
+            }),
+            mutating: false,
+        },
+        Spec {
             name: "about_creator",
             desc: "Who created koda, and how to reach them. Call this whenever someone asks \
                    who made, built, wrote or maintains koda, who its author, creator or \
@@ -522,6 +540,7 @@ pub const PLAN_TOOLS: &[&str] = &[
     "web_search",
     "web_fetch",
     "browse",
+    "view_image",
     "codegraph",
     "remember",
     "about_creator",
@@ -1184,6 +1203,12 @@ pub fn unified_diff(old: &str, new: &str, label: &str) -> String {
 pub async fn run(name: &str, args: Value, ctx: &ToolCtx) -> Outcome {
     if name == "run_command" {
         return run_command(&args, ctx).await;
+    }
+    if name == "view_image" {
+        return match view_image(&args, ctx).await {
+            Ok(o) => o,
+            Err(e) => Outcome::err(format!("{e:#}")),
+        };
     }
     let name = name.to_string();
     let ctx = ctx.clone();
@@ -2053,6 +2078,50 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
 
 pub fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").chars().take(80).collect()
+}
+
+/// Let the agent "see" a local image by relaying it to the vision model.
+///
+/// read_file can only hand back bytes, so a screenshot the agent just captured
+/// (or an image it downloaded) is otherwise a dead end. This encodes the image
+/// as a data URL and asks the configured model — which must be vision-capable —
+/// to describe it, then returns that text into the loop. The main model is used
+/// unless `ocr_model` names a dedicated one. Async because it makes a network
+/// call, so it is dispatched from `run`, not the blocking path.
+async fn view_image(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
+    let path = arg_str(args, "path")?;
+    let full = resolve(ctx, &path)?;
+    if !is_image_path(&full) {
+        return Ok(Outcome::err(format!(
+            "{path} is not a supported image (png/jpeg/gif/webp/bmp/tiff/avif)"
+        )));
+    }
+    // Vision requests are large; allow a generous cap for a full-page screenshot.
+    let data_url = image_data_url(&full, ctx.cfg.max_document_bytes)?;
+    let prompt = args
+        .get("prompt")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Describe this image in detail. Transcribe any visible text verbatim.");
+
+    let model = if ctx.cfg.ocr_model.trim().is_empty() {
+        ctx.cfg.model.clone()
+    } else {
+        ctx.cfg.ocr_model.clone()
+    };
+    if model.trim().is_empty() {
+        return Ok(Outcome::err(
+            "no model configured to view images (set model or ocr_model)",
+        ));
+    }
+    let client = crate::llm::Client::with_tls(
+        ctx.cfg.base_url.trim_end_matches('/').to_string(),
+        ctx.cfg.api_key.clone(),
+        ctx.cfg.insecure_tls,
+    )?;
+    let desc = client.describe_image(&model, &data_url, prompt).await?;
+    Ok(Outcome::ok(desc, format!("viewed {path}")))
 }
 
 /// Substitute `{arg}` placeholders in a custom tool's command template with the
