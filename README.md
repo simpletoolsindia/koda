@@ -51,8 +51,8 @@ koda comes in two editions, kept on two branches:
 
 | Edition | Branch | What's different |
 |---|---|---|
-| **Official** | `master` | The standard build. Browsing uses stock Playwright. |
-| **Uncensored** | `uncensored` | Everything in Official, plus a **stealth browsing stack** ([Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)) so the `browse` tool isn't flagged by bot-detection (Cloudflare/DataDome-class fingerprinting, incl. the `Runtime.enable` CDP leak). Uses your real Google Chrome, non-headless. |
+| **Official** | `master` | The standard build. `browse` drives [agent-browser](https://www.npmjs.com/package/agent-browser), which koda ships and installs itself. |
+| **Uncensored** | `uncensored` | Everything in Official, plus a **stealth browsing stack** so the `browse` tool isn't flagged by bot-detection (Cloudflare/DataDome-class fingerprinting). Drives your real Google Chrome, non-headless. |
 
 The uncensored edition is a superset — it tracks `master` and adds the stealth
 layer on top; the two are maintained separately and not merged into each other.
@@ -89,8 +89,7 @@ Or the one-liner (clones for you) — **official** edition:
 curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
 ```
 
-…or the **uncensored** edition (stealth browsing; also installs Patchright + a
-Chromium if `npm` is present):
+…or the **uncensored** edition (stealth browsing):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/uncensored/install.sh | bash
@@ -382,8 +381,9 @@ like a command the agent runs, but the conversation context is untouched.
 default, `/settings`) adds a `browse` tool that opens a URL in a real headless
 Chromium via `agent-browser` and reads it after its JavaScript has run — for the
 single-page apps and dashboards a fetch returns empty. By default it drives the Chrome you already have (`browser_channel`), and
-`browser_headless = false` opens a visible window. Needs
-`npm i -g agent-browser && agent-browser install` (or `brew install agent-browser` / `cargo install agent-browser`).
+`browser_headless = false` opens a visible window. The engine ships with koda —
+the installer fetches it, and the first `browse` call fetches it if the installer
+did not — so there is nothing to install by hand.
 
 **Internal servers.** If your endpoint sits behind a proxy that re-signs TLS
 with a private CA, `insecure_tls = true` (globally or on one provider) accepts

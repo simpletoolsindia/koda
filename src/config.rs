@@ -290,14 +290,14 @@ pub struct Config {
     pub browser_path: String,
     /// Which browser `browse` should drive.
     ///
-    /// A Playwright channel name (`chrome`, `msedge`, `chrome-beta`) uses the
-    /// copy already installed on the machine; an absolute path drives any other
-    /// Chromium build, which is how Brave or Arc get used. Empty falls back to
-    /// the Chromium Playwright downloads for itself.
+    /// A channel name (`chrome`, `msedge`, `chrome-beta`) uses the copy already
+    /// installed on the machine; an absolute path drives any other Chromium
+    /// build, which is how Brave or Arc get used. Empty falls back to the
+    /// Chromium the engine fetches for itself.
     ///
     /// Defaults to `chrome`, because a browser you already have is the one you
-    /// meant. If it is not there, koda quietly uses the bundled Chromium rather
-    /// than failing -- the point is to read the page.
+    /// meant. If it is not there, koda quietly uses the engine's own Chromium
+    /// rather than failing -- the point is to read the page.
     #[serde(default = "default_browser_channel")]
     pub browser_channel: String,
     /// Run the browser without a window. On by default, because that is what

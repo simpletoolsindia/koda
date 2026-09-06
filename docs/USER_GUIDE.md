@@ -237,25 +237,32 @@ for anything that renders client-side — you get an empty shell, a spinner, or 
 cookie wall. The **browser** setting adds a `browse` tool that opens the URL in a
 real headless Chromium and reads the page after its JavaScript has run.
 
-It is **off by default**: it needs Node and Playwright installed and is far
-slower than a fetch. Turn it on in `/settings` → **browser**, or:
+It is **off by default**: driving a real browser is far slower than a fetch.
+Turn it on in `/settings` → **browser**, or:
 
 ```toml
 browser = true
-browser_path = ""   # only if koda cannot find agent-browser itself
+browser_path = ""   # only to point at your own copy of the engine
 ```
 
-Install what it needs:
+**The engine ships with koda.** `browse` drives [agent-browser], a
+self-contained native binary. The installer fetches it (`koda browser install`),
+and if it did not, the first `browse` call does — one pinned version, checked
+against a pinned hash before anything is written, unpacked into koda's own
+directory. No npm, no Node, nothing to install by hand:
 
 ```sh
-npm i -g agent-browser && agent-browser install
-# or: brew install agent-browser / cargo install agent-browser
+koda browser install   # fetch or update it explicitly
+koda browser status    # which engine koda would use, and where it came from
 ```
 
-koda looks for `agent-browser` in `browser_path` first, then your system PATH,
-then common locations (`/opt/homebrew/bin`, `~/.cargo/bin`, `~/.npm-global/bin`, `/usr/local/bin`).
-If none of those has it, `browse` says so and names the install command rather than
-failing obscurely.
+koda looks for the engine in `browser_path` first, then its own copy, then your
+system PATH, then common locations (`/opt/homebrew/bin`, `~/.cargo/bin`,
+`~/.npm-global/bin`, `/usr/local/bin`) — so a copy you installed yourself still
+works. `KODA_AGENT_BROWSER_URL` points the download at a mirror for an
+air-gapped install; the hash check still applies.
+
+[agent-browser]: https://www.npmjs.com/package/agent-browser
 
 ### Which browser, and whether you see it
 
