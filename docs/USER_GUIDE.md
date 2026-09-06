@@ -145,7 +145,11 @@ its default:
 | `max_steps_hard` | `96` | Absolute ceiling on steps per turn once `step_check` starts extending the budget. |
 | `auto_approve` | `false` | Skip approval prompts (equivalent to `auto_tier = full`). |
 | `auto_tier` | `ask` | Tiered autonomy: `ask`, `write`, or `full`. |
-| `sandbox` | `true` | Confine file tools to the workspace root. |
+| `sandbox` | `true` | Confine file tools to the workspace root (symlinks out of it included). |
+| `confirm_destructive` | `true` | Ask before irreversible shell commands even under auto-approve. |
+| `learning_daily` | `true` | Consolidate learned rules once a day. |
+| `learning_promote_days` | `3` | Distinct days a candidate must recur before it is promoted. |
+| `learning_retire_days` | `30` | Days without reinforcement before an auto-promoted rule is retired. |
 | `shell` | `/bin/sh` | Shell used for commands. |
 | `command_timeout_ms` | `120000` | Command timeout. |
 | `max_file_bytes` | `262144` | Max bytes read from a file (also caps attached images). |
@@ -160,6 +164,7 @@ its default:
 | `sessions` | `true` | Record each session to `<project>/.koda/sessions`. |
 | `memory` | `true` | Carry notes and command outcomes in `<project>/.koda/memory.md`. |
 | `codegraph` | `true` | Scan the project into a symbol graph on open. |
+| `codegraph_refresh_ms` | `15000` | Re-index files changed outside koda this often; 0 disables the sweep. |
 | `web_search` | `false` | Allow the `web_search` tool. |
 | `searx_url` | `""` | Base URL of a SearXNG instance with JSON output enabled. |
 | `search_results` | `6` | Results per search. |
@@ -544,7 +549,10 @@ End a comment with a trigger token:
 ```
 
 koda rescans the workspace (gitignore-aware) every `watch_interval_ms` and only
-acts when it is idle — no turn running, nothing queued, no prompt open.
+acts when it is idle — no turn running, nothing queued, no prompt open. Only
+files whose modification time or size changed since the last sweep are actually
+read, so watching a large project costs a directory walk rather than a full
+read of every source file, several times a minute.
 
 ## Debug capture
 
@@ -861,11 +869,19 @@ file under `<project>/.koda/learning/` you can read, edit, or delete.
   over reinventing an equivalent,"* so koda reaches for your project's own tools
   instead of generic ones. This runs once per session from the code graph, with
   no model involved.
-- **Human-in-the-loop promotion** — candidates never touch the prompt on their
-  own. Run `/learn` to review them, then `/learn accept <n>` (or `/learn all`) to
-  accept, or `/learn reject <n>` to drop one. Accepted rules are written to
-  `.koda/learning/rules.md` and injected into the system prompt so koda follows
-  them automatically from then on.
+- **Human-in-the-loop promotion** — run `/learn` to review candidates, then
+  `/learn accept <n>` (or `/learn all`) to accept, or `/learn reject <n>` to drop
+  one. Accepted rules are written to `.koda/learning/rules.md` and injected into
+  the system prompt so koda follows them automatically from then on.
+- **Daily consolidation** (`learning_daily = true`) — once a calendar day koda
+  mines the log and promotes candidates that have been re-derived on
+  `learning_promote_days` (default 3) *different* days: a habit, not one busy
+  afternoon. Auto-promoted rules are marked `auto` in `rules.md`, take effect
+  immediately, and are recorded in `.koda/learning/journal.md` — a plain,
+  dated record of what koda has learned about your project. If one stops being
+  reinforced for `learning_retire_days` (default 30) it drops back to a
+  candidate. Rules you accepted yourself are never retired. Set
+  `learning_daily = false` to keep promotion entirely manual.
 - **Kill switch** — set `learning = false`, or delete `.koda/learning/`, and the
   whole loop is gone with no residue. If you edit or delete a rule, that is
   authoritative.

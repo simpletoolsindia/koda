@@ -16,7 +16,7 @@
 //! text) so an unchanged file is never re-processed.
 
 use ignore::WalkBuilder;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// What kind of action a trigger asks for.
@@ -49,11 +49,41 @@ pub struct Watcher {
     /// When non-empty, only these files are watched (set via `/watch @file`).
     /// Empty means watch the whole workspace (the original behaviour).
     watched: Vec<PathBuf>,
+    /// (mtime, size) per file at the last sweep. A file whose stamp is
+    /// unchanged cannot have gained a trigger, so it is never re-read.
+    ///
+    /// This is what makes watch mode affordable: the scan runs every few
+    /// hundred milliseconds, and it used to read *every* text file in the
+    /// workspace each time — the whole project, several times a minute.
+    stamps: HashMap<PathBuf, Stamp>,
+    /// How many files this watcher has actually read, for the test that keeps
+    /// the sweep incremental.
+    #[cfg(test)]
+    reads: std::cell::Cell<usize>,
+    /// Triggers found per file, refreshed only when that file changes. Keeping
+    /// them means skipping a file does not lose the triggers it holds: a sweep
+    /// still considers every known trigger, it just does not re-read the file
+    /// to rediscover them.
+    found: HashMap<PathBuf, Vec<Trigger>>,
+}
+
+/// A file's identity for change detection: modification time and size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    mtime: std::time::SystemTime,
+    len: u64,
 }
 
 impl Watcher {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Files read so far. Test-only: the point of the stamp cache is that this
+    /// stops growing once the tree is quiet.
+    #[cfg(test)]
+    pub fn reads(&self) -> usize {
+        self.reads.get()
     }
 
     /// Add a specific file to the watch list. Returns false if already present.
@@ -88,19 +118,71 @@ impl Watcher {
 
     /// Scan and return the first not-yet-dispatched trigger. When a scoped watch
     /// list is set, only those files are checked; otherwise the whole workspace.
-    pub fn scan(&self, root: &Path) -> Option<Trigger> {
+    pub fn scan(&mut self, root: &Path) -> Option<Trigger> {
         let triggers = if self.watched.is_empty() {
-            scan_all(root)
+            self.sweep(root)
         } else {
+            let watched = self.watched.clone();
             let mut out = Vec::new();
-            for p in &self.watched {
-                out.extend(scan_file(p));
+            for p in &watched {
+                out.extend(self.triggers_in(p));
             }
             out
         };
         triggers
             .into_iter()
             .find(|t| !self.seen.contains(&Self::key(t)))
+    }
+
+    /// Walk the workspace and return every known trigger, re-reading only the
+    /// files that changed since the last sweep.
+    fn sweep(&mut self, root: &Path) -> Vec<Trigger> {
+        let walk = WalkBuilder::new(root)
+            .hidden(false)
+            .git_ignore(true)
+            .max_filesize(Some(512 * 1024))
+            .build();
+        let mut out = Vec::new();
+        let mut live: HashSet<PathBuf> = HashSet::new();
+        for dent in walk.flatten() {
+            if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = dent.path();
+            if !is_texty(path) {
+                continue;
+            }
+            live.insert(path.to_path_buf());
+            out.extend(self.triggers_in(path));
+        }
+        // Forget files that are gone, so the maps track the tree rather than
+        // growing for the life of the session.
+        self.stamps.retain(|p, _| live.contains(p));
+        self.found.retain(|p, _| live.contains(p));
+        out
+    }
+
+    /// The triggers in one file, reading it only if its stamp moved.
+    fn triggers_in(&mut self, path: &Path) -> Vec<Trigger> {
+        let stamp = std::fs::metadata(path).ok().and_then(|m| {
+            Some(Stamp {
+                mtime: m.modified().ok()?,
+                len: m.len(),
+            })
+        });
+        if let (Some(stamp), Some(cached)) = (stamp, self.found.get(path)) {
+            if self.stamps.get(path) == Some(&stamp) {
+                return cached.clone();
+            }
+        }
+        #[cfg(test)]
+        self.reads.set(self.reads.get() + 1);
+        let triggers = scan_file(path);
+        if let Some(stamp) = stamp {
+            self.stamps.insert(path.to_path_buf(), stamp);
+        }
+        self.found.insert(path.to_path_buf(), triggers.clone());
+        triggers
     }
 }
 
@@ -163,40 +245,6 @@ fn clean_comment(s: &str) -> String {
         .trim_end_matches("*/")
         .trim()
         .to_string()
-}
-
-/// Walk the workspace (respecting .gitignore) and collect every trigger.
-fn scan_all(root: &Path) -> Vec<Trigger> {
-    let mut out = Vec::new();
-    let walk = WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .max_filesize(Some(512 * 1024))
-        .build();
-    for dent in walk.flatten() {
-        if !dent.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let path = dent.path();
-        if !is_texty(path) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for (i, line) in text.lines().enumerate() {
-            if let Some((kind, instruction)) = detect(line) {
-                out.push(Trigger {
-                    path: path.to_path_buf(),
-                    kind,
-                    instruction,
-                    line: i + 1,
-                    raw: line.to_string(),
-                });
-            }
-        }
-    }
-    out
 }
 
 /// Scan a single file for triggers (used by scoped `/watch @file`).
@@ -296,6 +344,43 @@ mod tests {
     #[test]
     fn empty_instruction_is_not_a_trigger() {
         assert!(detect("# AI!").is_none());
+    }
+
+    /// Watch mode polls every few hundred milliseconds. Re-reading the whole
+    /// workspace each time is what made it expensive, so an unchanged file must
+    /// not be read twice — while a trigger in it is still found.
+    #[test]
+    fn an_unchanged_file_is_not_read_again() {
+        let dir = std::env::temp_dir().join(format!("koda-watch-perf-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..40 {
+            std::fs::write(dir.join(format!("f{i}.rs")), "fn main() {}\n").unwrap();
+        }
+        std::fs::write(dir.join("hot.rs"), "// add a docstring here  AI!\n").unwrap();
+
+        let mut w = Watcher::new();
+        let first = w
+            .scan(&dir)
+            .expect("the trigger is found on the first sweep");
+        assert_eq!(first.kind, Kind::Do);
+        w.mark(&first);
+
+        // Second sweep: nothing changed, so nothing is re-read — and the
+        // trigger is still known (it is simply already seen).
+        let before = w.reads();
+        assert!(
+            w.scan(&dir).is_none(),
+            "an already-dispatched trigger fired twice"
+        );
+        assert_eq!(w.reads(), before, "an unchanged sweep read files again");
+
+        // A file that actually changes is picked up.
+        std::fs::write(dir.join("f3.rs"), "// explain this function  AI?\n").unwrap();
+        let next = w.scan(&dir).expect("a changed file is re-read");
+        assert_eq!(next.kind, Kind::Ask);
+        assert!(w.reads() > before, "the changed file was not read");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

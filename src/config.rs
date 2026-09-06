@@ -364,6 +364,11 @@ pub struct Config {
     /// Scan the project into a symbol graph on open, so the model can ask where
     /// something lives instead of grepping for it.
     pub codegraph: bool,
+    /// How often (ms) to sweep the working tree and re-index what changed
+    /// outside koda — your editor, `git checkout`, a build step. 0 disables the
+    /// sweep; koda's own writes are re-indexed either way. The sweep backs off
+    /// on its own when a tree is big enough that the walk is slow.
+    pub codegraph_refresh_ms: u64,
 
     /// Allow the `web_search` tool. Off unless a SearXNG URL is set.
     pub web_search: bool,
@@ -586,6 +591,7 @@ impl Default for Config {
             learning_promote_days: 3,
             learning_retire_days: 30,
             codegraph: true,
+            codegraph_refresh_ms: 15_000,
             web_search: false,
             search_backend: default_backend(),
             searx_url: String::new(),
@@ -947,6 +953,10 @@ learning_retire_days = 30
 # Scan the project on open into a symbol graph (definitions, references,
 # imports) and expose it to the model via the `codegraph` tool.
 codegraph = true
+# Re-index files changed outside koda (your editor, git checkout, codegen) every
+# this many ms. 0 turns the sweep off. Only changed files are read, and the
+# interval backs off automatically on a large tree.
+codegraph_refresh_ms = 15000
 
 # Web search through your own SearXNG instance. That instance needs `json` in
 # `search.formats` in its settings.yml. Toggle live with /websearch.

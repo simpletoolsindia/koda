@@ -367,10 +367,33 @@ impl Agent {
         if cfg.codegraph {
             let slot = graph.clone();
             let scan_root = root.clone();
+            let every = cfg.codegraph_refresh_ms;
             std::thread::spawn(move || {
                 let g = crate::graph::scan(&scan_root);
                 if let Ok(mut w) = slot.write() {
                     *w = Some(g);
+                }
+                if every == 0 {
+                    return;
+                }
+                // Then keep it current. Files change outside koda constantly —
+                // your editor, a rebase, a code generator — and a graph that
+                // silently describes the project as it was is worse than none,
+                // because the model believes it.
+                let base = std::time::Duration::from_millis(every.max(1_000));
+                loop {
+                    std::thread::sleep(base);
+                    let Ok(mut w) = slot.write() else { return };
+                    let Some(g) = w.as_mut() else { continue };
+                    let done = g.refresh(&scan_root);
+                    drop(w);
+                    // On a tree big enough that the walk itself is slow, sweep
+                    // proportionally less often: never spend more than ~5% of
+                    // the time walking.
+                    let cost = std::time::Duration::from_millis(done.ms as u64 * 20);
+                    if cost > base {
+                        std::thread::sleep(cost - base);
+                    }
                 }
             });
         }
@@ -2746,6 +2769,21 @@ impl Agent {
                     view: tools::ToolView::Plain,
                 };
             }
+        }
+        // Answer from the working tree as it is now, not as it was at startup.
+        // Only files whose (mtime, size) changed are re-read, so this is a walk
+        // and a handful of parses even on a big repo.
+        if self.cfg.codegraph_refresh_ms > 0 {
+            let slot = self.graph.clone();
+            let root = self.ctx.root.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut w) = slot.write() {
+                    if let Some(g) = w.as_mut() {
+                        g.refresh(&root);
+                    }
+                }
+            })
+            .await;
         }
         let guard = self.graph.read().ok();
         let Some(Some(g)) = guard.as_deref() else {

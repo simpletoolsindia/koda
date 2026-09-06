@@ -37,8 +37,14 @@ pub fn base_prompt() -> &'static str {
 /// Functional guardrail layered onto every prompt while the tool is enabled.
 /// Keep this outside `BASE`: a custom system prompt replaces the base, but must
 /// not accidentally remove the code-analysis workflow that makes koda precise.
-const CODEGRAPH_GUIDANCE: &str =
-    "\n\nCODE ANALYSIS: For questions about where a symbol is defined/used, dependencies, or project structure, call `codegraph` FIRST. Use `search` or `find_files` only for free text or as a fallback.";
+const CODEGRAPH_GUIDANCE: &str = "\n\n\
+CODE ANALYSIS — use `codegraph` FIRST, before search/read, whenever the question is about code structure:
+- Where is X defined, and what would break if I change it? -> codegraph query=symbol name=X
+- What does this file define, import, and who depends on it? -> codegraph query=file path=...
+- Unfamiliar project, or \"where does this live\"? -> codegraph query=overview
+Do this before editing an existing symbol: the graph names every file that uses it, which is what makes a change complete instead of local.
+The graph is kept current automatically, including files changed outside koda.
+`search`/`find_files` are for free text (a message, a TODO, a config value) or when the graph has no answer.";
 
 const TEXT_PROTOCOL: &str = "\
 Tool calls use this exact JSON format, one per message, at the very end of your reply:
@@ -291,8 +297,11 @@ mod tests {
             Mode::Execute,
         );
         assert!(prompt.starts_with("Custom concise reviewer."));
-        assert!(prompt.contains("CODE ANALYSIS:"), "{prompt}");
-        assert!(prompt.contains("call `codegraph` FIRST"), "{prompt}");
+        assert!(prompt.contains("CODE ANALYSIS"), "{prompt}");
+        assert!(prompt.contains("use `codegraph` FIRST"), "{prompt}");
+        // The workflow has to name the calls, not just the tool: a local model
+        // that is told "use codegraph" without a shape reaches for grep.
+        assert!(prompt.contains("query=symbol"), "{prompt}");
     }
 
     #[test]

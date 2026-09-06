@@ -40,9 +40,53 @@ pub struct Graph {
     pub imports: BTreeMap<String, Vec<String>>,
     /// language -> file count
     pub languages: BTreeMap<String, usize>,
+    /// file -> (mtime seconds, size) as of indexing. What makes `refresh` able
+    /// to tell, without reading anything, which files actually changed.
+    pub stamps: BTreeMap<String, Stamp>,
     pub files: usize,
     pub scanned_ms: u128,
     pub truncated: bool,
+}
+
+/// A file's identity for change detection: modification time and size. Cheap to
+/// take (one stat, which the directory walk already does) and enough to catch
+/// any edit that matters. Two writes within the same second that keep the size
+/// identical are the known blind spot; koda's own writes are re-indexed
+/// directly, so this only has to catch outside edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stamp {
+    pub mtime: u64,
+    pub len: u64,
+}
+
+impl Stamp {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            mtime,
+            len: meta.len(),
+        }
+    }
+}
+
+/// What one `refresh` changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Refreshed {
+    pub changed: usize,
+    pub removed: usize,
+    /// How long the sweep took, so the caller can back off on a huge tree.
+    pub ms: u128,
+}
+
+impl Refreshed {
+    pub fn any(&self) -> bool {
+        self.changed > 0 || self.removed > 0
+    }
 }
 
 fn language_of(path: &Path) -> Option<&'static str> {
@@ -814,6 +858,7 @@ pub fn scan(root: &Path) -> Graph {
 
     // Phase 1 (I/O, single thread): walk the tree and read eligible files.
     let mut inputs: Vec<(String, &'static str, String)> = Vec::new();
+    let mut stamps: Vec<(String, Stamp)> = Vec::new();
     for entry in walk.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
@@ -825,6 +870,7 @@ pub fn scan(root: &Path) -> Graph {
             g.truncated = true;
             break;
         }
+        let stamp = entry.metadata().ok().as_ref().map(Stamp::of);
         let Ok(bytes) = std::fs::read(entry.path()) else {
             continue;
         };
@@ -838,8 +884,12 @@ pub fn scan(root: &Path) -> Graph {
             .unwrap_or(entry.path())
             .to_string_lossy()
             .to_string();
+        if let Some(stamp) = stamp {
+            stamps.push((rel.clone(), stamp));
+        }
         inputs.push((rel, lang, text));
     }
+    g.stamps = stamps.into_iter().collect();
 
     // Phase 2 (CPU, parallel): parse files across worker threads. Parsing is the
     // hot cost; splitting it over the cores turns a large repo scan from serial
@@ -915,6 +965,7 @@ impl Graph {
             }
         }
         self.imports.remove(rel);
+        self.stamps.remove(rel);
         // This file's mentions of other symbols.
         for files in self.refs.values_mut() {
             files.remove(rel);
@@ -932,11 +983,15 @@ impl Graph {
             .unwrap_or(abs_path)
             .to_string_lossy()
             .to_string();
+        let was_known = self.by_file.contains_key(&rel) || self.stamps.contains_key(&rel);
         self.remove_file(&rel);
         let Some(lang) = language_of(abs_path) else {
             return;
         };
         let Ok(bytes) = std::fs::read(abs_path) else {
+            if was_known {
+                self.files = self.files.saturating_sub(1);
+            }
             return; // deleted/unreadable: leave it removed
         };
         if bytes.len() > MAX_FILE_BYTES || bytes.iter().take(4000).any(|b| *b == 0) {
@@ -944,6 +999,13 @@ impl Graph {
         }
         let text = String::from_utf8_lossy(&bytes);
         let fp = parse_file(rel.clone(), lang, &text);
+        if !was_known {
+            self.files += 1;
+            *self.languages.entry(lang.to_string()).or_insert(0) += 1;
+        }
+        if let Ok(meta) = std::fs::metadata(abs_path) {
+            self.stamps.insert(rel.clone(), Stamp::of(&meta));
+        }
 
         for (name, kind, line) in fp.defs {
             self.defs.entry(name.clone()).or_default().push(Def {
@@ -973,6 +1035,81 @@ impl Graph {
                 }
             }
         }
+    }
+
+    /// Bring the graph back in line with the working tree.
+    ///
+    /// koda's own writes are re-indexed as they happen, but the user's editor,
+    /// `git checkout`, a code generator or a build step change files behind its
+    /// back — and a code graph that quietly describes the project as it was an
+    /// hour ago is worse than no code graph, because the model trusts it.
+    ///
+    /// This walks the tree and compares (mtime, size) against what was indexed:
+    /// only files that actually changed are re-read, and files that disappeared
+    /// are dropped. The walk itself is the cost — no source is read unless it
+    /// changed — so it is cheap enough to run between turns.
+    pub fn refresh(&mut self, root: &Path) -> Refreshed {
+        let started = Instant::now();
+        let mut out = Refreshed::default();
+        let walk = ignore::WalkBuilder::new(root)
+            .hidden(true)
+            .git_ignore(true)
+            .require_git(false)
+            .git_global(false)
+            .filter_entry(|e| !is_vendor_dir(&e.file_name().to_string_lossy()))
+            .build();
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for entry in walk.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            if language_of(path).is_none() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            seen.insert(rel.clone());
+            let Some(stamp) = entry.metadata().ok().as_ref().map(Stamp::of) else {
+                continue;
+            };
+            if self.stamps.get(&rel) == Some(&stamp) {
+                continue;
+            }
+            // A new file counts against the same ceiling a full scan uses, so a
+            // generated tree cannot grow the graph without bound.
+            if !self.stamps.contains_key(&rel) && self.files >= MAX_FILES {
+                self.truncated = true;
+                continue;
+            }
+            self.update_file(root, path);
+            out.changed += 1;
+        }
+
+        let gone: Vec<String> = self
+            .stamps
+            .keys()
+            .filter(|k| !seen.contains(*k))
+            .cloned()
+            .collect();
+        for rel in gone {
+            self.remove_file(&rel);
+            self.files = self.files.saturating_sub(1);
+            out.removed += 1;
+        }
+
+        out.ms = started.elapsed().as_millis();
+        if out.any() {
+            crate::tel_debug!(
+                "graph", "refreshed",
+                "changed" => out.changed, "removed" => out.removed, "ms" => out.ms,
+            );
+        }
+        out
     }
 
     /// A short map of the project for the model to orient itself.
@@ -1438,6 +1575,58 @@ fn is_distinctive_idiom_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The graph is only trustworthy if it tracks the working tree, including
+    /// changes koda did not make: an editor save, a `git checkout`, a generated
+    /// file, a deletion. And the sweep must read only what actually changed —
+    /// that is what makes it cheap enough to run between turns.
+    #[test]
+    fn refresh_picks_up_outside_changes_and_deletions() {
+        let dir = std::env::temp_dir().join(format!("koda-graph-refresh-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "pub fn alpha() {}\n").unwrap();
+        std::fs::write(dir.join("src/b.rs"), "pub fn beta() { alpha(); }\n").unwrap();
+
+        let mut g = scan(&dir);
+        assert!(g.defs.contains_key("alpha") && g.defs.contains_key("beta"));
+        let files = g.files;
+
+        // Nothing changed: the sweep must be a no-op, not a rescan.
+        let quiet = g.refresh(&dir);
+        assert_eq!((quiet.changed, quiet.removed), (0, 0), "{quiet:?}");
+
+        // Someone edits a file outside koda.
+        std::fs::write(dir.join("src/a.rs"), "pub fn alpha_renamed() {}\n").unwrap();
+        // A second-resolution mtime needs a size change or a tick to be seen;
+        // the rename above changes the size, which is why size is in the stamp.
+        let done = g.refresh(&dir);
+        assert_eq!(done.changed, 1, "{done:?}");
+        assert!(g.defs.contains_key("alpha_renamed"), "new symbol missing");
+        assert!(
+            !g.defs.contains_key("alpha"),
+            "old symbol still in the graph"
+        );
+
+        // A new file appears (codegen, git checkout).
+        std::fs::write(dir.join("src/c.rs"), "pub fn gamma() {}\n").unwrap();
+        let done = g.refresh(&dir);
+        assert_eq!((done.changed, done.removed), (1, 0), "{done:?}");
+        assert!(g.defs.contains_key("gamma"));
+        assert_eq!(g.files, files + 1, "file count tracks additions");
+
+        // And one is deleted.
+        std::fs::remove_file(dir.join("src/b.rs")).unwrap();
+        let done = g.refresh(&dir);
+        assert_eq!((done.changed, done.removed), (0, 1), "{done:?}");
+        assert!(!g.defs.contains_key("beta"), "deleted symbol still present");
+        assert_eq!(g.files, files, "file count tracks deletions");
+        assert!(
+            !g.refs.values().any(|f| f.contains("src/b.rs")),
+            "a deleted file still appears as a reference"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// The reported /learn output was mostly language vocabulary: "`undefined`
     /// is a load-bearing fn (used across 2026 files)", `toString`, `useState`,
