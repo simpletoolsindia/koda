@@ -265,17 +265,16 @@ pub struct Config {
     #[serde(default)]
     pub insecure_tls: bool,
 
-    /// Let the agent open pages in a real browser (Playwright).
+    /// Let the agent open pages in a real browser (`agent-browser` by Vercel Labs).
     ///
-    /// Off by default: it needs Node and Playwright installed, launches a real
-    /// Chromium, and is far slower than `web_fetch`. Worth it when the page only
-    /// exists after its JavaScript has run, which is most of the modern web.
+    /// Uses the native `agent-browser` CLI to automate Chromium via CDP with
+    /// accessibility-tree snapshots, form filling, and fast native execution.
     #[serde(default)]
     pub browser: bool,
-    /// Where Playwright's `node_modules` lives, when koda cannot find it.
+    /// Custom path to the `agent-browser` binary, when not in standard PATH.
     ///
-    /// Empty means look in the usual places: the project, the global npm root,
-    /// then the npx cache. Set it when Playwright is somewhere else.
+    /// Empty means look in standard places: PATH, `/opt/homebrew/bin/agent-browser`,
+    /// `/usr/local/bin/agent-browser`, or `~/.cargo/bin/agent-browser`.
     #[serde(default)]
     pub browser_path: String,
     /// Which browser `browse` should drive.
@@ -296,6 +295,19 @@ pub struct Config {
     /// share the same profile, so a session survives into later ones.
     #[serde(default = "yes")]
     pub browser_headless: bool,
+    /// Browser-use style interactive navigation and exploration (clickable element
+    /// indexing, click, type, press keys, scroll, search). When off, browse reverts
+    /// to simple static read/screenshot/download.
+    #[serde(default = "yes")]
+    pub browser_interactive: bool,
+    /// Draw visual bounding boxes and numbered index badges on screenshots in
+    /// interactive browse mode, so vision models see the exact element numbers.
+    #[serde(default = "yes")]
+    pub browser_highlight: bool,
+    /// Keep the browser instance open across tool calls within a session via CDP
+    /// remote debugging, preserving login sessions, tabs, and page state.
+    #[serde(default = "yes")]
+    pub browser_session: bool,
 
     /// Whether the model accepts images: "auto" | "on" | "off".
     ///
@@ -536,6 +548,9 @@ impl Default for Config {
             browser_path: String::new(),
             browser_headless: true,
             browser_channel: default_browser_channel(),
+            browser_interactive: true,
+            browser_highlight: true,
+            browser_session: true,
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,

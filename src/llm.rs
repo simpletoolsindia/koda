@@ -522,6 +522,7 @@ impl Client {
             "model": model,
             "stream": false,
             "temperature": 0.0,
+            "max_tokens": 1024,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -542,15 +543,24 @@ impl Client {
             return Err(classify_status(status, &text, model).into());
         }
         let v: Value = serde_json::from_str(&text).context("parsing vision OCR response")?;
-        let content = v
+        let msg = v
             .get("choices")
             .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
+            .and_then(|c| c.get("message"));
+        let mut content = msg
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
+        if content.is_empty() {
+            if let Some(reasoning) = msg
+                .and_then(|m| m.get("reasoning_content"))
+                .and_then(|c| c.as_str())
+            {
+                content = reasoning.trim().to_string();
+            }
+        }
         if content.is_empty() {
             return Err(anyhow::anyhow!(
                 "empty response from vision model `{model}`"

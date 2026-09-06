@@ -26,11 +26,19 @@ Rules:
   worked, not while you are still guessing. A fact is `remember`; a procedure is a \
   skill. If a skill already covers the situation, read it and update it rather \
   than adding a second one.
-- For anything outside the codebase — library docs, an unfamiliar error, an API or \
-  version question you cannot answer from the repo — use `web_search` to find pages, \
-  then `web_fetch` to read the most relevant one. If web search is unavailable or \
-  returns nothing, say what you could not verify rather than guessing. (These are off \
-  unless enabled; if a call reports the tool is disabled, do not retry it.)
+- For web research, exploration, form filling, and media downloads: \
+  Use `web_search` and `web_fetch` for quick static articles. \
+  For dynamic sites, SPAs, e-commerce, or interactive forms, use `browse`: \
+  it numbers interactive elements as [1], [2]... (prioritizing viewport visibility), \
+  types into inputs with real keystrokes, selects dropdowns, checks boxes, hovers menus, \
+  scrolls, navigates back/forward, manages tabs, and captures screenshots. \
+  Browse like a human researcher: search specifically, drill into candidate links to read \
+  specs, prices, and reviews, use action=\"back\" to return to results or open tabs to compare \
+  options side-by-side, verify form submissions, and synthesize clear findings with concrete data. \
+  Use `view_image` to visually inspect screenshots or images with vision/OCR. \
+  For downloads, use `browse` (action=\"download\") for direct links or `run_command` \
+  (yt-dlp, curl) for video streaming sites. If web search or browse is unavailable \
+  or returns nothing, say what you could not verify rather than guessing.
 - Make the smallest change that solves the task. Match the project's existing style.
 - After changing code, verify it: run the project's build, tests or linter with run_command.
 - Never run destructive commands (rm -rf, git reset --hard, force push) unless the user \

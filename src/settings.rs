@@ -37,6 +37,9 @@ pub enum Row {
     Browser,
     BrowserHeadless,
     BrowserChannel,
+    BrowserInteractive,
+    BrowserHighlight,
+    BrowserSession,
     Ocr,
     OcrModel,
     Codegraph,
@@ -50,7 +53,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 29] = [
+    pub const ALL: [Row; 32] = [
         Row::Provider,
         Row::InsecureTls,
         Row::Mode,
@@ -71,6 +74,9 @@ impl Row {
         Row::Browser,
         Row::BrowserHeadless,
         Row::BrowserChannel,
+        Row::BrowserInteractive,
+        Row::BrowserHighlight,
+        Row::BrowserSession,
         Row::Ocr,
         Row::OcrModel,
         Row::Codegraph,
@@ -104,6 +110,9 @@ impl Row {
             Row::Browser => "browser",
             Row::BrowserHeadless => "browser window",
             Row::BrowserChannel => "browser build",
+            Row::BrowserInteractive => "browser navigation",
+            Row::BrowserHighlight => "browser highlights",
+            Row::BrowserSession => "browser session",
             Row::Ocr => "image ocr",
             Row::OcrModel => "ocr vision model",
             Row::Codegraph => "code graph",
@@ -135,9 +144,12 @@ impl Row {
             Row::SearchBackend => "2) duckduckgo (no setup) or searxng",
             Row::SearxUrl => "3) enter to edit your SearXNG address",
             Row::WebFetch => "let the agent GET a URL and read it as text",
-            Row::Browser => "open pages in a real browser (needs playwright)",
+            Row::Browser => "open pages in a real browser (agent-browser)",
             Row::BrowserHeadless => "hidden · visible — show the window to watch or sign in",
             Row::BrowserChannel => "chrome · msedge · bundled — which browser to drive",
+            Row::BrowserInteractive => "browser-use interactive exploration (click/type/keys/scroll)",
+            Row::BrowserHighlight => "draw bounding boxes and element badge numbers on screenshots",
+            Row::BrowserSession => "keep browser session alive across tool calls via CDP",
             Row::Ocr => "OCR images (tesseract, or the model below) when the model can't see them",
             Row::OcrModel => {
                 "enter a vision model to try before tesseract · empty = tesseract only"
@@ -332,6 +344,9 @@ impl Settings {
                 };
                 self.cfg.browser_channel = CH[next].to_string();
             }
+            Row::BrowserInteractive => self.cfg.browser_interactive = !self.cfg.browser_interactive,
+            Row::BrowserHighlight => self.cfg.browser_highlight = !self.cfg.browser_highlight,
+            Row::BrowserSession => self.cfg.browser_session = !self.cfg.browser_session,
             Row::Ocr => self.cfg.ocr = !self.cfg.ocr,
             Row::Codegraph => self.cfg.codegraph = !self.cfg.codegraph,
             Row::Debug => {
@@ -492,6 +507,9 @@ impl Settings {
                     "visible".to_string()
                 }
             }
+            Row::BrowserInteractive => on(self.cfg.browser_interactive),
+            Row::BrowserHighlight => on(self.cfg.browser_highlight),
+            Row::BrowserSession => on(self.cfg.browser_session),
             Row::Ocr => on(self.cfg.ocr),
             Row::OcrModel => {
                 if self.cfg.ocr_model.is_empty() {

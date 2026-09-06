@@ -1480,7 +1480,28 @@ impl Agent {
         } else {
             None
         };
-        let outcome = self.execute_inner(call, tx).await;
+        let notify = self.notify.clone();
+        let outcome = if self.cancelled() {
+            tools::Outcome {
+                ok: false,
+                content: "ERROR: tool execution was cancelled by user (ctrl+c).".into(),
+                summary: format!("{}: cancelled", call.function.name),
+                view: tools::ToolView::Plain,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = notify.notified() => {
+                    tools::Outcome {
+                        ok: false,
+                        content: "ERROR: tool execution was cancelled by user (ctrl+c).".into(),
+                        summary: format!("{}: cancelled", call.function.name),
+                        view: tools::ToolView::Plain,
+                    }
+                }
+                res = self.execute_inner(call, tx) => res,
+            }
+        };
         crate::trace::finish_tool(
             step,
             crate::trace::ToolStep {

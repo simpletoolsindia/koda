@@ -1660,6 +1660,9 @@ impl App {
             || cfg.browser != self.cfg.browser
             || cfg.browser_headless != self.cfg.browser_headless
             || cfg.browser_channel != self.cfg.browser_channel
+            || cfg.browser_interactive != self.cfg.browser_interactive
+            || cfg.browser_highlight != self.cfg.browser_highlight
+            || cfg.browser_session != self.cfg.browser_session
             || cfg.ocr != self.cfg.ocr
             || cfg.ocr_model != self.cfg.ocr_model
             || cfg.vision != self.cfg.vision

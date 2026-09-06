@@ -380,10 +380,10 @@ like a command the agent runs, but the conversation context is untouched.
 
 **Live pages.** `web_fetch` is a plain GET; the **browser** setting (off by
 default, `/settings`) adds a `browse` tool that opens a URL in a real headless
-Chromium via Playwright and reads it after its JavaScript has run — for the
+Chromium via `agent-browser` and reads it after its JavaScript has run — for the
 single-page apps and dashboards a fetch returns empty. By default it drives the Chrome you already have (`browser_channel`), and
 `browser_headless = false` opens a visible window. Needs
-`npm i -D playwright && npx playwright install chromium`.
+`npm i -g agent-browser && agent-browser install` (or `brew install agent-browser` / `cargo install agent-browser`).
 
 **Internal servers.** If your endpoint sits behind a proxy that re-signs TLS
 with a private CA, `insecure_tls = true` (globally or on one provider) accepts

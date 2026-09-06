@@ -235,19 +235,19 @@ slower than a fetch. Turn it on in `/settings` → **browser**, or:
 
 ```toml
 browser = true
-browser_path = ""   # only if koda cannot find Playwright itself
+browser_path = ""   # only if koda cannot find agent-browser itself
 ```
 
 Install what it needs:
 
 ```sh
-npm i -D playwright && npx playwright install chromium
+npm i -g agent-browser && agent-browser install
+# or: brew install agent-browser / cargo install agent-browser
 ```
 
-koda looks for Playwright in `browser_path` first, then the project's
-`node_modules`, then the global npm root, then the npx cache — which is usually
-where it is, because `npx playwright` is how most people first run it. If none
-of those has it, `browse` says so and names the install command rather than
+koda looks for `agent-browser` in `browser_path` first, then your system PATH,
+then common locations (`/opt/homebrew/bin`, `~/.cargo/bin`, `~/.npm-global/bin`, `/usr/local/bin`).
+If none of those has it, `browse` says so and names the install command rather than
 failing obscurely.
 
 ### Which browser, and whether you see it
@@ -261,8 +261,7 @@ browser_headless = true      # false to watch the window
 Both are rows in `/settings` (**browser build**, **browser window**).
 
 `browser_channel` defaults to `chrome`, so koda drives the Chrome you already
-have rather than downloading a second browser. A bare name is a Playwright
-channel (`chrome`, `msedge`); an absolute path drives any other Chromium build,
+have rather than downloading a second browser. An absolute path drives any other Chromium build,
 which is how Brave or Arc get used:
 
 ```toml
@@ -276,8 +275,8 @@ preference could not be met.
 Turning `browser_headless` off opens a real window, which is worth doing when
 you want to watch what the agent is looking at, or to sign in somewhere first.
 
-The tool is called `browse`, and its description says it is the Playwright /
-browser tool — so asking koda to "use Playwright" or "open this in a browser"
+The tool is called `browse`, and its description says it is the agent-browser /
+browser tool — so asking koda to "use browser" or "open this in a browser"
 finds it, rather than getting a literal answer about having no tool by that name.
 
 When `web_fetch` comes back with almost no text, koda adds a note saying the page
