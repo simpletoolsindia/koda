@@ -7,7 +7,13 @@
 # (irm | iex, no interactive host) it just installs to %LOCALAPPDATA%\koda.
 # Override the location with -Prefix.
 
-param([string]$Prefix = "$env:LOCALAPPDATA\koda")
+param(
+    [string]$Prefix = "$env:LOCALAPPDATA\koda",
+    # Edition to build when this script has to clone. Matches install.sh, which
+    # defaults to the same branch -- installing a different edition depending on
+    # which OS you are on is not a difference anyone asked for.
+    [string]$Branch = $(if ($env:KODA_BRANCH) { $env:KODA_BRANCH } else { "uncensored" })
+)
 
 $ErrorActionPreference = "Stop"
 $Repo = "https://github.com/simpletoolsindia/koda.git"
@@ -26,8 +32,9 @@ function Resolve-Src {
     } else {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "git not found." }
         $s = Join-Path ([System.IO.Path]::GetTempPath()) "koda"
-        Info "cloning koda..."
-        git clone --depth 1 $Repo $s 2>$null
+        Info "cloning koda ($Branch edition)..."
+        git clone --depth 1 --branch $Branch $Repo $s 2>$null
+        if ($LASTEXITCODE -ne 0) { Die "clone failed" }
         return $s
     }
 }
@@ -75,10 +82,34 @@ function Add-ToUserPath($dir) {
     Ok "added $dir to your user PATH (open a new terminal to pick it up)"
 }
 
+# The `browse` tool drives agent-browser, so a Windows install without it had a
+# browse tool that could not browse. Best-effort, exactly like the shell
+# installer: a missing npm or a download hiccup is a warning, never a failure.
+function Ensure-AgentBrowser {
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        Warn "npm not found - skipping agent-browser. Install Node.js, then run:"
+        Warn "  npm i -g @vercel/agent-browser"
+        return
+    }
+    Info "installing agent-browser..."
+    try {
+        # Quoted: bare `@vercel/...` in argument position is splatting syntax
+        # to the PowerShell parser, not a package name.
+        npm i -g '@vercel/agent-browser' 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Get-Command agent-browser -ErrorAction SilentlyContinue)) {
+            Ok "agent-browser installed"
+            return
+        }
+    } catch { }
+    Warn "agent-browser install had trouble - browse will not work until you run:"
+    Warn "  npm i -g @vercel/agent-browser"
+}
+
 function Build-And-Install {
     Ensure-Rust
     $Src = Resolve-Src
     Set-Location $Src
+    Ensure-AgentBrowser
     Info "building the release binary (a minute or two the first time)..."
     cargo build --release --quiet
     $Built = Join-Path "target\release" "koda.exe"
