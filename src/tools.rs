@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub struct Spec {
     pub name: &'static str,
@@ -1544,7 +1544,8 @@ fn ripgrep_path() -> Option<std::path::PathBuf> {
     ) {
         return None;
     }
-    which_in_path("rg")
+    static RG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    RG_PATH.get_or_init(|| which_in_path("rg")).clone()
 }
 
 /// Minimal `which`: find an executable by name on PATH. Avoids a dependency.
@@ -2397,23 +2398,7 @@ pub fn base64_encode(data: &[u8]) -> String {
 /// Checked in the order expected: what the user configured in browser_path,
 /// then system PATH, then common install locations (~/.cargo/bin, ~/.npm-global/bin,
 /// /opt/homebrew/bin, /usr/local/bin, /usr/bin).
-pub fn find_agent_browser(configured: &str) -> Option<PathBuf> {
-    if !configured.trim().is_empty() {
-        let p = PathBuf::from(configured.trim());
-        if p.is_file() {
-            return Some(p);
-        }
-        let with_exe = if cfg!(windows) {
-            p.join("agent-browser.cmd")
-        } else {
-            p.join("agent-browser")
-        };
-        if with_exe.is_file() {
-            return Some(with_exe);
-        }
-        return None;
-    }
-
+fn find_agent_browser_uncached() -> Option<PathBuf> {
     // PATH environment variable check
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
@@ -2455,6 +2440,31 @@ pub fn find_agent_browser(configured: &str) -> Option<PathBuf> {
     None
 }
 
+/// Locate the `agent-browser` executable.
+/// Checks configured path, PATH, and standard user/system directories (~/.cargo/bin, ~/.npm-global/bin, ~/.local/bin,
+/// /opt/homebrew/bin, /usr/local/bin, /usr/bin).
+pub fn find_agent_browser(configured: &str) -> Option<PathBuf> {
+    let configured_trimmed = configured.trim();
+    if !configured_trimmed.is_empty() {
+        let p = PathBuf::from(configured_trimmed);
+        if p.is_file() {
+            return Some(p);
+        }
+        let with_exe = if cfg!(windows) {
+            p.join("agent-browser.cmd")
+        } else {
+            p.join("agent-browser")
+        };
+        if with_exe.is_file() {
+            return Some(with_exe);
+        }
+        return None;
+    }
+
+    static DEFAULT_AGENT_BROWSER: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DEFAULT_AGENT_BROWSER.get_or_init(find_agent_browser_uncached).clone()
+}
+
 /// A stable session ID scoped to the workspace root.
 pub fn browser_session_id(root: &Path) -> String {
     use std::hash::{Hash, Hasher};
@@ -2470,15 +2480,28 @@ pub fn browser_session_file(root: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("{id}.json"))
 }
 
+/// Canonical socket directory for agent-browser communication.
+pub fn browser_socket_dir() -> &'static Path {
+    static SOCK_DIR: OnceLock<PathBuf> = OnceLock::new();
+    SOCK_DIR.get_or_init(|| {
+        let p = std::env::temp_dir().join("koda-agent-browser");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    })
+}
+
 /// RFC 3986 percent encoder for query parameters.
 fn url_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
             b' ' => out.push('+'),
             _ => {
-                let _ = write!(out, "%{:02X}", b);
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0F) as usize] as char);
             }
         }
     }
@@ -2498,9 +2521,7 @@ fn run_agent_browser_batch(
     if !headless {
         cmd.arg("--headed");
     }
-    let sock_dir = std::env::temp_dir().join("koda-agent-browser");
-    let _ = std::fs::create_dir_all(&sock_dir);
-    cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+    cmd.env("AGENT_BROWSER_SOCKET_DIR", browser_socket_dir());
 
     cmd.args(["batch", "--json", "--bail"]);
     cmd.stdin(std::process::Stdio::piped());
@@ -2513,9 +2534,9 @@ fn run_agent_browser_batch(
         stdin.write_all(&input_json)?;
     }
     let out = child.wait_with_output().context("waiting for agent-browser batch")?;
-    let stdout_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if let Some(start) = stdout_str.find('[') {
             if let Ok(v) = serde_json::from_str::<Vec<Value>>(&stdout_str[start..]) {
                 if let Some(first_err) = v.iter().find_map(|item| item.get("error").and_then(|e| e.as_str())) {
@@ -2526,8 +2547,8 @@ fn run_agent_browser_batch(
         bail!("{}", if !err.is_empty() { err } else { stdout_str });
     }
 
-    let json_start = stdout_str.find('[').unwrap_or(0);
-    let val: Vec<Value> = serde_json::from_str(&stdout_str[json_start..])
+    let json_start = out.stdout.iter().position(|&b| b == b'[').unwrap_or(0);
+    let val: Vec<Value> = serde_json::from_slice(&out.stdout[json_start..])
         .context("parsing agent-browser batch json")?;
     Ok(val)
 }
@@ -2562,15 +2583,14 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 
     let session_id = browser_session_id(&ctx.root);
     let session_file = browser_session_file(&ctx.root);
-    let sock_dir = std::env::temp_dir().join("koda-agent-browser");
-    let _ = std::fs::create_dir_all(&sock_dir);
+    let sock_dir = browser_socket_dir();
 
     // Close action: terminates the running browser session and cleans up.
     if action == "close" {
         if let Some(bin) = find_agent_browser(&ctx.cfg.browser_path) {
             let mut cmd = std::process::Command::new(bin);
             cmd.arg("--session").arg(&session_id);
-            cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+            cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
             cmd.arg("close");
             let _ = cmd.output();
         }
@@ -2703,7 +2723,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         if !ctx.cfg.browser_headless {
             cmd.arg("--headed");
         }
-        cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+        cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
         cmd.arg("screenshot");
         if highlight {
             cmd.arg("--annotate");
@@ -2731,7 +2751,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         if !ctx.cfg.browser_headless {
             cmd.arg("--headed");
         }
-        cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+        cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
         cmd.args(["screenshot", &target]);
         cmd.arg(p);
         let res = cmd.output().context("capturing element screenshot with agent-browser")?;
@@ -2754,7 +2774,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             if !ctx.cfg.browser_headless {
                 cmd.arg("--headed");
             }
-            cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+            cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
             cmd.args(["download", &target]);
             cmd.arg(p);
             let res = cmd.output().context("downloading element with agent-browser")?;
@@ -2891,8 +2911,9 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
     }
 
-    // Auto-dismiss cookie dialogs & popups
-    let dismiss_js = r#"(() => {
+    // Consolidated inspection: dismiss popups, extract title, url, innerText, and media URLs
+    // in a single JavaScript evaluation to minimize CDP WebSocket roundtrips.
+    let inspect_js = r#"(() => {
       const selectors = [
         'button[aria-label*="close" i]', 'button[aria-label*="dismiss" i]', 'button[title*="close" i]',
         '[aria-label="Close dialog"]', '[data-testid*="close"]', '.modal-close', '.popup-close',
@@ -2907,14 +2928,16 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
           if (b.offsetParent !== null) { b.click(); break; }
         }
       }
+      const media = Array.from(new Set(Array.from(document.querySelectorAll("video[src],audio[src],source[src],a[href]")).map(el=>el.src||el.href).filter(u=>/\.(mp4|webm|mkv|mov|avi|m3u8|mpd|mp3|m4a|wav|flac|ogg|pdf|zip|gz|tar|dmg|exe|apk|iso|jpg|jpeg|png|gif|webp|svg)(\?|#|$)/i.test(u)))).slice(0,60);
+      return {
+        title: document.title || '',
+        url: location.href || '',
+        text: document.body ? document.body.innerText : '',
+        media: media
+      };
     })()"#;
-    action_cmds.push(vec!["eval".into(), dismiss_js.into()]);
-
-    let get_title_idx = action_cmds.len();
-    action_cmds.push(vec!["get".into(), "title".into()]);
-
-    let get_url_idx = action_cmds.len();
-    action_cmds.push(vec!["get".into(), "url".into()]);
+    let inspect_idx = action_cmds.len();
+    action_cmds.push(vec!["eval".into(), inspect_js.into()]);
 
     let snapshot_idx = if interactive {
         let idx = action_cmds.len();
@@ -2923,13 +2946,6 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     } else {
         None
     };
-
-    let get_text_idx = action_cmds.len();
-    action_cmds.push(vec!["eval".into(), "document.body ? document.body.innerText : \"\"".into()]);
-
-    let media_js = r#"Array.from(new Set(Array.from(document.querySelectorAll("video[src],audio[src],source[src],a[href]")).map(el=>el.src||el.href).filter(u=>/\.(mp4|webm|mkv|mov|avi|m3u8|mpd|mp3|m4a|wav|flac|ogg|pdf|zip|gz|tar|dmg|exe|apk|iso|jpg|jpeg|png|gif|webp|svg)(\?|#|$)/i.test(u)))).slice(0,60)"#;
-    let get_media_idx = action_cmds.len();
-    action_cmds.push(vec!["eval".into(), media_js.into()]);
 
     let get_tabs_idx = action_cmds.len();
     action_cmds.push(vec!["tab".into(), "list".into()]);
@@ -2947,7 +2963,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             if !use_session {
                 let mut cmd = std::process::Command::new(&agent_browser_bin);
                 cmd.arg("--session").arg(&session_id);
-                cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+                cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
                 cmd.arg("close");
                 let _ = cmd.output();
             }
@@ -2955,21 +2971,22 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
     };
 
-    let title = results.get(get_title_idx)
+    let inspect_obj = results.get(inspect_idx)
         .and_then(|r| r.get("result"))
-        .and_then(|res| res.get("title"))
+        .and_then(|res| res.get("result").or(Some(res)));
+
+    let title = inspect_obj
+        .and_then(|o| o.get("title"))
         .and_then(|t| t.as_str())
         .unwrap_or("");
 
-    let final_url = results.get(get_url_idx)
-        .and_then(|r| r.get("result"))
-        .and_then(|res| res.get("url"))
+    let final_url = inspect_obj
+        .and_then(|o| o.get("url"))
         .and_then(|u| u.as_str())
         .unwrap_or(&url);
 
-    let text_val = results.get(get_text_idx)
-        .and_then(|r| r.get("result"))
-        .and_then(|res| res.get("result"))
+    let text_val = inspect_obj
+        .and_then(|o| o.get("text"))
         .and_then(|t| t.as_str())
         .unwrap_or("");
     let text = sanitize_text(text_val);
@@ -3017,9 +3034,8 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         String::new()
     };
 
-    let media_arr = results.get(get_media_idx)
-        .and_then(|r| r.get("result"))
-        .and_then(|res| res.get("result"))
+    let media_arr = inspect_obj
+        .and_then(|o| o.get("media"))
         .and_then(|v| v.as_array());
 
     let media_block = if let Some(arr) = media_arr {
@@ -3039,7 +3055,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     if !use_session {
         let mut cmd = std::process::Command::new(&agent_browser_bin);
         cmd.arg("--session").arg(&session_id);
-        cmd.env("AGENT_BROWSER_SOCKET_DIR", &sock_dir);
+        cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
         cmd.arg("close");
         let _ = cmd.output();
     }
@@ -3131,6 +3147,21 @@ mod tests {
         assert_eq!(find_agent_browser("/definitely/not/a/real/binary/path"), None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn url_encode_encodes_special_characters() {
+        assert_eq!(url_encode("hello world"), "hello+world");
+        assert_eq!(url_encode("Quantum Computing & AI?"), "Quantum+Computing+%26+AI%3F");
+        assert_eq!(url_encode("abc-123_.~"), "abc-123_.~");
+    }
+
+    #[test]
+    fn browser_socket_dir_is_stable() {
+        let p1 = browser_socket_dir();
+        let p2 = browser_socket_dir();
+        assert_eq!(p1, p2);
+        assert!(p1.is_dir());
     }
 
     /// browse refuses anything that is not http(s) before it launches a browser
