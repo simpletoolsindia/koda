@@ -326,6 +326,50 @@ pub fn format_hits(query: &str, hits: &[Hit]) -> String {
 /// GET a URL and return its content as readable plain text. `http`/`https` only.
 /// The result is not yet clipped to the tool cap — the caller applies
 /// `max_tool_output_bytes`.
+/// Download a binary body whole, with a hard cap.
+///
+/// `fetch_url` is for pages: it decodes to text and strips HTML. This is for
+/// files koda fetches for itself — the browse engine's tarball — where any byte
+/// mangled is a binary that will not run.
+pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    use futures_util::StreamExt as _;
+    // 128 MiB: comfortably above the ~40 MB engine tarball, far below anything
+    // that would exhaust memory if a server answered with something unexpected.
+    const CAP: usize = 128 * 1024 * 1024;
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("only http:// and https:// URLs can be fetched");
+    }
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        // No overall timeout: this is a multi-megabyte download on whatever
+        // connection the user has. The connect timeout still bounds a dead host.
+        .user_agent(concat!("koda/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building the download client")?;
+    let resp = http
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("fetching {url}"))?;
+    if !resp.status().is_success() {
+        bail!("{url} replied {}", resp.status());
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(resp.content_length().unwrap_or(0) as usize);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading the download")?;
+        if out.len() + chunk.len() > CAP {
+            bail!("{url} is larger than {} MiB", CAP / 1024 / 1024);
+        }
+        out.extend_from_slice(&chunk);
+    }
+    if out.is_empty() {
+        bail!("{url} returned an empty body");
+    }
+    Ok(out)
+}
+
 pub async fn fetch_url(url: &str, timeout_secs: u64) -> Result<String> {
     let url = url.trim();
     if !(url.starts_with("http://") || url.starts_with("https://")) {

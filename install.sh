@@ -40,41 +40,19 @@ resolve_src() {
     fi
 }
 
-# --- the browse tool's engine: agent-browser ---------------------------------
-# Best-effort. The browse tool only needs this when browser=true, and it must
-# never fail the whole install, so a missing npm or a download hiccup is a warn,
-# not a die.
-#
-# The package is `agent-browser`. It was written here as `@vercel/agent-browser`,
-# which does not exist on npm: every install printed "agent-browser install had
-# trouble" and no install of it ever succeeded.
-AGENT_BROWSER_PKG="agent-browser"
-ensure_agent_browser() {
-    # Already there (npm, brew, cargo — koda only cares that it is on PATH).
-    if command -v agent-browser >/dev/null 2>&1; then
-        ok "agent-browser found — the browse tool is ready"
-        return 0
-    fi
-    command -v npm >/dev/null 2>&1 || {
-        warn "npm not found — skipping agent-browser. Install Node,"
-        warn "then run: npm i -g $AGENT_BROWSER_PKG && agent-browser install"
-        return 0
-    }
-    info "installing agent-browser…"
-    if ! npm i -g "$AGENT_BROWSER_PKG" >/dev/null 2>&1; then
-        warn "agent-browser install had trouble — browse will not work until you"
-        warn "install it by hand: npm i -g $AGENT_BROWSER_PKG && agent-browser install"
-        return 0
-    fi
-    # The CLI on its own has no browser to drive; `agent-browser install`
-    # fetches one. Slow and network-bound, so a failure here is a warning with
-    # the exact command, not a dead install.
-    info "fetching the browser agent-browser drives…"
-    if agent-browser install >/dev/null 2>&1; then
-        ok "agent-browser installed"
+# --- the browse tool's engine ------------------------------------------------
+# koda ships the engine and installs it itself (`koda browser install`), so this
+# needs no npm, no Node, and no second step from the user. Best-effort: the
+# browse tool only needs it when browser=true, and a network hiccup must not
+# fail the whole install.
+ensure_browse_engine() {
+    local koda="$1"
+    info "fetching the browse engine…"
+    if "$koda" browser install >/dev/null 2>&1; then
+        ok "browse engine ready"
     else
-        warn "agent-browser installed, but fetching its browser failed —"
-        warn "run 'agent-browser install' before using the browse tool"
+        warn "could not fetch the browse engine — koda still runs; get it later with:"
+        warn "  $koda browser install"
     fi
 }
 
@@ -115,7 +93,6 @@ build_and_install() {
     ensure_rust
     resolve_src
     cd "$SRC"
-    ensure_agent_browser
     info "building the release binary (a minute or two the first time)…"
     cargo build --release --quiet
     local built="target/release/$BIN_NAME"
@@ -129,6 +106,8 @@ build_and_install() {
         codesign --force --sign - "$bin_dir/$BIN_NAME" >/dev/null 2>&1 || true
     fi
     ok "installed to $bin_dir/$BIN_NAME"
+
+    ensure_browse_engine "$bin_dir/$BIN_NAME"
 
     case ":$PATH:" in
         *":$bin_dir:"*) ok "$bin_dir is on your PATH" ;;

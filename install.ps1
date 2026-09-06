@@ -82,45 +82,26 @@ function Add-ToUserPath($dir) {
     Ok "added $dir to your user PATH (open a new terminal to pick it up)"
 }
 
-# The `browse` tool drives agent-browser, so a Windows install without it had a
-# browse tool that could not browse. Best-effort, exactly like the shell
-# installer: a missing npm or a download hiccup is a warning, never a failure.
-function Ensure-AgentBrowser {
-    # Already there (npm, scoop, cargo - koda only cares that it is on PATH).
-    if (Get-Command agent-browser -ErrorAction SilentlyContinue) {
-        Ok "agent-browser found - the browse tool is ready"
-        return
-    }
-    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-        Warn "npm not found - skipping agent-browser. Install Node.js, then run:"
-        Warn "  npm i -g agent-browser; agent-browser install"
-        return
-    }
-    Info "installing agent-browser..."
+# The browse tool's engine. koda ships it and installs it itself
+# (`koda browser install`), so this needs no npm, no Node, and no second step
+# from the user. Best-effort: a network hiccup must not fail the install.
+function Ensure-BrowseEngine($koda) {
+    Info "fetching the browse engine..."
     try {
-        npm i -g agent-browser 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0 -and (Get-Command agent-browser -ErrorAction SilentlyContinue)) {
-            # The CLI on its own has no browser to drive; this fetches one.
-            Info "fetching the browser agent-browser drives..."
-            agent-browser install 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Ok "agent-browser installed"
-            } else {
-                Warn "agent-browser installed, but fetching its browser failed -"
-                Warn "run 'agent-browser install' before using the browse tool"
-            }
+        & $koda browser install 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Ok "browse engine ready"
             return
         }
     } catch { }
-    Warn "agent-browser install had trouble - browse will not work until you run:"
-    Warn "  npm i -g agent-browser; agent-browser install"
+    Warn "could not fetch the browse engine - koda still runs; get it later with:"
+    Warn "  koda browser install"
 }
 
 function Build-And-Install {
     Ensure-Rust
     $Src = Resolve-Src
     Set-Location $Src
-    Ensure-AgentBrowser
     Info "building the release binary (a minute or two the first time)..."
     cargo build --release --quiet
     $Built = Join-Path "target\release" "koda.exe"
@@ -130,6 +111,8 @@ function Build-And-Install {
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
     Copy-Item $Built (Join-Path $BinDir "koda.exe") -Force
     Ok "installed to $BinDir\koda.exe"
+
+    Ensure-BrowseEngine (Join-Path $BinDir "koda.exe")
 
     Add-ToUserPath $BinDir
     Ensure-Tesseract

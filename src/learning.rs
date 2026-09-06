@@ -192,12 +192,50 @@ fn writes_dir(root: &Path) -> PathBuf {
 /// Record what koda just wrote to `rel_path`, keyed by a hash of the path.
 /// Survives across sessions so a later divergence is attributable to the user.
 pub fn record_write(root: &Path, rel_path: &str, content: &str) {
+    // A copy of every file koda has ever written, kept for ever, is a project
+    // directory that grows without bound and a signal that goes stale anyway:
+    // a correction is only attributable while the write is recent.
+    const MAX_BYTES: usize = 512 * 1024;
+    const MAX_FILES: usize = 200;
     let d = writes_dir(root);
     if std::fs::create_dir_all(&d).is_err() {
         return;
     }
+    if content.len() > MAX_BYTES {
+        // Too big to be worth diffing later; drop any stale copy so a much
+        // older version is never compared against today's file.
+        clear_write(root, rel_path);
+        return;
+    }
     let f = d.join(format!("{}.txt", path_key(rel_path)));
     let _ = std::fs::write(f, content);
+    prune_writes(&d, MAX_FILES);
+}
+
+/// Keep the newest `keep` tracked writes and delete the rest.
+fn prune_writes(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some((meta.modified().ok()?, e.path()))
+        })
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    // Oldest first, so the tail of the list is what goes.
+    files.sort_by_key(|(t, _)| *t);
+    for (_, path) in files.iter().take(files.len() - keep) {
+        let _ = std::fs::remove_file(path);
+    }
+    tel_debug!("learning", "pruned tracked writes", "removed" => files.len() - keep);
 }
 
 /// Return what koda last wrote to `rel_path`, if tracked.
@@ -1484,6 +1522,40 @@ mod tests {
             }
         );
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The write tracker kept a copy of every file koda has ever written, for
+    /// ever: a project directory that grows without bound, holding stale copies
+    /// that a correction could never be attributed to anyway.
+    #[test]
+    fn tracked_writes_are_bounded_in_count_and_size() {
+        let dir = std::env::temp_dir().join(format!("koda-writes-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for i in 0..260 {
+            record_write(&dir, &format!("src/file{i}.rs"), "fn main() {}\n");
+        }
+        let kept = std::fs::read_dir(writes_dir(&dir)).unwrap().count();
+        assert!(kept <= 200, "the tracker kept {kept} files");
+        // The most recent write is one of the survivors.
+        assert_eq!(
+            last_write(&dir, "src/file259.rs").as_deref(),
+            Some("fn main() {}\n")
+        );
+
+        // A file too big to be worth diffing later is not stored at all, and
+        // any stale copy of it is dropped rather than left to age.
+        record_write(&dir, "big.rs", "x");
+        assert!(last_write(&dir, "big.rs").is_some());
+        record_write(&dir, "big.rs", &"x".repeat(600 * 1024));
+        assert_eq!(
+            last_write(&dir, "big.rs"),
+            None,
+            "an oversized write was kept"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The daily pass is what makes learning happen without being asked, so the

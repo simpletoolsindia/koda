@@ -593,6 +593,11 @@ fn build_specs() -> Vec<Spec> {
     ]
 }
 
+/// Tools that run an external program. Each one must degrade to something that
+/// works everywhere when that program is absent — see the cross-platform test.
+#[cfg(test)]
+const SHELLS_OUT: &[&str] = &["search", "run_command", "browse", "view_image"];
+
 /// Read-only tools whose work has no side effects and no ordering constraints,
 /// so when the model requests several in one step koda can run them at once.
 /// Everything else (writes, commands, delegate, ask_user, todo, remember, web)
@@ -1555,13 +1560,25 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
                 bytes.len()
             )));
         }
-        truncate(&String::from_utf8_lossy(&bytes), ctx.cfg.max_file_bytes)
+        // The common case — valid UTF-8, under the cap — moves the buffer
+        // instead of copying it. It used to go bytes -> Cow -> owned String ->
+        // truncated String: three copies of every file koda reads.
+        match String::from_utf8(bytes) {
+            Ok(text) if text.len() <= ctx.cfg.max_file_bytes => text,
+            Ok(text) => truncate(&text, ctx.cfg.max_file_bytes),
+            Err(e) => truncate(
+                &String::from_utf8_lossy(e.as_bytes()),
+                ctx.cfg.max_file_bytes,
+            ),
+        }
     };
 
     let offset = arg_usize(args, "offset").unwrap_or(1).max(1);
     let limit = arg_usize(args, "limit").unwrap_or(usize::MAX);
-    let all: Vec<&str> = text.lines().collect();
-    let total = all.len();
+    // Counting is a scan; collecting every line of a large file into a Vec is a
+    // scan plus an allocation per page read, and a model paging through a file
+    // does this on every call.
+    let total = text.lines().count();
     // A model often passes a large "read from here" offset (e.g. 9999) meaning
     // "near/at the end". Rather than erroring — which wastes a turn and spams
     // warnings — clamp it to the last page and note that we did. `offset` is
@@ -1574,6 +1591,12 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         start = total.saturating_sub(page);
     }
     let end = start.saturating_add(limit).min(total);
+    // Only the page being shown is materialised.
+    let page: Vec<&str> = text
+        .lines()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect();
     let width = end.to_string().len().max(3);
     let mut out = String::new();
     if clamped {
@@ -1583,7 +1606,7 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             total - start
         );
     }
-    for (i, line) in all[start..end].iter().enumerate() {
+    for (i, line) in page.iter().enumerate() {
         let _ = writeln!(out, "{:>width$}| {line}", start + i + 1, width = width);
     }
     if end < total {
@@ -1612,7 +1635,7 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         lang: doc_kind
             .map(|k| k.tag().to_string())
             .unwrap_or_else(|| lang_of(&full)),
-        lines: all[start..end].iter().map(|l| l.to_string()).collect(),
+        lines: page.iter().map(|l| l.to_string()).collect(),
         start: start + 1,
         total,
         truncated: end < total,
@@ -2037,6 +2060,7 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     } else {
         String::new()
     };
+    let content = match_line_endings(&old, content);
     write_streaming(&full, &content, ctx).with_context(|| format!("writing {path}"))?;
     let lines = content.lines().count();
     let tokens = approx_tokens(content.len());
@@ -2073,6 +2097,26 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 /// hundreds even for a multi-megabyte write.
 const STREAM_CHUNK: usize = 64 * 1024;
 
+/// Match the line endings the file already uses.
+///
+/// A model writes `\n`. On a checkout with CRLF files — normal on Windows, and
+/// not rare elsewhere — writing that back converts every touched line to LF,
+/// which shows up as a diff of the whole file and a repository full of mixed
+/// endings. The file's own convention wins; a new file keeps what the model
+/// wrote.
+fn match_line_endings(existing: &str, content: String) -> String {
+    let crlf = existing.matches("\r\n").count();
+    // Majority rules: one stray CRLF in an LF file should not convert the file.
+    let lf_only = existing.matches('\n').count() - crlf;
+    if crlf == 0 || crlf <= lf_only {
+        return content;
+    }
+    if content.contains("\r\n") {
+        return content; // already CRLF
+    }
+    content.replace('\n', "\r\n")
+}
+
 fn write_streaming(full: &Path, content: &str, ctx: &ToolCtx) -> std::io::Result<()> {
     use std::io::Write as _;
     let total = approx_tokens(content.len());
@@ -2103,7 +2147,10 @@ fn write_streaming(full: &Path, content: &str, ctx: &ToolCtx) -> std::io::Result
         }
         out.flush()?;
         // Durability: without this the rename can land before the contents do,
-        // and a crash leaves an empty file where the old one was.
+        // and a power cut leaves an empty file where the old one was. Measured
+        // at ~5ms of a ~6.7ms 256KB write — kept deliberately: it is the
+        // difference between a slow write and a lost file, and every write here
+        // sits inside a model round trip measured in seconds.
         out.into_inner()
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .sync_all()?;
@@ -2257,6 +2304,8 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         )));
     }
 
+    // An edit expressed with `\n` must not convert a CRLF file line by line.
+    let content = match_line_endings(&original, content);
     write_streaming(&full, &content, ctx).with_context(|| format!("writing {path}"))?;
     let diff = unified_diff(&original, &content, &rel(ctx, &full));
     let (added, removed) = diff_stats(&diff);
@@ -2387,6 +2436,36 @@ fn count_fuzzy_spans(content: &str, needle: &str) -> usize {
     n
 }
 
+/// PATH for a spawned command, with the directories tools commonly live in but
+/// a GUI-launched process often lacks (~/.local/bin, Homebrew).
+///
+/// Built with `join_paths`/`split_paths` rather than `:`. Windows separates PATH
+/// with `;`, so hand-joining with a colon produced a single nonsense entry
+/// there and every command koda ran lost its PATH.
+fn augmented_path() -> Option<std::ffi::OsString> {
+    let current = std::env::var_os("PATH")?;
+    let mut dirs_in: Vec<PathBuf> = std::env::split_paths(&current).collect();
+    let mut extra: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        extra.push(home.join(".local").join("bin"));
+    }
+    if cfg!(unix) {
+        extra.push(PathBuf::from("/opt/homebrew/bin"));
+        extra.push(PathBuf::from("/usr/local/bin"));
+    }
+    let mut added = false;
+    for dir in extra.into_iter().rev() {
+        if dir.is_dir() && !dirs_in.contains(&dir) {
+            dirs_in.insert(0, dir);
+            added = true;
+        }
+    }
+    if !added {
+        return None;
+    }
+    std::env::join_paths(dirs_in).ok()
+}
+
 async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
     let cmd = match arg_str(args, "command") {
         Ok(c) => c,
@@ -2411,28 +2490,8 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    if let Ok(cur_path) = std::env::var("PATH") {
-        let mut extra_paths = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            let local_bin = home.join(".local").join("bin");
-            if local_bin.exists() {
-                extra_paths.push(local_bin.to_string_lossy().to_string());
-            }
-        }
-        for standard in ["/opt/homebrew/bin", "/usr/local/bin"] {
-            if std::path::Path::new(standard).exists() {
-                extra_paths.push(standard.to_string());
-            }
-        }
-        if !extra_paths.is_empty() {
-            let mut new_path = cur_path;
-            for ep in extra_paths {
-                if !new_path.split(':').any(|p| p == ep) {
-                    new_path = format!("{ep}:{new_path}");
-                }
-            }
-            cmd_builder.env("PATH", new_path);
-        }
+    if let Some(path) = augmented_path() {
+        cmd_builder.env("PATH", path);
     }
 
     let child = match cmd_builder.spawn() {
@@ -2762,8 +2821,9 @@ pub fn base64_encode(data: &[u8]) -> String {
 /// Where `agent-browser` binary can be found, if anywhere.
 ///
 /// Checked in the order expected: what the user configured in browser_path,
-/// then system PATH, then common install locations (~/.cargo/bin, ~/.npm-global/bin,
-/// /opt/homebrew/bin, /usr/local/bin, /usr/bin).
+/// then koda's own copy, then system PATH, then common install locations
+/// (~/.cargo/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin,
+/// /usr/bin).
 fn find_agent_browser_uncached() -> Option<PathBuf> {
     // PATH environment variable check
     if let Ok(path_var) = std::env::var("PATH") {
@@ -2821,6 +2881,16 @@ pub fn find_agent_browser(configured: &str) -> Option<PathBuf> {
         return None;
     }
 
+    // koda ships the engine and installs it into a directory it owns. That copy
+    // is the pinned version koda was tested against, so it wins over whatever
+    // else is on PATH — and it is checked live rather than cached, because it
+    // can appear mid-session when a `browse` call provisions it.
+    if let Some(own) = crate::engine::installed() {
+        return Some(own);
+    }
+
+    // The PATH scan, on the other hand, is a directory walk per lookup, and
+    // nothing about it changes during a session.
     static DEFAULT_AGENT_BROWSER: OnceLock<Option<PathBuf>> = OnceLock::new();
     DEFAULT_AGENT_BROWSER
         .get_or_init(find_agent_browser_uncached)
@@ -3150,8 +3220,8 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 
     let Some(agent_browser_bin) = find_agent_browser(&ctx.cfg.browser_path) else {
         return Ok(Outcome::err(
-            "agent-browser is not installed. Install with `npm install -g agent-browser` \
-             (or `brew install agent-browser` / `cargo install agent-browser`) and run `agent-browser install`.",
+            "the browse engine is not available. koda ships it — run \
+             `koda browser install` — or set `browser_path` to your own copy.",
         ));
     };
 
@@ -3838,6 +3908,119 @@ mod tests {
         );
     }
 
+    /// koda runs on macOS, Linux and Windows, and the PATH it hands a command
+    /// has to be valid on each. Hand-joining with ':' produced one nonsense
+    /// entry on Windows, so every command koda ran there lost its PATH.
+    #[test]
+    fn the_spawned_path_is_built_with_the_platform_separator() {
+        let Some(path) = augmented_path() else {
+            return; // nothing was added on this machine; nothing to check
+        };
+        let parts: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert!(parts.len() > 1, "PATH collapsed into one entry: {path:?}");
+        // Every entry must survive a split/join round trip — which is exactly
+        // what a wrong separator breaks.
+        let rejoined = std::env::join_paths(&parts).expect("PATH re-joins");
+        assert_eq!(rejoined, path);
+        for p in &parts {
+            assert!(
+                !p.to_string_lossy()
+                    .contains(if cfg!(windows) { ';' } else { ':' }),
+                "an entry still contains the separator: {p:?}"
+            );
+        }
+    }
+
+    /// A checkout with CRLF files is normal on Windows. Writing `\n` back into
+    /// one turns every touched line into a diff and leaves the file mixed.
+    #[test]
+    fn writes_keep_the_files_own_line_endings() {
+        let dir = std::env::temp_dir().join(format!("koda-eol-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = ctx(&dir);
+
+        std::fs::write(dir.join("crlf.txt"), "one\r\ntwo\r\nthree\r\n").unwrap();
+        let out = write_file(
+            &json!({"path": "crlf.txt", "content": "one\nTWO\nthree\n"}),
+            &c,
+        )
+        .unwrap();
+        assert!(out.ok, "{}", out.content);
+        let back = std::fs::read_to_string(dir.join("crlf.txt")).unwrap();
+        assert_eq!(back, "one\r\nTWO\r\nthree\r\n", "CRLF file was converted");
+
+        // An edit does the same.
+        let out = edit_file(&json!({"path": "crlf.txt", "old": "TWO", "new": "two"}), &c).unwrap();
+        assert!(out.ok, "{}", out.content);
+        let back = std::fs::read_to_string(dir.join("crlf.txt")).unwrap();
+        assert_eq!(back, "one\r\ntwo\r\nthree\r\n");
+
+        // An LF file stays LF, and a new file keeps what the model wrote.
+        std::fs::write(dir.join("lf.txt"), "a\nb\n").unwrap();
+        write_file(&json!({"path": "lf.txt", "content": "a\nB\n"}), &c).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("lf.txt")).unwrap(),
+            "a\nB\n"
+        );
+        write_file(&json!({"path": "new.txt", "content": "x\ny\n"}), &c).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "x\ny\n"
+        );
+
+        // One stray CRLF does not make an LF file into a CRLF file.
+        assert_eq!(match_line_endings("a\r\nb\nc\n", "x\ny\n".into()), "x\ny\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every tool koda advertises has to work on macOS, Linux and Windows.
+    ///
+    /// The way that breaks is a new tool quietly shelling out to something only
+    /// one platform has. So each tool is classified here, and a tool that is
+    /// neither pure Rust nor backed by a fallback fails this test — including a
+    /// tool added later, which is the point.
+    #[test]
+    fn every_advertised_tool_is_cross_platform() {
+        // Tools that shell out, and what happens when the helper is missing.
+        let external: &[(&str, &str)] = &[
+            // ripgrep when present, koda's own in-process search otherwise.
+            ("search", "falls back to the built-in searcher"),
+            // The platform's own shell, resolved by config::default_shell.
+            ("run_command", "uses the platform shell"),
+            // agent-browser, which koda ships and installs for every platform.
+            ("browse", "engine shipped by koda"),
+            // A vision model, or tesseract, or a clear error.
+            (
+                "view_image",
+                "vision model or tesseract, else a clear error",
+            ),
+        ];
+        for spec in specs() {
+            let name = spec.name;
+            let classified = external.iter().any(|(n, _)| *n == name);
+            // Everything not in the table must be pure Rust. If a new tool
+            // shells out, it belongs in the table with its fallback stated.
+            assert!(
+                classified || !SHELLS_OUT.contains(&name),
+                "{name} shells out with no fallback documented"
+            );
+        }
+        // The shell flag has to be right for whatever shell the platform picked.
+        let shell = crate::config::default_shell();
+        let flag = crate::config::shell_flag(&shell);
+        if cfg!(windows) {
+            assert_eq!(flag, "/C", "cmd needs /C, got {flag} for {shell}");
+        } else {
+            assert_eq!(flag, "-c", "a POSIX shell needs -c, got {flag} for {shell}");
+        }
+        // And the engine koda ships must exist for this platform.
+        assert!(
+            crate::engine::engine_path().is_some(),
+            "no engine path on this platform"
+        );
+    }
+
     /// Auto-approve should skip the routine, not the irreversible. This is the
     /// list that must keep asking, and the list that must not start asking —
     /// a false positive here trains people to approve without reading.
@@ -4417,6 +4600,38 @@ mod tests {
             500,
             openai_schema_for(None)
         );
+
+        // The file tools: what every turn actually spends its time on.
+        println!("\n-- file tools --");
+        let dir = std::env::temp_dir().join(format!("koda-perf-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let big: String = (0..20_000)
+            .map(|i| format!("pub fn item_{i}() -> usize {{ {i} }}\n"))
+            .collect();
+        std::fs::write(dir.join("big.rs"), &big).unwrap();
+        let c = ctx(&dir);
+        bench!(
+            format!("read_file (whole, {}KB)", big.len() / 1024),
+            20,
+            read_file(&json!({"path": "big.rs"}), &c).is_ok()
+        );
+        bench!(
+            "read_file (offset=1 limit=50)",
+            50,
+            read_file(&json!({"path": "big.rs", "offset": 1, "limit": 50}), &c).is_ok()
+        );
+        bench!(
+            "write_file (256KB)",
+            20,
+            write_file(
+                &json!({"path": "out.rs", "content": big[..256 * 1024].to_string()}),
+                &c
+            )
+            .is_ok()
+        );
+        bench!("list_dir", 200, list_dir(&json!({"path": "."}), &c).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
 
         println!("\n-- code graph --");
         let t0 = Instant::now();

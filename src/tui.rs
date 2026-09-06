@@ -560,7 +560,7 @@ impl App {
     }
 
     /// The selected text, taken from the same lines the renderer drew.
-    fn selected_text(&self) -> String {
+    fn selected_text(&mut self) -> String {
         let Some(range) = self.selection_range() else {
             return String::new();
         };

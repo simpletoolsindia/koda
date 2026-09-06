@@ -331,11 +331,18 @@ pub struct Agent {
 #[derive(Debug, Clone)]
 struct UndoEntry {
     path: PathBuf,
+    /// The file's content before koda changed it. `None` means it did not exist
+    /// — or, with `forgotten` set, that the content was released to stay inside
+    /// the undo stack's memory budget.
     before: Option<String>,
     label: String,
     /// The turn that produced this change. Entries sharing a turn are undone
     /// together.
     turn: u32,
+    /// Whether `before` was dropped to reclaim memory rather than because the
+    /// file was new. Reverting this entry would delete a file that existed, so
+    /// it is skipped and reported instead.
+    forgotten: bool,
 }
 
 impl Agent {
@@ -1963,6 +1970,36 @@ impl Agent {
             "manage_skill" | "manage_agent" => self.manage_skill(&args),
             "web_search" => self.web_search(&args).await,
             "web_fetch" => self.web_fetch(&args).await,
+            // The engine ships with koda but is fetched on demand, so the
+            // first browse of a fresh install provisions it rather than telling
+            // the user to go and install something.
+            "browse"
+                if self.cfg.browser
+                    && tools::find_agent_browser(&self.cfg.browser_path).is_none() =>
+            {
+                let _ = tx.send(Event::Notice(format!(
+                    "fetching the browse engine (agent-browser {}) — one time, then it is cached",
+                    crate::engine::VERSION
+                )));
+                match crate::engine::install(false).await {
+                    Ok(path) => {
+                        crate::tel_info!("engine", "provisioned on demand", "path" => path.display().to_string());
+                        let _ = tx.send(Event::Notice("browse engine ready".into()));
+                        match self.prefetched.remove(&call.id) {
+                            Some(o) => o,
+                            None => tools::run(&name, args, &self.streaming_ctx(&call.id, tx)).await,
+                        }
+                    }
+                    Err(e) => tools::Outcome {
+                        ok: false,
+                        content: format!(
+                            "ERROR: could not fetch the browse engine: {e:#}\n\nRun                              `koda browser install` yourself, or set `browser_path` to a                              copy you already have."
+                        ),
+                        summary: "browse: no engine".into(),
+                        view: tools::ToolView::Plain,
+                    },
+                }
+            }
             "browse" if !self.cfg.browser => tools::Outcome {
                 ok: false,
                 content: "ERROR: the browser is off. Turn on `browser` in /settings, or use \
@@ -2206,6 +2243,12 @@ impl Agent {
 
     fn snapshot(&mut self, args: &Value, tool: &str) {
         const DEPTH: usize = 25;
+        // Twenty-five entries is a bound on *count*, not on memory: each one
+        // holds a whole file, so editing a few large generated files filled the
+        // process with copies of them. Cap what the stack holds in bytes too,
+        // and drop the oldest contents (keeping the entries, so /undo can still
+        // say what it can no longer restore).
+        const BYTES: usize = 8 * 1024 * 1024;
         let Some(rel) = args.get("path").and_then(|p| p.as_str()) else {
             return;
         };
@@ -2226,9 +2269,24 @@ impl Agent {
             before,
             label: format!("{tool} {rel}"),
             turn: self.turn_seq,
+            forgotten: false,
         });
         if self.undo.len() > DEPTH {
             self.undo.remove(0);
+        }
+        let mut held: usize = self
+            .undo
+            .iter()
+            .map(|e| e.before.as_ref().map_or(0, |b| b.len()))
+            .sum();
+        for e in self.undo.iter_mut() {
+            if held <= BYTES {
+                break;
+            }
+            if let Some(b) = e.before.take() {
+                held -= b.len();
+                e.forgotten = true;
+            }
         }
     }
 
@@ -2552,24 +2610,31 @@ impl Agent {
         // For each path, keep the earliest pre-turn content (first occurrence),
         // preserving encounter order for a stable, readable report.
         let mut order: Vec<PathBuf> = Vec::new();
-        let mut first: BTreeMap<PathBuf, (Option<String>, String)> = BTreeMap::new();
+        let mut first: BTreeMap<PathBuf, (Option<String>, String, bool)> = BTreeMap::new();
         for e in group {
             if !first.contains_key(&e.path) {
                 order.push(e.path.clone());
             }
-            first.entry(e.path.clone()).or_insert((e.before, e.label));
+            first
+                .entry(e.path.clone())
+                .or_insert((e.before, e.label, e.forgotten));
         }
 
         let mut reverted = 0usize;
         let mut removed = 0usize;
         let mut failed: Vec<String> = Vec::new();
         for path in &order {
-            let (before, label) = first.remove(path).unwrap();
+            let (before, label, forgotten) = first.remove(path).unwrap();
             let shown = crate::tools::rel(&self.ctx, path);
-            let result = match &before {
-                Some(text) => std::fs::write(path, text).map(|_| false),
-                // It did not exist before the turn, so undoing removes it.
-                None => std::fs::remove_file(path).map(|_| true),
+            let result = match undo_action(&before, forgotten) {
+                UndoAction::Restore(text) => std::fs::write(path, text).map(|_| false),
+                UndoAction::Delete => std::fs::remove_file(path).map(|_| true),
+                UndoAction::Skip => {
+                    failed.push(format!(
+                        "{shown}: its previous contents were released to save memory"
+                    ));
+                    continue;
+                }
             };
             match result {
                 Ok(was_removed) => {
@@ -3948,6 +4013,28 @@ fn parse_continue(reply: &str) -> Option<String> {
     Some(crate::tools::truncate(reason, 160).trim().to_string())
 }
 
+/// What undoing one file means.
+#[derive(Debug, PartialEq, Eq)]
+enum UndoAction<'a> {
+    /// Put this content back.
+    Restore(&'a str),
+    /// The file did not exist before the turn, so undoing removes it.
+    Delete,
+    /// koda no longer holds the previous content — it was released to stay
+    /// inside the undo stack's memory budget. Deleting the file because of that
+    /// would destroy exactly what undo exists to protect, so it is reported and
+    /// left alone.
+    Skip,
+}
+
+fn undo_action(before: &Option<String>, forgotten: bool) -> UndoAction<'_> {
+    match (before, forgotten) {
+        (Some(text), _) => UndoAction::Restore(text),
+        (None, true) => UndoAction::Skip,
+        (None, false) => UndoAction::Delete,
+    }
+}
+
 pub fn user_message(e: &anyhow::Error) -> String {
     if let Some(api) = e.downcast_ref::<crate::llm::ApiError>() {
         return api.user.clone();
@@ -4102,6 +4189,23 @@ mod tests {
             parse_continue("CONTINUE"),
             Some("more work left".to_string())
         );
+    }
+
+    /// The undo stack bounds how many entries it keeps, but each one holds a
+    /// whole file, so it also has to bound bytes — and releasing an old snapshot
+    /// must never read as "this file did not exist", which would make /undo
+    /// delete a file it was meant to protect.
+    #[test]
+    fn a_released_undo_snapshot_is_never_deleted() {
+        let had_content = Some("original text".to_string());
+        assert_eq!(
+            undo_action(&had_content, false),
+            UndoAction::Restore("original text")
+        );
+        // Created by the turn: undoing removes it.
+        assert_eq!(undo_action(&None, false), UndoAction::Delete);
+        // Released to save memory: left alone and reported, never deleted.
+        assert_eq!(undo_action(&None, true), UndoAction::Skip);
     }
 
     #[test]

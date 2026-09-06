@@ -65,6 +65,24 @@ struct Block {
     /// `window` can binary-search to the first visible block instead of walking
     /// the whole transcript on every frame.
     offset: usize,
+    /// How many lines this block occupies at the current width.
+    ///
+    /// Kept separately from `cache` so the rendered spans can be dropped for a
+    /// block nobody is looking at while its position in the transcript stays
+    /// exact. Rendered lines are several times the size of the text they came
+    /// from — a long session held every one of them for the whole session.
+    height: usize,
+}
+
+impl Block {
+    /// Drop the rendered lines, keeping everything needed to place the block.
+    /// It re-renders from `item` the moment it is on screen again.
+    fn evict(&mut self) -> usize {
+        match self.cache.take() {
+            Some((_, _, lines)) => lines.len(),
+            None => 0,
+        }
+    }
 }
 
 /// How much of the streaming reply is already laid out, so the next frame only
@@ -128,6 +146,9 @@ pub struct Transcript {
     stream: Option<StreamRender>,
     /// Index of the earliest block whose cached offset may be stale.
     dirty_from: usize,
+    /// Rendered lines currently held across every block, so retention can be
+    /// budgeted rather than unbounded.
+    retained: usize,
 }
 
 impl Transcript {
@@ -151,6 +172,7 @@ impl Transcript {
             laid_out_at: 0,
             stream: None,
             dirty_from: 0,
+            retained: 0,
         }
     }
 
@@ -202,6 +224,7 @@ impl Transcript {
             item,
             cache: None,
             offset: 0,
+            height: 0,
         });
         self.dirty_from = self.dirty_from.min(self.blocks.len() - 1);
     }
@@ -680,9 +703,10 @@ impl Transcript {
             0
         } else {
             let prev = &self.blocks[from - 1];
-            prev.offset + prev.cache.as_ref().map(|c| c.2.len()).unwrap_or(0)
+            prev.offset + prev.height
         };
         let mut animating = None;
+        let mut retained = self.retained;
         let last_i = self.blocks.len().saturating_sub(1);
         // Held outside the loop because the loop borrows `self.blocks` mutably.
         let mut stream = self.stream.take();
@@ -735,20 +759,58 @@ impl Transcript {
                         )
                     }
                 };
+                // Retention accounting: the old lines (if any) go, the new
+                // ones stay, so the budget below sees the truth.
+                retained -= b.cache.as_ref().map(|c| c.2.len()).unwrap_or(0);
+                retained += lines.len();
+                b.height = lines.len();
                 b.cache = Some((width, sig, lines));
             }
             if animating.is_none() && is_running(&b.item) {
                 animating = Some(i);
             }
             b.offset = cursor;
-            cursor += b.cache.as_ref().map(|c| c.2.len()).unwrap_or(0);
+            cursor += b.height;
         }
         self.animating = animating;
         self.laid_out_at = width;
         self.dirty_from = self.blocks.len();
         self.total = cursor;
         self.stream = stream;
+        self.retained = retained;
+        self.evict_cold();
         cursor
+    }
+
+    /// Drop rendered lines from the oldest blocks once retention passes its
+    /// budget.
+    ///
+    /// A block's rendered lines are several times the size of the text behind
+    /// them — every span carries an owned String and a style — and the
+    /// transcript used to hold them for every block for the whole session. The
+    /// oldest blocks are the ones furthest from where the user is working, and
+    /// `window` re-renders any of them on demand, so dropping their lines costs
+    /// one render when they are scrolled back to and nothing otherwise.
+    fn evict_cold(&mut self) {
+        // ~24k lines: far more than any viewport, and small enough that the
+        // spans behind them stay in the tens of megabytes.
+        const BUDGET: usize = 24_000;
+        if self.retained <= BUDGET {
+            return;
+        }
+        let last = self.blocks.len().saturating_sub(1);
+        for (i, b) in self.blocks.iter_mut().enumerate() {
+            if self.retained <= BUDGET {
+                break;
+            }
+            // Never the tail: it is what is on screen while a reply streams,
+            // and the incremental renderer extends its lines every frame.
+            if i == last {
+                break;
+            }
+            self.retained -= b.evict();
+        }
+        crate::tel_debug!("ui", "transcript caches evicted", "retained" => self.retained);
     }
 
     /// Clone the visible window of lines.
@@ -756,7 +818,7 @@ impl Transcript {
     /// Offsets are sorted, so the first visible block is a binary search rather
     /// than a walk from the top — the difference between O(blocks) and
     /// O(log blocks) on every single frame.
-    pub fn window(&self, from: usize, count: usize) -> Vec<Line<'static>> {
+    pub fn window(&mut self, from: usize, count: usize) -> Vec<Line<'static>> {
         let mut out = Vec::with_capacity(count);
         if self.blocks.is_empty() || count == 0 {
             return out;
@@ -766,7 +828,41 @@ impl Transcript {
             // `from` lands inside the preceding block.
             Err(i) => i.saturating_sub(1),
         };
-        for b in &self.blocks[start_block..] {
+        // Scrolling back into a block whose lines were evicted re-renders it
+        // here — the one cost of not keeping every block's spans for ever. It is
+        // a single block's layout, on the frame that needs it.
+        let width = self.laid_out_at;
+        let tick = (self.now.elapsed().as_millis() / 100) as usize;
+        let (show, expand_tools, expand_reasoning) = (
+            self.show_reasoning,
+            self.expand_tools,
+            self.expand_reasoning,
+        );
+        let (theme, glyphs) = (self.theme, self.glyphs);
+        let mut restored = 0usize;
+        for b in &mut self.blocks[start_block..] {
+            if b.cache.is_none() {
+                if b.height == 0 {
+                    continue;
+                }
+                let lines = render_item(
+                    &b.item,
+                    width as usize,
+                    show,
+                    expand_tools,
+                    expand_reasoning,
+                    &theme,
+                    &glyphs,
+                    tick,
+                    None,
+                );
+                // A re-render must not change the block's height, or every
+                // offset after it would be wrong until the next relayout. It
+                // cannot: same item, same width, same flags.
+                debug_assert_eq!(lines.len(), b.height, "re-render changed a block's height");
+                restored += lines.len();
+                b.cache = Some((width, signature(&b.item, show, tick), lines));
+            }
             let Some((_, _, lines)) = &b.cache else {
                 continue;
             };
@@ -777,10 +873,12 @@ impl Transcript {
             for l in &lines[skip..] {
                 out.push(l.clone());
                 if out.len() == count {
+                    self.retained += restored;
                     return out;
                 }
             }
         }
+        self.retained += restored;
         out
     }
 }
@@ -1839,7 +1937,7 @@ mod tests {
         let mut expect = 0usize;
         for b in &tr.blocks {
             assert_eq!(b.offset, expect, "offsets are contiguous after eviction");
-            expect += b.cache.as_ref().map(|c| c.2.len()).unwrap_or(0);
+            expect += b.height;
         }
         assert_eq!(tr.total_lines(), expect, "the total matches the blocks");
         assert_eq!(
@@ -2049,7 +2147,7 @@ mod tests {
         );
     }
 
-    fn shot(t: &Transcript) -> String {
+    fn shot(t: &mut Transcript) -> String {
         t.window(0, t.total_lines().max(1))
             .iter()
             .map(|l| {
@@ -2087,8 +2185,8 @@ mod tests {
             one.assistant_delta(&acc);
             one.relayout(48);
             assert_eq!(
-                shot(&inc),
-                shot(&one),
+                shot(&mut inc),
+                shot(&mut one),
                 "incremental render diverged after {} bytes",
                 acc.len()
             );
@@ -2117,7 +2215,7 @@ mod tests {
             one.reveal = chars;
             one.dirty_from = 0;
             one.relayout(40);
-            assert_eq!(shot(&inc), shot(&one), "diverged at reveal {chars}");
+            assert_eq!(shot(&mut inc), shot(&mut one), "diverged at reveal {chars}");
         }
     }
 
@@ -2137,8 +2235,8 @@ mod tests {
         one.assistant_delta(doc);
         one.relayout(90);
         assert_eq!(
-            shot(&inc),
-            shot(&one),
+            shot(&mut inc),
+            shot(&mut one),
             "re-wrap after a width change diverged"
         );
     }
@@ -2161,7 +2259,7 @@ mod tests {
         one.user("q".into());
         one.assistant_delta(&acc);
         one.relayout(36);
-        assert_eq!(shot(&inc), shot(&one));
+        assert_eq!(shot(&mut inc), shot(&mut one));
     }
     use crate::theme::{ANSI, UNICODE};
 
@@ -2709,6 +2807,51 @@ mod perf {
             shown.contains("19987 more lines"),
             "the count must cover the whole file, not the rendered part: {shown}"
         );
+    }
+
+    /// A long session must not hold every block's rendered spans for ever — and
+    /// scrolling back into a block whose lines were dropped must still show
+    /// exactly what it showed before.
+    #[test]
+    fn cold_blocks_release_their_lines_and_come_back_identical() {
+        let mut t = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        // Enough content to blow past the retention budget several times over.
+        for i in 0..900 {
+            t.user(format!("question {i}"));
+            t.assistant_delta(&format!(
+                "answer {i}\n\n```rust\n{}\n```\n\n",
+                (0..40)
+                    .map(|n| format!("    let x{n} = {i};"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+            t.finish_reveal();
+            t.relayout(100);
+        }
+        let total = t.total_lines();
+        assert!(total > 40_000, "test needs a big transcript, got {total}");
+        assert!(
+            t.retained <= 24_000,
+            "retention is unbounded: {} lines held",
+            t.retained
+        );
+        assert!(
+            t.blocks.iter().any(|b| b.cache.is_none() && b.height > 0),
+            "nothing was evicted"
+        );
+
+        // The top of the transcript is long gone from the cache. Scrolling back
+        // there must render the same lines a fresh transcript would.
+        let scrolled_back = flat(&t.window(0, 30));
+        assert!(
+            !scrolled_back.trim().is_empty(),
+            "evicted blocks came back blank"
+        );
+        assert!(scrolled_back.contains("question 0"), "{scrolled_back}");
+
+        // Offsets survived eviction: the tail is still where it says it is.
+        let tail = flat(&t.window(total.saturating_sub(10), 10));
+        assert!(!tail.trim().is_empty(), "the live tail went missing");
     }
 
     /// A streaming reply must cost the same per frame however long it has been

@@ -6,6 +6,7 @@ mod config;
 mod debug;
 mod detailhelp;
 mod editor;
+mod engine;
 mod fuzzy;
 mod graph;
 mod learning;
@@ -127,6 +128,24 @@ enum Sub {
         #[arg(long)]
         init: bool,
     },
+    /// Manage the browse tool's engine, which koda ships and installs itself.
+    Browser {
+        #[command(subcommand)]
+        cmd: BrowserCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BrowserCmd {
+    /// Download the browse engine into koda's own directory. The installer runs
+    /// this; a `browse` call with no engine does it on its own.
+    Install {
+        /// Re-download even if it is already installed.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Say which engine koda would use, and where it came from.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -197,6 +216,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Sub::Models) => return list_models(&cfg).await,
         Some(Sub::Skills { init }) => return show_skills(&root, init),
         Some(Sub::Config { init }) => return show_config(&cfg, init),
+        Some(Sub::Browser { cmd }) => return browser_cmd(&cfg, cmd).await,
         None => {}
     }
 
@@ -267,6 +287,47 @@ async fn resolve_model(cfg: &Config) -> Result<String> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("{} reports no models", cfg.endpoint()))
+}
+
+/// `koda browser install|status`: provision or report the browse engine.
+async fn browser_cmd(cfg: &Config, cmd: BrowserCmd) -> Result<()> {
+    match cmd {
+        BrowserCmd::Install { force } => {
+            if !force {
+                if let Some(p) = engine::installed() {
+                    println!("agent-browser {} already installed", engine::VERSION);
+                    println!("  {}", p.display());
+                    return Ok(());
+                }
+            }
+            println!("downloading agent-browser {}…", engine::VERSION);
+            let path = engine::install(force).await?;
+            println!("installed {}", path.display());
+            Ok(())
+        }
+        BrowserCmd::Status => {
+            match tools::find_agent_browser(&cfg.browser_path) {
+                Some(p) => {
+                    let ours = engine::engine_path().is_some_and(|own| own == p);
+                    println!("{}", p.display());
+                    println!(
+                        "  source: {}",
+                        if ours {
+                            "shipped with koda"
+                        } else if !cfg.browser_path.trim().is_empty() {
+                            "browser_path in your config"
+                        } else {
+                            "found on your system"
+                        }
+                    );
+                }
+                None => {
+                    println!("no browse engine found — run `koda browser install`");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn list_models(cfg: &Config) -> Result<()> {

@@ -45,6 +45,13 @@ calamine = { version = "0.26", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 quick-xml = { version = "0.36", optional = true }
 pdf-extract = { version = "0.7", optional = true }
+# The browse tool's engine ships as a self-contained native binary inside an npm
+# tarball. koda unpacks it itself so installing koda installs the browser engine
+# too -- no npm, no Node, no second install step for the user. gzip + tar to open
+# the tarball, sha2 to check it against a pinned hash before anything is run.
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
 
 [features]
 default = ["docs", "pdf"]
