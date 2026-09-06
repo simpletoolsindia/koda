@@ -91,6 +91,7 @@ build_and_install() {
         *) warn "add $bin_dir to your PATH:  export PATH=\"$bin_dir:\$PATH\"" ;;
     esac
     ensure_ripgrep
+    report_ocr
     ok "done — run '$BIN_NAME' to start, or '$BIN_NAME --help'"
 }
 
@@ -140,6 +141,44 @@ ensure_ripgrep() {
     else
         warn "ripgrep install failed — koda will use its built-in search (no action needed)"
     fi
+}
+
+# --- optional: image OCR ------------------------------------------------------
+# Attaching a picture to a model that cannot see one goes through OCR, which has
+# two backends: a vision model named in `ocr_model`, which needs nothing
+# installed and reads layout, tables and handwriting far better; and the
+# `tesseract` CLI as the offline fallback.
+#
+# This reports rather than prompts, unlike ripgrep above. Search is on by
+# default, so ripgrep pays off for everyone; OCR ships *off*, tesseract is a
+# sizeable install (engine plus language data), and the vision relay covers the
+# same ground with no download at all. Nagging every install for a disabled
+# feature's optional half of a fallback would be noise.
+report_ocr() {
+    if command -v tesseract >/dev/null 2>&1; then
+        ok "tesseract found — offline image OCR is available (turn it on in /settings)"
+        return 0
+    fi
+    local installer=""
+    if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+        installer="brew install tesseract"
+    elif command -v apt-get >/dev/null 2>&1; then
+        installer="sudo apt-get install -y tesseract-ocr"
+    elif command -v dnf >/dev/null 2>&1; then
+        installer="sudo dnf install -y tesseract"
+    elif command -v pacman >/dev/null 2>&1; then
+        # The engine alone recognises nothing; the language data is a separate
+        # package here, unlike every other manager in this list.
+        installer="sudo pacman -S --noconfirm tesseract tesseract-data-eng"
+    elif command -v zypper >/dev/null 2>&1; then
+        installer="sudo zypper install -y tesseract-ocr"
+    elif command -v apk >/dev/null 2>&1; then
+        installer="sudo apk add tesseract-ocr"
+    else
+        installer="https://tesseract-ocr.github.io/tessdoc/Installation.html"
+    fi
+    info "image OCR is off by default; to read screenshots on a text-only model,"
+    info "set 'ocr vision model' in /settings, or install tesseract:  $installer"
 }
 
 # --- where koda is actually installed ----------------------------------------

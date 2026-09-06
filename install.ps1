@@ -90,7 +90,49 @@ function Build-And-Install {
     Ok "installed to $BinDir\koda.exe"
 
     Add-ToUserPath $BinDir
+    Report-Ocr
     Ok "done - run 'koda' to start, or 'koda --help'"
+}
+
+# --- optional: image OCR -----------------------------------------------------
+# Attaching a picture to a model that cannot see one goes through OCR, which has
+# two backends: a vision model named in `ocr_model`, which needs nothing
+# installed and reads layout, tables and handwriting far better; and the
+# `tesseract` CLI as the offline fallback.
+#
+# This reports rather than prompts: OCR ships off, tesseract is a sizeable
+# install, and the vision relay covers the same ground with no download.
+function Report-Ocr {
+    if (Get-Command tesseract -ErrorAction SilentlyContinue) {
+        Ok "tesseract found - offline image OCR is available (turn it on in /settings)"
+        return
+    }
+    # koda shells out to `tesseract` by name, so a copy that isn't on PATH is a
+    # copy koda cannot use. The UB-Mannheim build -- what winget installs, and
+    # what a manual download gives you -- drops it in Program Files without
+    # adding it, which is the usual reason OCR still says "not available" right
+    # after a successful install. choco and scoop put it on PATH themselves, so
+    # the warning is withheld there rather than sending people to edit PATH for
+    # no reason.
+    $needsPathNote = $false
+    $installer =
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            $needsPathNote = $true
+            "winget install --id UB-Mannheim.TesseractOCR -e"
+        } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+            "choco install tesseract -y"
+        } elseif (Get-Command scoop -ErrorAction SilentlyContinue) {
+            "scoop install tesseract"
+        } else {
+            $needsPathNote = $true
+            "https://github.com/UB-Mannheim/tesseract/wiki"
+        }
+    Info "image OCR is off by default; to read screenshots on a text-only model,"
+    Info "set 'ocr vision model' in /settings, or install tesseract:  $installer"
+    if ($needsPathNote) {
+        Info "(that installer does not add tesseract to PATH - add"
+        Info "'C:\Program Files\Tesseract-OCR' to PATH afterwards or koda won't find it)"
+    }
 }
 
 function Version-Of($exe) {
