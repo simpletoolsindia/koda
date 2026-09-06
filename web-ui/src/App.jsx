@@ -67,6 +67,7 @@ function App() {
   const [memory, setMemory] = React.useState(null);
   const [learning, setLearning] = React.useState(null);
   const [sessions, setSessions] = React.useState(null);
+  const [status, setStatus] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
 
   // ---- manage data (lazy) ----
@@ -183,6 +184,22 @@ function App() {
     return () => { alive = false; };
   }, [selectedId, live, pushToast]);
 
+  // Re-index what changed on disk. The agent sweeps on its own, but someone
+  // looking at the graph after a rebase wants it now, and wants to be told what
+  // moved.
+  const refreshGraph = React.useCallback(async () => {
+    try {
+      const res = await postJson('/api/codegraph/refresh', {});
+      setGraph(await fetchJson('/api/codegraph'));
+      const moved = (res.changed || 0) + (res.removed || 0);
+      pushToast(moved > 0
+        ? `Code graph updated: ${res.changed} changed, ${res.removed} removed`
+        : 'Code graph is already up to date');
+    } catch (e) {
+      pushToast(e.message, 'error');
+    }
+  }, [pushToast]);
+
   const selectTurn = (id) => {
     setSelectedId(id);
     setSelectedSeq(null);
@@ -217,6 +234,23 @@ function App() {
   }, [pushToast]);
 
   React.useEffect(() => { loadControl(true); }, [loadControl]);
+
+  // Live session status: cheap, and the one thing worth polling whether or not
+  // the control rail is on screen, since the header shows it too.
+  React.useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (alive) setStatus(data);
+      } catch { /* the session may be restarting; the next tick retries */ }
+    };
+    poll();
+    const timer = setInterval(poll, 1500);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
   React.useEffect(() => {
     // Refresh while the control rail is on screen; the agent applies changes on
     // its own loop, so the truth lives server-side.
@@ -372,6 +406,17 @@ function App() {
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
+          {status && (status.busy || (status.plan || []).length > 0) && (
+            <button type="button" onClick={() => { setRightTab('control'); setMobilePane('control'); }}
+              title={status.activity || 'Session status'}
+              className="control hidden sm:inline-flex items-center gap-1.5 px-2.5 text-[12px]">
+              <span className={`w-1.5 h-1.5 rounded-full ${status.busy ? 'bg-indigo-400 animate-pulse' : 'bg-zinc-600'}`} aria-hidden="true" />
+              <span className="truncate max-w-[160px]">{status.busy ? (status.activity || 'working') : 'idle'}</span>
+              {(status.plan || []).length > 0 && (
+                <span className="font-mono text-[10px] text-subtle">{status.plan_done}/{status.plan.length}</span>
+              )}
+            </button>
+          )}
           <button type="button" onClick={() => setPaletteOpen(true)}
             className="control inline-flex items-center gap-2 px-2.5 text-[12px]" title="Command palette">
             <span className="hidden sm:inline">Commands</span>
@@ -432,7 +477,7 @@ function App() {
           <div className="flex-1 min-h-0">
             {rightTab === 'control' ? (
               <ControlRail config={config} memory={memory} learning={learning} sessions={sessions}
-                onSaveConfig={saveConfig} onMemory={sendMemory} onLearning={sendLearning}
+                status={status} onSaveConfig={saveConfig} onMemory={sendMemory} onLearning={sendLearning}
                 onSession={sendSession} busy={busy} />
             ) : (
               <TraceInspector turn={detail} step={step} prevModelStep={prevModelStep} />
@@ -472,7 +517,7 @@ function App() {
                 className="ml-auto control px-2.5 text-[12px]" aria-label="Close manage">Close</button>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
-              {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} />}
+              {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} onRefresh={refreshGraph} />}
               {manage === 'skills' && <AgentsSkills skills={skills} loading={skillsState.loading} error={skillsState.error} onRefresh={reloadSkills} pushToast={pushToast} />}
               {manage === 'prompt' && <SystemPrompt data={settings} loading={settingsState.loading} error={settingsState.error} onRefresh={reloadSettings} pushToast={pushToast} />}
               {manage === 'debug' && <LlmDebug debug={debugData} loading={debugState.loading} error={debugState.error} />}

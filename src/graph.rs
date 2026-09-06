@@ -28,7 +28,7 @@ pub struct Def {
     pub line: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Graph {
     /// symbol name -> definitions (a name can be defined in several places)
     pub defs: BTreeMap<String, Vec<Def>>,

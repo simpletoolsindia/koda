@@ -1,5 +1,5 @@
 // CodeGraph.jsx — Interactive force-directed graph of code symbols on Canvas
-function CodeGraph({ graph, loading, error }) {
+function CodeGraph({ graph, loading, error, onRefresh }) {
   const canvasRef = React.useRef(null);
   const stateRef = React.useRef({ nodes: [], edges: [], transform: { x: 0, y: 0, k: 1 } });
   const [hovered, setHovered] = React.useState(null);
@@ -266,6 +266,12 @@ function CodeGraph({ graph, loading, error }) {
         {focused && (
           <button onClick={() => setFocused(null)} className="pointer-events-auto px-2.5 py-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[11px] hover:bg-indigo-500/30">
             ✕ Clear focus
+          </button>
+        )}
+        {onRefresh && (
+          <button onClick={onRefresh} title="Re-index files changed on disk since this graph was built"
+            className="pointer-events-auto ml-auto px-2.5 py-1.5 rounded-lg bg-[#15171d]/95 backdrop-blur border border-line text-[11px] text-gray-300 hover:border-line-strong">
+            ↻ Refresh
           </button>
         )}
       </div>

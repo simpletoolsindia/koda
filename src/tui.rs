@@ -4749,6 +4749,16 @@ pub async fn run(
                     &app.mode.to_string(),
                     &app.auto_tier.to_string(),
                 );
+                // …and what it is doing: the plan, the current step, and how
+                // full the context is, so a browser can follow a run it did not
+                // start instead of only being able to change settings.
+                crate::webui::publish_status(
+                    app.busy,
+                    app.activity.as_deref().unwrap_or(""),
+                    app.tokens,
+                    app.cfg.context_tokens,
+                    &app.transcript.current_todos().unwrap_or_default(),
+                );
                 dirty |= app.drain_web_control();
             }
             _ = watch_tick.tick() => {

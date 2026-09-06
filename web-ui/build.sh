@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
 cat \
   src/_head.html \
   src/components/LiveLogs.jsx \
+  src/components/SessionStatus.jsx \
   src/components/LlmDebug.jsx \
   src/components/CodeGraph.jsx \
   src/components/AgentsSkills.jsx \

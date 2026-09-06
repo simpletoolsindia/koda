@@ -580,13 +580,21 @@ regions:
   that came back, the model's reasoning, and, for a tool, its arguments, result
   and applied diff. It also shows a **Prompt Δ** — a diff against the previous
   model call, which is how you see exactly what compaction dropped or what a
-  newly learned rule added. *Control* is the live session: model, endpoint, mode,
-  autonomy tier, reasoning effort, max steps, feature toggles, project memory,
-  learned-rule candidates (accept/reject), and saved sessions (resume/fork).
+  newly learned rule added. *Control* opens on a **Session** panel — what koda is
+  doing right now, the task list it is working through (with the step in flight
+  marked), and how full the context is — then the live session controls: model,
+  endpoint, mode, autonomy tier, reasoning effort, max steps, feature toggles,
+  project memory, learned rules, and saved sessions (resume/fork). The learned
+  rules show how the daily pass sees them (how many distinct days each has held
+  up, an `auto` badge for ones koda promoted itself) and a dated **learning
+  journal**. The header carries the same live chip — current step and plan
+  progress — so a turn can be followed without opening the rail.
 
 Two more surfaces sit alongside it: a **Logs** drawer (the live event log, press
 `L`) and a **Manage** panel with the code graph, skills/role-agent editor, system
-prompt editor and raw captures.
+prompt editor and raw captures. The code graph has a **Refresh** button that
+re-indexes whatever changed on disk and tells you what moved — useful right
+after a rebase or a branch switch.
 
 `⌘K` / `Ctrl+K` opens a command palette: jump to a turn, switch model or mode,
 toggle a feature, export a trace, or type `@name` and press `Shift+Enter` to look

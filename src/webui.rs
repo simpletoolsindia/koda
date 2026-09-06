@@ -11,18 +11,21 @@
 //!   DELETE /api/trace             drop the trace ring
 //!   GET  /api/trace/<id>          one turn with every step payload
 //!   GET  /api/debug               captured raw request/response sessions
+//!   POST /api/codegraph/refresh   re-index what changed on disk
 //!   GET  /api/codegraph           the project symbol graph as nodes + edges
+//!   POST /api/codegraph/refresh   re-index what changed on disk since it was built
 //!   GET  /api/codegraph/symbol    one symbol: definition and cross-file users
 //!   GET  /api/skills              skills and role agents (name/when/role/body)
 //!   POST /api/skills              create/update a skill or role agent
 //!   DELETE /api/skills/<name>     remove a skill
 //!   GET  /api/settings            system prompt (built-in + override)
 //!   POST /api/settings            replace the system prompt
+//!   GET  /api/status              what the session is doing: plan, step, context
 //!   GET  /api/config              live-editable runtime configuration
 //!   POST /api/config              validate, persist, and apply it live
 //!   GET  /api/memory              project memory (notes, commands, hot files)
 //!   POST /api/memory              remember / forget a note
-//!   GET  /api/learning            accepted rules and pending candidates
+//!   GET  /api/learning            rules, day tracking, and the learning journal
 //!   POST /api/learning            accept / reject a candidate
 //!   GET  /api/sessions            saved sessions, newest first
 //!   POST /api/sessions/<id>/resume|fork
@@ -34,7 +37,7 @@
 
 use crate::log::{self, Level};
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -104,6 +107,79 @@ struct Runtime {
 fn runtime_slot() -> &'static Mutex<Option<Runtime>> {
     static SLOT: OnceLock<Mutex<Option<Runtime>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// What the session is doing right now: the task list, whether a turn is
+/// running, and how full the context is. Published by the TUI on its web tick.
+#[derive(Debug, Clone, Default)]
+struct Status {
+    busy: bool,
+    activity: String,
+    tokens: usize,
+    context_tokens: usize,
+    plan: Vec<(String, &'static str)>,
+}
+
+fn status_slot() -> &'static Mutex<Status> {
+    static SLOT: OnceLock<Mutex<Status>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(Status::default()))
+}
+
+/// Publish what the session is doing, so the browser can follow a run it did
+/// not start — the plan, the current step, and the context budget.
+pub fn publish_status(
+    busy: bool,
+    activity: &str,
+    tokens: usize,
+    context_tokens: usize,
+    plan: &[crate::tools::Todo],
+) {
+    let Ok(mut slot) = status_slot().lock() else {
+        return;
+    };
+    slot.busy = busy;
+    slot.activity = activity.to_string();
+    slot.tokens = tokens;
+    slot.context_tokens = context_tokens;
+    slot.plan = plan
+        .iter()
+        .map(|t| {
+            (
+                t.text.clone(),
+                match t.status {
+                    crate::tools::TodoStatus::Done => "done",
+                    crate::tools::TodoStatus::Active => "in_progress",
+                    crate::tools::TodoStatus::Pending => "pending",
+                },
+            )
+        })
+        .collect();
+}
+
+fn status_json() -> String {
+    let s = status_slot()
+        .lock()
+        .ok()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let live = runtime_slot().lock().ok().and_then(|r| r.clone());
+    let plan: Vec<serde_json::Value> = s
+        .plan
+        .iter()
+        .map(|(text, status)| serde_json::json!({ "text": text, "status": status }))
+        .collect();
+    let done = s.plan.iter().filter(|(_, st)| *st == "done").count();
+    serde_json::json!({
+        "busy": s.busy,
+        "activity": s.activity,
+        "tokens": s.tokens,
+        "context_tokens": s.context_tokens,
+        "model": live.as_ref().map(|r| r.model.clone()).unwrap_or_default(),
+        "mode": live.as_ref().map(|r| r.mode.clone()).unwrap_or_default(),
+        "plan": plan,
+        "plan_done": done,
+    })
+    .to_string()
 }
 
 /// Publish the live values. Cheap to call on a timer: it only writes when
@@ -357,6 +433,13 @@ async fn route(
             let json = codegraph_json(&ctx.root);
             ("200 OK", "application/json", json.into_bytes())
         }
+        ("GET", "/api/status") => ("200 OK", "application/json", status_json().into_bytes()),
+        // Re-index anything that changed on disk, then report what moved. The
+        // browser can be looking at a graph the working tree has outgrown.
+        ("POST", "/api/codegraph/refresh") => {
+            let json = refresh_graph(&ctx.root);
+            ("200 OK", "application/json", json.into_bytes())
+        }
         ("GET", "/api/codegraph/symbol") => {
             let name = url_decode(query_param(query, "name").unwrap_or(""));
             let json = symbol_json(&ctx.root, &name);
@@ -499,22 +582,66 @@ fn trace_json() -> String {
 /// Scanning a repo is not free, so both graph endpoints share one short-lived
 /// cache. 30s keeps an interactive symbol lookup instant while still reflecting
 /// edits made while you work.
+/// Graphs the web UI has built, keyed by workspace root. Keyed rather than a
+/// single slot because two roots served in one process (which is what the test
+/// suite does) would otherwise evict each other and turn every read into a full
+/// rescan.
+type GraphCache = Mutex<HashMap<PathBuf, (std::time::Instant, Arc<crate::graph::Graph>)>>;
+
+fn graph_cache() -> &'static GraphCache {
+    static CACHE: OnceLock<GraphCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn cached_graph(root: &Path) -> Arc<crate::graph::Graph> {
-    type Cache = Mutex<Option<(std::time::Instant, PathBuf, Arc<crate::graph::Graph>)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((at, path, g)) = guard.as_ref() {
-            if path == root && at.elapsed() < std::time::Duration::from_secs(30) {
-                return g.clone();
-            }
+    let cached = graph_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(root).map(|(at, g)| (*at, g.clone())));
+    match cached {
+        Some((at, g)) if at.elapsed() < std::time::Duration::from_secs(30) => g,
+        // Past the cache window, bring the existing graph up to date rather
+        // than rescanning: a refresh reads only the files that changed.
+        Some((_, stale)) => build_graph(root, Some(stale)).0,
+        None => build_graph(root, None).0,
+    }
+}
+
+/// Refresh `prev` (or scan from scratch), store it, and report what moved.
+fn build_graph(
+    root: &Path,
+    prev: Option<Arc<crate::graph::Graph>>,
+) -> (Arc<crate::graph::Graph>, crate::graph::Refreshed) {
+    let (g, done) = match prev {
+        Some(prev) => {
+            let mut next = (*prev).clone();
+            let done = next.refresh(root);
+            (Arc::new(next), done)
         }
+        None => (Arc::new(crate::graph::scan(root)), Default::default()),
+    };
+    if let Ok(mut cache) = graph_cache().lock() {
+        cache.insert(root.to_path_buf(), (std::time::Instant::now(), g.clone()));
     }
-    let g = Arc::new(crate::graph::scan(root));
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((std::time::Instant::now(), root.to_path_buf(), g.clone()));
-    }
-    g
+    (g, done)
+}
+
+/// Force the cached graph up to date and report what moved.
+fn refresh_graph(root: &Path) -> String {
+    let prev = graph_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(root).map(|(_, g)| g.clone()));
+    let (g, done) = build_graph(root, prev);
+    serde_json::json!({
+        "ok": true,
+        "changed": done.changed,
+        "removed": done.removed,
+        "ms": done.ms,
+        "files": g.files,
+        "symbols": g.defs.len(),
+    })
+    .to_string()
 }
 
 /// One symbol: where it is defined and which files use it. This is the same
@@ -782,15 +909,43 @@ fn learning_json(root: &Path) -> String {
             "text": r.text,
             "support": r.support,
             "accepted": r.accepted,
+            // How the daily pass sees this rule: on how many distinct days it
+            // has held up, when it was last re-derived, and whether koda
+            // promoted it itself.
+            "days": r.days,
+            "last": (r.last_day > 0).then(|| crate::learning::ymd(r.last_day)),
+            "auto": r.auto,
         })
     };
     let accepted: Vec<serde_json::Value> =
         l.rules.iter().filter(|r| r.accepted).map(rule).collect();
     let candidates: Vec<serde_json::Value> = l.candidates().into_iter().map(rule).collect();
+    // The dated record of what koda learned, newest first, so the browser can
+    // show the history without re-deriving it.
+    let raw = std::fs::read_to_string(root.join(".koda").join("learning").join("journal.md"))
+        .unwrap_or_default();
+    let mut blocks: Vec<&str> = raw.split("\n## ").collect();
+    blocks.reverse();
+    let journal: Vec<serde_json::Value> = blocks
+        .into_iter()
+        .take(14)
+        .filter_map(|block| {
+            let block = block.trim_start_matches("## ").trim();
+            let (day, rest) = block.split_once('\n')?;
+            let entries: Vec<String> = rest
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("- ").map(str::to_string))
+                .collect();
+            (!entries.is_empty())
+                .then(|| serde_json::json!({ "day": day.trim(), "entries": entries }))
+        })
+        .collect();
     serde_json::json!({
         "accepted": accepted,
         "candidates": candidates,
         "brief": l.brief(),
+        "status": l.daily_status(),
+        "journal": journal,
     })
     .to_string()
 }
@@ -1635,6 +1790,69 @@ mod tests {
         assert!(events.contains("event: trace"), "{events}");
 
         crate::trace::clear();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The browser can now follow a run it did not start: what koda is doing,
+    /// the plan it is working through, and how full the context is. And it can
+    /// bring a stale code graph up to date without restarting koda.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn status_and_graph_refresh_are_served() {
+        let _env = global_state_lock();
+        let root = std::env::temp_dir().join(format!("koda-status-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("src")).ok();
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").unwrap();
+        let addr = start(root.clone(), 0, "medium".into()).await.expect("bind");
+
+        async fn req(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let r = format!(
+                "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            );
+            s.write_all(r.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        }
+
+        publish_status(
+            true,
+            "editing src/a.rs",
+            1_234,
+            8_000,
+            &[
+                crate::tools::Todo {
+                    text: "read the parser".into(),
+                    status: crate::tools::TodoStatus::Done,
+                },
+                crate::tools::Todo {
+                    text: "add the token".into(),
+                    status: crate::tools::TodoStatus::Active,
+                },
+            ],
+        );
+        let got = req(addr, "GET", "/api/status").await;
+        assert!(got.contains("200 OK"), "{got}");
+        assert!(got.contains("editing src/a.rs"), "{got}");
+        assert!(got.contains("\"plan_done\":1"), "{got}");
+        assert!(got.contains("\"in_progress\""), "{got}");
+        assert!(got.contains("\"context_tokens\":8000"), "{got}");
+
+        // Build the cached graph, change the tree behind it, then refresh.
+        let first = req(addr, "GET", "/api/codegraph").await;
+        assert!(first.contains("alpha"), "{first}");
+        std::fs::write(root.join("src/b.rs"), "pub fn beta() {}\n").unwrap();
+        let refreshed = req(addr, "POST", "/api/codegraph/refresh").await;
+        assert!(refreshed.contains("\"ok\":true"), "{refreshed}");
+        assert!(refreshed.contains("\"changed\":1"), "{refreshed}");
+        let after = req(addr, "GET", "/api/codegraph").await;
+        assert!(
+            after.contains("beta"),
+            "the refreshed graph is what is served"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

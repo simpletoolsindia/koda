@@ -48,7 +48,7 @@ const TOGGLE_LABELS = [
   ['debug', 'Debug capture'],
 ];
 
-function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemory, onLearning, onSession, busy }) {
+function ControlRail({ config, memory, learning, sessions, status, onSaveConfig, onMemory, onLearning, onSession, busy }) {
   const [draft, setDraft] = React.useState(null);
   const [note, setNote] = React.useState('');
 
@@ -81,6 +81,7 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
 
   return (
     <div className="h-full min-h-0 overflow-y-auto">
+      <SessionStatus status={status} />
       <CtlSection title="Model"
         action={dirty ? <span className="ml-auto text-[10px] text-amber-300">unsaved</span> : null}>
         <CtlField label="Model id">
@@ -178,7 +179,7 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
       </CtlSection>
 
       <CtlSection title="Learned rules"
-        hint={learning ? `${(learning.accepted || []).length} accepted · ${(learning.candidates || []).length} pending` : 'Loading…'}
+        hint={learning ? (learning.status || `${(learning.accepted || []).length} accepted · ${(learning.candidates || []).length} pending`) : 'Loading…'}
         action={learning && (learning.candidates || []).length > 0 ? (
           <button type="button" onClick={() => onLearning({ accept: 'all' })}
             className="ml-auto text-[10.5px] text-indigo-300 hover:text-indigo-200">Accept all</button>
@@ -189,6 +190,11 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
               <div className="text-[11.5px] leading-4 text-zinc-300">{r.text}</div>
               <div className="mt-1 flex items-center gap-2">
                 <span className="text-[10px] text-subtle font-mono">support {r.support}</span>
+                {r.days > 0 && (
+                  <span className="text-[10px] text-subtle font-mono" title={r.last ? `last seen ${r.last}` : ''}>
+                    seen {r.days}d
+                  </span>
+                )}
                 <button type="button" onClick={() => onLearning({ accept: i + 1 })}
                   className="ml-auto text-[10.5px] text-emerald-300 hover:text-emerald-200">Accept</button>
                 <button type="button" onClick={() => onLearning({ reject: i + 1 })}
@@ -207,7 +213,33 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
             </summary>
             <ul className="mt-1 space-y-0.5">
               {learning.accepted.map(r => (
-                <li key={r.key} className="text-[11px] leading-4 text-zinc-400">• {r.text}</li>
+                <li key={r.key} className="flex items-start gap-1.5 text-[11px] leading-4 text-zinc-400">
+                  <span aria-hidden="true">•</span>
+                  <span className="break-words">{r.text}</span>
+                  {r.auto && (
+                    <span className="ml-auto shrink-0 px-1 rounded bg-accent-soft text-[9.5px] text-indigo-200"
+                      title="Promoted by koda's daily pass — reject it here if it is wrong">auto</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {learning && (learning.journal || []).length > 0 && (
+          <details className="pt-1">
+            <summary className="text-[10.5px] text-subtle cursor-pointer hover:text-muted">
+              Learning journal
+            </summary>
+            <ul className="mt-1 space-y-1.5">
+              {learning.journal.map(day => (
+                <li key={day.day}>
+                  <div className="text-[10px] font-mono text-subtle">{day.day}</div>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {day.entries.map((e, i) => (
+                      <li key={i} className="text-[11px] leading-4 text-zinc-400 break-words">{e}</li>
+                    ))}
+                  </ul>
+                </li>
               ))}
             </ul>
           </details>

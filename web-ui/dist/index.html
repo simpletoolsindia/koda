@@ -424,6 +424,80 @@ function highlightText(text, query) {
     text.slice(idx + query.length)
   );
 }
+// SessionStatus.jsx — what the session is doing right now: the plan it is
+// working through, the step in flight, and how full the context is.
+//
+// The web UI could change settings and read finished traces, but not answer the
+// question people actually have while a turn runs: what is it doing, and how
+// far through is it?
+
+function PlanRow({ item }) {
+  const mark = item.status === 'done' ? '✓' : item.status === 'in_progress' ? '▸' : '○';
+  const tone = item.status === 'done'
+    ? 'text-emerald-400'
+    : item.status === 'in_progress'
+      ? 'text-indigo-300'
+      : 'text-subtle';
+  return (
+    <li className="flex items-start gap-2">
+      <span className={`shrink-0 font-mono text-[11px] leading-4 ${tone}`} aria-hidden="true">{mark}</span>
+      <span className={`text-[11.5px] leading-4 break-words ${item.status === 'done' ? 'text-subtle line-through' : 'text-zinc-300'}`}>
+        {item.text}
+      </span>
+    </li>
+  );
+}
+
+function SessionStatus({ status }) {
+  if (!status) return null;
+  const plan = status.plan || [];
+  const done = status.plan_done || 0;
+  const pct = status.context_tokens > 0
+    ? Math.min(100, Math.round((status.tokens / status.context_tokens) * 100))
+    : 0;
+  const heavy = pct >= 80;
+
+  return (
+    <section className="px-3 py-3 border-b border-line">
+      <div className="flex items-center gap-2">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-subtle">Session</h3>
+        <span className={`ml-auto inline-flex items-center gap-1.5 text-[10.5px] ${status.busy ? 'text-indigo-300' : 'text-subtle'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${status.busy ? 'bg-indigo-400 animate-pulse' : 'bg-zinc-600'}`} aria-hidden="true" />
+          {status.busy ? 'working' : 'idle'}
+        </span>
+      </div>
+
+      {status.busy && status.activity && (
+        <p className="mt-1.5 text-[11.5px] leading-4 text-zinc-300 break-words">{status.activity}</p>
+      )}
+
+      <div className="mt-2">
+        <div className="flex items-center gap-2 text-[10px] font-mono text-subtle">
+          <span>context</span>
+          <span className={heavy ? 'text-amber-300' : ''}>
+            {status.tokens.toLocaleString()} / {status.context_tokens.toLocaleString()} ({pct}%)
+          </span>
+        </div>
+        <div className="mt-1 h-1 rounded-full bg-zinc-800 overflow-hidden" role="progressbar"
+          aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100" aria-label="Context used">
+          <div className={`h-full ${heavy ? 'bg-amber-400' : 'bg-indigo-500'}`} style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+
+      {plan.length > 0 && (
+        <div className="mt-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-subtle">Plan</span>
+            <span className="ml-auto text-[10px] font-mono text-subtle">{done}/{plan.length}</span>
+          </div>
+          <ul className="mt-1.5 space-y-1">
+            {plan.map((item, i) => <PlanRow key={i} item={item} />)}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
 // LlmDebug.jsx — LLM request/response debug viewer with SSE reconstruction
 function parseSseResponse(raw) {
   // Reconstruct assistant text, reasoning, and tool calls from raw SSE data: lines
@@ -829,7 +903,7 @@ function prettyArgs(args) {
   try { return JSON.stringify(JSON.parse(args), null, 2); } catch { return args; }
 }
 // CodeGraph.jsx — Interactive force-directed graph of code symbols on Canvas
-function CodeGraph({ graph, loading, error }) {
+function CodeGraph({ graph, loading, error, onRefresh }) {
   const canvasRef = React.useRef(null);
   const stateRef = React.useRef({ nodes: [], edges: [], transform: { x: 0, y: 0, k: 1 } });
   const [hovered, setHovered] = React.useState(null);
@@ -1096,6 +1170,12 @@ function CodeGraph({ graph, loading, error }) {
         {focused && (
           <button onClick={() => setFocused(null)} className="pointer-events-auto px-2.5 py-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-[11px] hover:bg-indigo-500/30">
             ✕ Clear focus
+          </button>
+        )}
+        {onRefresh && (
+          <button onClick={onRefresh} title="Re-index files changed on disk since this graph was built"
+            className="pointer-events-auto ml-auto px-2.5 py-1.5 rounded-lg bg-[#15171d]/95 backdrop-blur border border-line text-[11px] text-gray-300 hover:border-line-strong">
+            ↻ Refresh
           </button>
         )}
       </div>
@@ -2086,7 +2166,7 @@ const TOGGLE_LABELS = [
   ['debug', 'Debug capture'],
 ];
 
-function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemory, onLearning, onSession, busy }) {
+function ControlRail({ config, memory, learning, sessions, status, onSaveConfig, onMemory, onLearning, onSession, busy }) {
   const [draft, setDraft] = React.useState(null);
   const [note, setNote] = React.useState('');
 
@@ -2119,6 +2199,7 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
 
   return (
     <div className="h-full min-h-0 overflow-y-auto">
+      <SessionStatus status={status} />
       <CtlSection title="Model"
         action={dirty ? <span className="ml-auto text-[10px] text-amber-300">unsaved</span> : null}>
         <CtlField label="Model id">
@@ -2216,7 +2297,7 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
       </CtlSection>
 
       <CtlSection title="Learned rules"
-        hint={learning ? `${(learning.accepted || []).length} accepted · ${(learning.candidates || []).length} pending` : 'Loading…'}
+        hint={learning ? (learning.status || `${(learning.accepted || []).length} accepted · ${(learning.candidates || []).length} pending`) : 'Loading…'}
         action={learning && (learning.candidates || []).length > 0 ? (
           <button type="button" onClick={() => onLearning({ accept: 'all' })}
             className="ml-auto text-[10.5px] text-indigo-300 hover:text-indigo-200">Accept all</button>
@@ -2227,6 +2308,11 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
               <div className="text-[11.5px] leading-4 text-zinc-300">{r.text}</div>
               <div className="mt-1 flex items-center gap-2">
                 <span className="text-[10px] text-subtle font-mono">support {r.support}</span>
+                {r.days > 0 && (
+                  <span className="text-[10px] text-subtle font-mono" title={r.last ? `last seen ${r.last}` : ''}>
+                    seen {r.days}d
+                  </span>
+                )}
                 <button type="button" onClick={() => onLearning({ accept: i + 1 })}
                   className="ml-auto text-[10.5px] text-emerald-300 hover:text-emerald-200">Accept</button>
                 <button type="button" onClick={() => onLearning({ reject: i + 1 })}
@@ -2245,7 +2331,33 @@ function ControlRail({ config, memory, learning, sessions, onSaveConfig, onMemor
             </summary>
             <ul className="mt-1 space-y-0.5">
               {learning.accepted.map(r => (
-                <li key={r.key} className="text-[11px] leading-4 text-zinc-400">• {r.text}</li>
+                <li key={r.key} className="flex items-start gap-1.5 text-[11px] leading-4 text-zinc-400">
+                  <span aria-hidden="true">•</span>
+                  <span className="break-words">{r.text}</span>
+                  {r.auto && (
+                    <span className="ml-auto shrink-0 px-1 rounded bg-accent-soft text-[9.5px] text-indigo-200"
+                      title="Promoted by koda's daily pass — reject it here if it is wrong">auto</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {learning && (learning.journal || []).length > 0 && (
+          <details className="pt-1">
+            <summary className="text-[10.5px] text-subtle cursor-pointer hover:text-muted">
+              Learning journal
+            </summary>
+            <ul className="mt-1 space-y-1.5">
+              {learning.journal.map(day => (
+                <li key={day.day}>
+                  <div className="text-[10px] font-mono text-subtle">{day.day}</div>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {day.entries.map((e, i) => (
+                      <li key={i} className="text-[11px] leading-4 text-zinc-400 break-words">{e}</li>
+                    ))}
+                  </ul>
+                </li>
               ))}
             </ul>
           </details>
@@ -2468,6 +2580,7 @@ function App() {
   const [memory, setMemory] = React.useState(null);
   const [learning, setLearning] = React.useState(null);
   const [sessions, setSessions] = React.useState(null);
+  const [status, setStatus] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
 
   // ---- manage data (lazy) ----
@@ -2584,6 +2697,22 @@ function App() {
     return () => { alive = false; };
   }, [selectedId, live, pushToast]);
 
+  // Re-index what changed on disk. The agent sweeps on its own, but someone
+  // looking at the graph after a rebase wants it now, and wants to be told what
+  // moved.
+  const refreshGraph = React.useCallback(async () => {
+    try {
+      const res = await postJson('/api/codegraph/refresh', {});
+      setGraph(await fetchJson('/api/codegraph'));
+      const moved = (res.changed || 0) + (res.removed || 0);
+      pushToast(moved > 0
+        ? `Code graph updated: ${res.changed} changed, ${res.removed} removed`
+        : 'Code graph is already up to date');
+    } catch (e) {
+      pushToast(e.message, 'error');
+    }
+  }, [pushToast]);
+
   const selectTurn = (id) => {
     setSelectedId(id);
     setSelectedSeq(null);
@@ -2618,6 +2747,23 @@ function App() {
   }, [pushToast]);
 
   React.useEffect(() => { loadControl(true); }, [loadControl]);
+
+  // Live session status: cheap, and the one thing worth polling whether or not
+  // the control rail is on screen, since the header shows it too.
+  React.useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (alive) setStatus(data);
+      } catch { /* the session may be restarting; the next tick retries */ }
+    };
+    poll();
+    const timer = setInterval(poll, 1500);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
   React.useEffect(() => {
     // Refresh while the control rail is on screen; the agent applies changes on
     // its own loop, so the truth lives server-side.
@@ -2773,6 +2919,17 @@ function App() {
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
+          {status && (status.busy || (status.plan || []).length > 0) && (
+            <button type="button" onClick={() => { setRightTab('control'); setMobilePane('control'); }}
+              title={status.activity || 'Session status'}
+              className="control hidden sm:inline-flex items-center gap-1.5 px-2.5 text-[12px]">
+              <span className={`w-1.5 h-1.5 rounded-full ${status.busy ? 'bg-indigo-400 animate-pulse' : 'bg-zinc-600'}`} aria-hidden="true" />
+              <span className="truncate max-w-[160px]">{status.busy ? (status.activity || 'working') : 'idle'}</span>
+              {(status.plan || []).length > 0 && (
+                <span className="font-mono text-[10px] text-subtle">{status.plan_done}/{status.plan.length}</span>
+              )}
+            </button>
+          )}
           <button type="button" onClick={() => setPaletteOpen(true)}
             className="control inline-flex items-center gap-2 px-2.5 text-[12px]" title="Command palette">
             <span className="hidden sm:inline">Commands</span>
@@ -2833,7 +2990,7 @@ function App() {
           <div className="flex-1 min-h-0">
             {rightTab === 'control' ? (
               <ControlRail config={config} memory={memory} learning={learning} sessions={sessions}
-                onSaveConfig={saveConfig} onMemory={sendMemory} onLearning={sendLearning}
+                status={status} onSaveConfig={saveConfig} onMemory={sendMemory} onLearning={sendLearning}
                 onSession={sendSession} busy={busy} />
             ) : (
               <TraceInspector turn={detail} step={step} prevModelStep={prevModelStep} />
@@ -2873,7 +3030,7 @@ function App() {
                 className="ml-auto control px-2.5 text-[12px]" aria-label="Close manage">Close</button>
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
-              {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} />}
+              {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} onRefresh={refreshGraph} />}
               {manage === 'skills' && <AgentsSkills skills={skills} loading={skillsState.loading} error={skillsState.error} onRefresh={reloadSkills} pushToast={pushToast} />}
               {manage === 'prompt' && <SystemPrompt data={settings} loading={settingsState.loading} error={settingsState.error} onRefresh={reloadSettings} pushToast={pushToast} />}
               {manage === 'debug' && <LlmDebug debug={debugData} loading={debugState.loading} error={debugState.error} />}
