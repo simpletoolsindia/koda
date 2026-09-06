@@ -714,6 +714,101 @@ impl TodoStatus {
     }
 }
 
+/// Fold a `todo` update into the plan koda is already tracking.
+///
+/// The tool's contract is "send the whole list every time", and a small local
+/// model does not honour it: it sends the one step it just finished, or the two
+/// remaining ones, or the same steps reworded slightly. Taking each call as a
+/// wholesale replacement is what makes the plan appear to lose items or stop
+/// updating. So: an item that names a step already in the plan updates that
+/// step in place, and anything genuinely new is appended in the order it
+/// arrived. A call that repeats the whole plan behaves exactly as before.
+///
+/// Returns the merged plan.
+pub fn merge_todos(current: &[Todo], update: &[Todo]) -> Vec<Todo> {
+    if current.is_empty() {
+        return update.to_vec();
+    }
+    if update.is_empty() {
+        return current.to_vec();
+    }
+    // A multi-step update that names none of the current steps is a new plan,
+    // not an addition to the old one. (A *single* unrelated item is taken as an
+    // append: that is how a model adds one late step.)
+    let overlap = update
+        .iter()
+        .any(|u| current.iter().any(|c| same_step(&c.text, &u.text)));
+    if !overlap && update.len() > 1 {
+        return update.to_vec();
+    }
+    let mut merged = current.to_vec();
+    let mut matched: Vec<bool> = vec![false; merged.len()];
+    for item in update {
+        match merged
+            .iter()
+            .position(|c| same_step(&c.text, &item.text))
+            .filter(|i| !matched[*i])
+        {
+            Some(i) => {
+                matched[i] = true;
+                // The model's latest wording wins: it may have sharpened the
+                // step, and it is the text it will send next time.
+                merged[i].text = item.text.clone();
+                merged[i].status = item.status;
+            }
+            None => {
+                matched.push(true);
+                merged.push(item.clone());
+            }
+        }
+    }
+    // A full resend that dropped a step means the step is gone — but only when
+    // the update really is a full resend: it has to name existing steps and be
+    // no shorter than the plan. Otherwise a one-line status update, or a lone
+    // appended step, would silently delete the rest.
+    if overlap && update.len() >= current.len() {
+        let keep: Vec<bool> = matched.clone();
+        let mut i = 0;
+        merged.retain(|_| {
+            let k = keep.get(i).copied().unwrap_or(true);
+            i += 1;
+            k
+        });
+    }
+    merged
+}
+
+/// Whether two todo lines name the same step, allowing for the rewording a
+/// model does between updates ("Add the parser" / "add parser").
+fn same_step(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.to_ascii_lowercase()
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .filter(|w| !w.is_empty() && !STEP_NOISE.contains(&w.as_str()))
+            .collect::<Vec<_>>()
+    };
+    let (x, y) = (norm(a), norm(b));
+    if x.is_empty() || y.is_empty() {
+        return x == y;
+    }
+    if x == y {
+        return true;
+    }
+    // Otherwise: the same step if most of the meaningful words agree. Two
+    // thirds is high enough that "add the parser" and "add the lexer" stay
+    // distinct, low enough to survive a rewritten article or tense.
+    let shared = x.iter().filter(|w| y.contains(w)).count();
+    let denom = x.len().max(y.len());
+    shared * 3 >= denom * 2
+}
+
+/// Words that carry no identity in a task line, so rewording around them does
+/// not make a step look new.
+const STEP_NOISE: &[&str] = &[
+    "a", "an", "and", "for", "in", "of", "on", "the", "then", "to", "with",
+];
+
 /// Parse a `todo` call. Tolerant: local models send strings, or bare arrays.
 pub fn parse_todos(args: &Value) -> Vec<Todo> {
     let items = args
@@ -3857,6 +3952,76 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "scratch files left: {leftovers:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The tool asks for the whole list every time; small models send whatever
+    /// they feel like. Every shape here has been seen in practice, and each one
+    /// used to lose the plan.
+    #[test]
+    fn a_partial_todo_update_does_not_lose_the_plan() {
+        let plan = |spec: &[(&str, TodoStatus)]| -> Vec<Todo> {
+            spec.iter()
+                .map(|(t, s)| Todo {
+                    text: (*t).into(),
+                    status: *s,
+                })
+                .collect()
+        };
+        let current = plan(&[
+            ("read the parser", TodoStatus::Done),
+            ("add the new token", TodoStatus::Active),
+            ("update the tests", TodoStatus::Pending),
+        ]);
+
+        // Just the step that finished: the other two survive, in order.
+        let merged = merge_todos(&current, &plan(&[("add the new token", TodoStatus::Done)]));
+        assert_eq!(merged.len(), 3, "{merged:?}");
+        assert_eq!(merged[1].status, TodoStatus::Done);
+        assert_eq!(merged[2].status, TodoStatus::Pending);
+
+        // Reworded slightly — still the same step, not a fourth one.
+        let merged = merge_todos(&current, &plan(&[("Update tests", TodoStatus::Done)]));
+        assert_eq!(merged.len(), 3, "reworded step duplicated: {merged:?}");
+        assert_eq!(merged[2].status, TodoStatus::Done);
+        assert_eq!(merged[2].text, "Update tests", "latest wording wins");
+
+        // A genuinely new step is appended.
+        let merged = merge_todos(
+            &current,
+            &plan(&[("run the benchmark", TodoStatus::Pending)]),
+        );
+        assert_eq!(merged.len(), 4);
+        assert_eq!(merged[3].text, "run the benchmark");
+
+        // A full resend that drops a step really does drop it.
+        let merged = merge_todos(
+            &current,
+            &plan(&[
+                ("read the parser", TodoStatus::Done),
+                ("add the new token", TodoStatus::Done),
+                ("update the tests", TodoStatus::Done),
+            ]),
+        );
+        assert_eq!(merged.len(), 3);
+        assert!(merged.iter().all(|t| t.status == TodoStatus::Done));
+
+        // A whole new plan replaces the old one instead of piling onto it.
+        let merged = merge_todos(
+            &current,
+            &plan(&[
+                ("write the changelog", TodoStatus::Active),
+                ("cut the release", TodoStatus::Pending),
+            ]),
+        );
+        assert_eq!(merged.len(), 2, "a new plan should replace: {merged:?}");
+        assert_eq!(merged[0].text, "write the changelog");
+
+        // Distinct steps that share a verb must stay distinct.
+        let merged = merge_todos(
+            &plan(&[("add the parser", TodoStatus::Pending)]),
+            &plan(&[("add the lexer", TodoStatus::Pending)]),
+        );
+        assert_eq!(merged.len(), 2, "different steps merged: {merged:?}");
     }
 
     /// Token counts are read at a glance, so they round the way a reader

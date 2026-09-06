@@ -211,6 +211,18 @@ impl Transcript {
     pub fn todos(&mut self, items: Vec<Todo>) {
         for (i, b) in self.blocks.iter_mut().enumerate().rev() {
             if let Item::Todos(existing) = &mut b.item {
+                // Only the *same* plan updates in place. A genuinely new plan
+                // shares no step with the old one, and rewriting the old card
+                // for it would leave the update sitting wherever that card
+                // happened to be — usually scrolled off the top, which reads as
+                // the list not updating at all.
+                let same_plan = existing.is_empty()
+                    || items
+                        .iter()
+                        .any(|n| existing.iter().any(|e| e.text == n.text));
+                if !same_plan {
+                    break;
+                }
                 *existing = items;
                 b.cache = None;
                 self.dirty_from = self.dirty_from.min(i);
@@ -612,6 +624,13 @@ impl Transcript {
             Item::Assistant(s) => Some(s.as_str()),
             _ => None,
         })
+    }
+
+    /// How many blocks the transcript holds. Used by tests to tell an in-place
+    /// update from a newly pushed card.
+    #[cfg(test)]
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
     }
 
     pub fn total_lines(&self) -> usize {
@@ -1979,6 +1998,53 @@ mod tests {
         );
     }
 
+    /// A new plan must appear where the conversation is now. Updating the old
+    /// card in place would put it wherever that card was — usually scrolled off
+    /// the top, which is indistinguishable from "the todo list stopped
+    /// updating".
+    #[test]
+    fn a_new_plan_gets_its_own_card_but_an_update_stays_in_place() {
+        use crate::tools::{Todo, TodoStatus};
+        let step = |t: &str, s: TodoStatus| Todo {
+            text: t.into(),
+            status: s,
+        };
+        let mut t = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        t.user("first task".into());
+        t.todos(vec![
+            step("read the parser", TodoStatus::Active),
+            step("add the token", TodoStatus::Pending),
+        ]);
+        let after_first = t.block_count();
+
+        // Same plan, one step further on: the card updates where it is.
+        t.todos(vec![
+            step("read the parser", TodoStatus::Done),
+            step("add the token", TodoStatus::Active),
+        ]);
+        assert_eq!(
+            t.block_count(),
+            after_first,
+            "an update added a second card"
+        );
+
+        // A different task entirely: a new card, after the new user message.
+        t.user("unrelated task".into());
+        t.todos(vec![
+            step("write the changelog", TodoStatus::Active),
+            step("cut the release", TodoStatus::Pending),
+        ]);
+        assert_eq!(
+            t.block_count(),
+            after_first + 2,
+            "a new plan should get its own card"
+        );
+        assert_eq!(
+            t.current_todos().map(|v| v[0].text.clone()),
+            Some("write the changelog".to_string())
+        );
+    }
+
     fn shot(t: &Transcript) -> String {
         t.window(0, t.total_lines().max(1))
             .iter()
@@ -2602,7 +2668,7 @@ mod perf {
     use super::tests::flat;
     use super::*;
 
-    /// A tool card shows at most 200 rows, so a huge result must not be laid out
+    /// A tool card shows at most 200 rows, so a huge result must not be laid out    /// A tool card shows at most 200 rows, so a huge result must not be laid out
     /// in full first — and the "N more lines" note must still count the whole
     /// thing, not just the part that was rendered.
     #[test]

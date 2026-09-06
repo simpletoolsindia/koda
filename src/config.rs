@@ -349,6 +349,18 @@ pub struct Config {
     #[serde(default)]
     pub learning: bool,
 
+    /// Consolidate what was learned once a day: mine the observation log,
+    /// promote candidates that have held up across several days, and retire
+    /// auto-accepted rules that stopped being reinforced. Without this, learning
+    /// only ever happens when the user remembers to run `/learn`.
+    pub learning_daily: bool,
+    /// Distinct days a candidate must keep showing up before it is promoted on
+    /// its own. One day is a coincidence; three is how this project works.
+    pub learning_promote_days: u32,
+    /// Days without reinforcement before an auto-promoted rule drops back to a
+    /// candidate. Manually accepted rules are never retired.
+    pub learning_retire_days: u32,
+
     /// Scan the project into a symbol graph on open, so the model can ask where
     /// something lives instead of grepping for it.
     pub codegraph: bool,
@@ -570,6 +582,9 @@ impl Default for Config {
             sessions: true,
             memory: true,
             learning: false,
+            learning_daily: true,
+            learning_promote_days: 3,
+            learning_retire_days: 30,
             codegraph: true,
             web_search: false,
             search_backend: default_backend(),
@@ -921,6 +936,13 @@ memory = true
 # outcomes) and distil inspectable rules into .koda/learning/rules.md. Review
 # and accept candidates with /learn. Off by default. Fully local, no model.
 learning = false
+# Once a day, koda consolidates what it saw: candidates that keep recurring
+# across `learning_promote_days` distinct days are promoted automatically, and
+# auto-promoted rules that stop being reinforced for `learning_retire_days` drop
+# back to candidates. Rules you accepted yourself are never retired.
+learning_daily = true
+learning_promote_days = 3
+learning_retire_days = 30
 
 # Scan the project on open into a symbol graph (definitions, references,
 # imports) and expose it to the model via the `codegraph` tool.

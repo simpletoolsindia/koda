@@ -101,6 +101,10 @@ pub enum Event {
     Todos(Vec<tools::Todo>),
     TurnEnd {
         history_tokens: usize,
+        /// Whether the turn ran to a natural finish. False when it was
+        /// cancelled, errored, or stopped on the step budget — in which case
+        /// any plan in flight is still in flight.
+        completed: bool,
     },
 }
 
@@ -301,6 +305,10 @@ pub struct Agent {
     /// hidden reasoning); we nudge once with a concrete hint, then stop cleanly
     /// instead of looping. Reset at the start of each top-level turn.
     empty_replies: u32,
+    /// The task list koda is tracking, as merged from every `todo` call. Held
+    /// here rather than only in the transcript so a partial update from the
+    /// model can be folded into the real plan before anyone sees it.
+    plan: Vec<tools::Todo>,
     /// Whether codegraph has already been called in this turn. Used to give a
     /// single corrective hint when a model greps for a bare symbol first.
     used_codegraph_this_turn: bool,
@@ -416,6 +424,7 @@ impl Agent {
             turn_seq: 0,
             last_failure: None,
             empty_replies: 0,
+            plan: Vec::new(),
             used_codegraph_this_turn: false,
             codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
@@ -494,6 +503,7 @@ impl Agent {
             turn_seq: 0,
             last_failure: None,
             empty_replies: 0,
+            plan: Vec::new(),
             used_codegraph_this_turn: false,
             codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
@@ -771,6 +781,7 @@ impl Agent {
                             s.push_str("\nAlready accepted:");
                             s.push_str(&accepted);
                         }
+                        s.push_str(&format!("\n\n{}", self.learning.daily_status()));
                         s
                     }
                     LearnAction::Accept(None) => {
@@ -828,6 +839,17 @@ impl Agent {
             // Each top-level turn is its own undo group.
             self.turn_seq = self.turn_seq.wrapping_add(1);
             self.empty_replies = 0;
+            // A finished plan does not carry into the next request; an
+            // unfinished one does, because the next message usually continues
+            // it ("now do the last one", or a queued follow-up).
+            if !self.plan.is_empty()
+                && self
+                    .plan
+                    .iter()
+                    .all(|t| t.status == tools::TodoStatus::Done)
+            {
+                self.plan.clear();
+            }
             self.used_codegraph_this_turn = false;
             self.codegraph_hint_sent = false;
             self.trace_turn = crate::trace::begin_turn(
@@ -847,6 +869,9 @@ impl Agent {
         let mut status = crate::trace::Status::Ok;
         let mut reply = String::new();
         let mut steps = 0usize;
+        // Set when the loop stops for a reason other than the model finishing:
+        // out of steps, or a tool that failed the same way three times.
+        let mut stopped_early = false;
         // The step budget starts at `max_steps` but is not necessarily the end
         // of the turn: when it runs out `extend_budget` asks the model whether
         // the work is actually finished, and grants another slice if not.
@@ -867,6 +892,7 @@ impl Agent {
                             let _ = tx.send(Event::Notice("cancelled".into()));
                             status = crate::trace::Status::Cancelled;
                         }
+                        stopped_early = true;
                         break;
                     }
                 }
@@ -1044,6 +1070,7 @@ impl Agent {
                             "{} failed {n}× with the same input — stopping the loop",
                             call.function.name
                         )));
+                        stopped_early = true;
                         // Let the model produce a final summary next step, then end.
                         break;
                     }
@@ -1083,6 +1110,22 @@ impl Agent {
             // Mine the turn's observations into candidate rules. Deterministic
             // and cheap; candidates stay dormant until the user runs /learn.
             if self.cfg.learning {
+                // Once a calendar day, consolidate: promote what has held up
+                // across several days and retire what went quiet. This is what
+                // makes learning happen without the user running /learn.
+                if self.cfg.learning_daily {
+                    if let Some(report) = self.learning.daily_pass(
+                        self.cfg.learning_promote_days,
+                        self.cfg.learning_retire_days,
+                    ) {
+                        if let Some(note) = report.notice() {
+                            // Promoted rules go into the prompt now, not next
+                            // session — that is the point of learning daily.
+                            self.rebuild_system();
+                            let _ = tx.send(Event::Notice(note));
+                        }
+                    }
+                }
                 let mut learned = self.learning.induce();
                 // Project-idiom mining (Phase 3): once per session, when the
                 // code graph is ready, surface load-bearing internal symbols and
@@ -1109,6 +1152,10 @@ impl Agent {
             }
             let _ = tx.send(Event::TurnEnd {
                 history_tokens: self.history_tokens(),
+                // A turn that was cut short — cancelled, failed, or out of
+                // steps — has not finished the plan, and saying it has is what
+                // made a half-done task list jump to "all done".
+                completed: matches!(status, crate::trace::Status::Ok) && !stopped_early,
             });
             crate::trace::end_turn(self.trace_turn, status, &reply, self.history_tokens());
             self.trace_turn = None;
@@ -1902,8 +1949,8 @@ impl Agent {
                 view: tools::ToolView::Plain,
             },
             "todo" => {
-                let items = tools::parse_todos(&args);
-                if items.is_empty() {
+                let update = tools::parse_todos(&args);
+                if update.is_empty() {
                     tools::Outcome {
                         ok: false,
                         content: "ERROR: `items` must be a non-empty array of \
@@ -1913,16 +1960,32 @@ impl Agent {
                         view: tools::ToolView::Plain,
                     }
                 } else {
+                    // Merge rather than replace: a model that sends only the
+                    // step it just finished must not wipe the rest of the plan.
+                    let items = tools::merge_todos(&self.plan, &update);
+                    self.plan.clone_from(&items);
                     let done = items
                         .iter()
                         .filter(|i| i.status == tools::TodoStatus::Done)
                         .count();
                     let total = items.len();
                     let summary = format!("plan updated ({done}/{total} done)");
-                    let _ = tx.send(Event::Todos(items));
+                    let _ = tx.send(Event::Todos(items.clone()));
+                    // Echo the merged plan back, so the model sees the list koda
+                    // is actually tracking instead of assuming its partial
+                    // update was the whole truth.
+                    let mut content = format!("Task list recorded: {done}/{total} done.\n");
+                    for it in &items {
+                        let mark = match it.status {
+                            tools::TodoStatus::Done => "x",
+                            tools::TodoStatus::Active => ">",
+                            tools::TodoStatus::Pending => " ",
+                        };
+                        content.push_str(&format!("[{mark}] {}\n", it.text));
+                    }
                     tools::Outcome {
                         ok: true,
-                        content: format!("Task list recorded: {done}/{total} done."),
+                        content,
                         summary,
                         view: tools::ToolView::Plain,
                     }

@@ -45,7 +45,7 @@ pub enum Observation {
 
 /// A distilled rule. Candidate rules await the user's nod; accepted rules are
 /// injected into the system prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Rule {
     /// Stable key for dedup (e.g. "naming.fn.case"). Never shown.
     pub key: String,
@@ -54,6 +54,49 @@ pub struct Rule {
     /// How many observations back this rule.
     pub support: u32,
     pub accepted: bool,
+    /// Distinct days this rule has been re-derived from the log. A habit shows
+    /// up again tomorrow; a coincidence does not — which is what lets koda
+    /// promote a rule on its own without asking the user to run `/learn`.
+    pub days: u32,
+    /// Day (days since the epoch) this rule was last re-derived, so a rule that
+    /// stops being true can be retired instead of lingering in the prompt.
+    pub last_day: u32,
+    /// Promoted by the daily pass rather than by the user. Only these are ever
+    /// retired automatically.
+    pub auto: bool,
+}
+
+/// What one daily consolidation changed. Empty is the normal case.
+#[derive(Debug, Default, Clone)]
+pub struct DailyReport {
+    /// Day the pass ran, as days since the epoch.
+    pub day: u32,
+    /// New candidates mined today.
+    pub found: usize,
+    /// Rules promoted into the prompt on their own.
+    pub promoted: Vec<String>,
+    /// Auto-promoted rules that went quiet and dropped back to candidates.
+    pub retired: Vec<String>,
+}
+
+impl DailyReport {
+    /// A one-line summary for the user, or None when nothing changed.
+    pub fn notice(&self) -> Option<String> {
+        if self.promoted.is_empty() && self.retired.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.promoted.is_empty() {
+            parts.push(format!("learned {} new rule(s)", self.promoted.len()));
+        }
+        if !self.retired.is_empty() {
+            parts.push(format!("retired {} stale one(s)", self.retired.len()));
+        }
+        Some(format!(
+            "daily learning: {} — see /learn or .koda/learning/journal.md",
+            parts.join(", ")
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -129,6 +172,15 @@ fn rules_path(root: &Path) -> PathBuf {
 }
 fn obs_path(root: &Path) -> PathBuf {
     dir(root).join("observations.jsonl")
+}
+/// Day number of the last daily consolidation, so it runs once a day even
+/// across restarts.
+fn pass_path(root: &Path) -> PathBuf {
+    dir(root).join("last-pass")
+}
+/// Human-readable record of what was learned and when.
+fn journal_path(root: &Path) -> PathBuf {
+    dir(root).join("journal.md")
 }
 /// Directory holding koda's last-written content per file, so a correction can
 /// be detected even across sessions (koda writes today, you edit in your
@@ -316,6 +368,7 @@ impl Learning {
                 ),
                 support: *reach as u32,
                 accepted: false,
+                ..Default::default()
             });
         }
         for (module, n) in imports.iter().take(6) {
@@ -326,6 +379,7 @@ impl Learning {
                 ),
                 support: *n as u32,
                 accepted: false,
+                ..Default::default()
             });
         }
         // Idiom mining is deterministic and re-runs from the whole graph, so
@@ -360,7 +414,8 @@ impl Learning {
     /// add new ones. Accepted rules keep their acceptance. Returns new count.
     fn merge_candidates(&mut self, mined: Vec<Rule>) -> usize {
         let mut added = 0;
-        for m in mined {
+        let today = today();
+        for mut m in mined {
             match self.rules.iter_mut().find(|r| r.key == m.key) {
                 Some(existing) => {
                     // Refresh support/text; keep acceptance state.
@@ -368,8 +423,18 @@ impl Learning {
                     if !existing.accepted {
                         existing.text = m.text;
                     }
+                    // A rule re-derived on a new calendar day is a rule that
+                    // held up overnight. That count — not raw support, which one
+                    // busy afternoon can inflate — is what promotion rests on.
+                    if existing.last_day != today {
+                        existing.days = existing.days.saturating_add(1);
+                        existing.last_day = today;
+                        self.dirty = true;
+                    }
                 }
                 None => {
+                    m.days = 1;
+                    m.last_day = today;
                     self.rules.push(m);
                     added += 1;
                 }
@@ -381,6 +446,120 @@ impl Learning {
         }
         tel_info!("learning", "induced", "new" => added, "total" => self.rules.len());
         added
+    }
+
+    /// Consolidate a day's learning: mine the log, promote what has held up
+    /// across several days, and retire what stopped being true.
+    ///
+    /// Learning that only happens when someone remembers to run `/learn` mostly
+    /// does not happen. This runs at most once per calendar day (the marker is
+    /// a file, so it survives restarts), and it only ever promotes a rule that
+    /// the log has re-derived on `promote_days` *different* days — a habit, not
+    /// a busy afternoon. Anything it promotes is marked `auto` in rules.md and
+    /// can be dropped with `/learn reject`; rules the user accepted by hand are
+    /// never touched.
+    pub fn daily_pass(&mut self, promote_days: u32, retire_days: u32) -> Option<DailyReport> {
+        let today = today();
+        if self.last_pass() == Some(today) {
+            return None;
+        }
+        self.mark_pass(today);
+
+        let found = self.induce();
+        let promote_days = promote_days.max(1);
+        let mut report = DailyReport {
+            day: today,
+            found,
+            ..Default::default()
+        };
+
+        for r in self.rules.iter_mut() {
+            if !r.accepted && r.days >= promote_days {
+                r.accepted = true;
+                r.auto = true;
+                report.promoted.push(r.text.clone());
+            }
+        }
+        // Retire only what koda promoted itself, and only once it has gone
+        // quiet for long enough that it is probably about a part of the project
+        // that changed. It drops back to a candidate rather than vanishing, so
+        // the evidence is still there to read.
+        if retire_days > 0 {
+            for r in self.rules.iter_mut() {
+                if r.accepted
+                    && r.auto
+                    && r.last_day > 0
+                    && today.saturating_sub(r.last_day) >= retire_days
+                {
+                    r.accepted = false;
+                    r.auto = false;
+                    r.days = 0;
+                    report.retired.push(r.text.clone());
+                }
+            }
+        }
+        if !report.promoted.is_empty() || !report.retired.is_empty() {
+            self.dirty = true;
+        }
+        self.write_journal(&report);
+        tel_info!(
+            "learning", "daily pass",
+            "found" => report.found,
+            "promoted" => report.promoted.len(),
+            "retired" => report.retired.len(),
+        );
+        Some(report)
+    }
+
+    /// The day the last consolidation ran, if any.
+    fn last_pass(&self) -> Option<u32> {
+        std::fs::read_to_string(pass_path(&self.root))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    fn mark_pass(&self, day: u32) {
+        let _ = std::fs::create_dir_all(dir(&self.root));
+        let _ = std::fs::write(pass_path(&self.root), day.to_string());
+    }
+
+    /// Append the day's changes to a plain-text journal, so "what has koda
+    /// learned about this project" has an answer you can read without koda.
+    fn write_journal(&self, report: &DailyReport) {
+        if report.promoted.is_empty() && report.retired.is_empty() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(dir(&self.root));
+        let mut entry = format!("\n## {}\n", ymd(report.day));
+        for t in &report.promoted {
+            let _ = writeln!(entry, "- learned: {t}");
+        }
+        for t in &report.retired {
+            let _ = writeln!(entry, "- retired: {t}");
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(journal_path(&self.root))
+        {
+            let _ = write!(f, "{entry}");
+        }
+    }
+
+    /// One line for the status/`/learn` output: what the daily pass has been
+    /// doing lately.
+    pub fn daily_status(&self) -> String {
+        let auto = self.rules.iter().filter(|r| r.auto && r.accepted).count();
+        let pending = self.candidates().len();
+        match self.last_pass() {
+            Some(d) => format!(
+                "last consolidated {} · {auto} rule(s) learned on their own · {pending} awaiting review",
+                ymd(d)
+            ),
+            None => format!("not consolidated yet · {pending} candidate(s) awaiting review"),
+        }
     }
 
     /// Accept a candidate rule by index into `candidates()`. Returns its text.
@@ -461,13 +640,13 @@ impl Learning {
         if !accepted.is_empty() {
             text.push_str("\n## Accepted\n");
             for r in &accepted {
-                let _ = writeln!(text, "- [{}] {} — ({})", r.key, r.text, r.support);
+                let _ = writeln!(text, "- {}", rule_line(r));
             }
         }
         if !candidates.is_empty() {
             text.push_str("\n## Candidates\n");
             for r in &candidates {
-                let _ = writeln!(text, "- [{}] {} — ({})", r.key, r.text, r.support);
+                let _ = writeln!(text, "- {}", rule_line(r));
             }
         }
         std::fs::write(rules_path(&self.root), text)?;
@@ -520,6 +699,7 @@ fn command_substitutions(obs: &[Observation]) -> Vec<Rule> {
                 text: format!("`{cmd}` does not work here — it has only ever failed; find the right command instead."),
                 support: *fails,
                 accepted: false,
+                ..Default::default()
             });
         }
     }
@@ -533,6 +713,7 @@ fn command_substitutions(obs: &[Observation]) -> Vec<Rule> {
                 text: format!("`{cmd}` is the command that works here for that task."),
                 support: *oks,
                 accepted: false,
+                ..Default::default()
             });
         }
     }
@@ -569,6 +750,7 @@ fn naming_convention(obs: &[Observation]) -> Vec<Rule> {
             text: "Functions in this project use snake_case.".into(),
             support: snake,
             accepted: false,
+            ..Default::default()
         }]
     } else if camel as f32 / total as f32 >= 0.7 {
         vec![Rule {
@@ -576,6 +758,7 @@ fn naming_convention(obs: &[Observation]) -> Vec<Rule> {
             text: "Functions in this project use camelCase.".into(),
             support: camel,
             accepted: false,
+            ..Default::default()
         }]
     } else {
         Vec::new()
@@ -605,6 +788,7 @@ fn import_preferences(obs: &[Observation]) -> Vec<Rule> {
                 text: format!("This project uses `{lib}` — prefer it over alternatives."),
                 support: n,
                 accepted: false,
+                ..Default::default()
             });
         }
     }
@@ -672,6 +856,7 @@ fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
                 ),
                 support: n,
                 accepted: false,
+                ..Default::default()
             });
         }
     }
@@ -681,6 +866,7 @@ fn correction_rules(obs: &[Observation]) -> Vec<Rule> {
             text: text.to_string(),
             support: n,
             accepted: false,
+            ..Default::default()
         });
     }
     out
@@ -985,11 +1171,77 @@ fn push_lib(out: &mut Vec<String>, name: &str) {
     }
 }
 
+/// Days since the Unix epoch, in UTC. Calendar-day granularity is all the
+/// daily pass needs, and an integer is what makes "three distinct days" a
+/// comparison rather than a date library.
+pub fn today() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 86_400) as u32)
+        .unwrap_or(0)
+}
+
+/// `2026-09-06` for a day number, so the file a user reads shows a date.
+/// Hinnant's civil-from-days, which is exact for every date koda will see.
+pub fn ymd(day: u32) -> String {
+    let z = day as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The inverse of `ymd`, for reading a date back out of rules.md.
+fn day_from_ymd(s: &str) -> Option<u32> {
+    let mut parts = s.split('-');
+    let y: i64 = parts.next()?.trim().parse().ok()?;
+    let m: i64 = parts.next()?.trim().parse().ok()?;
+    let d: i64 = parts.next()?.trim().parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    u32::try_from(era * 146_097 + doe - 719_468).ok()
+}
+
+/// One rules.md line. The suffix is only written when there is something to
+/// say, so a hand-written file stays hand-written.
+fn rule_line(r: &Rule) -> String {
+    let mut line = format!("[{}] {} — ({})", r.key, r.text, r.support);
+    if r.days > 0 {
+        let _ = write!(line, " · seen {}d", r.days);
+    }
+    if r.last_day > 0 {
+        let _ = write!(line, " · last {}", ymd(r.last_day));
+    }
+    if r.auto {
+        line.push_str(" · auto");
+    }
+    line
+}
+
 fn parse_rule_line(item: &str, accepted: bool) -> Option<Rule> {
-    // `[key] text — (support)`
+    // `[key] text — (support) · seen 3d · last 2026-09-06 · auto`
+    // Everything after the support count is optional, so a rules.md written by
+    // an older koda (or edited by hand) still loads.
     let rest = item.strip_prefix('[')?;
     let (key, rest) = rest.split_once(']')?;
     let rest = rest.trim();
+    let (rest, trailer) = match rest.split_once(" · ") {
+        Some((head, tail)) => (head.trim(), tail),
+        None => (rest, ""),
+    };
     let (text, support) = match rest.rsplit_once(" — (") {
         Some((t, s)) => {
             let n = s.trim_end_matches(')').trim().parse().unwrap_or(1);
@@ -1000,11 +1252,27 @@ fn parse_rule_line(item: &str, accepted: bool) -> Option<Rule> {
     if key.is_empty() || text.is_empty() {
         return None;
     }
+    let mut days = 0;
+    let mut last_day = 0;
+    let mut auto = false;
+    for part in trailer.split(" · ") {
+        let part = part.trim();
+        if let Some(n) = part.strip_prefix("seen ") {
+            days = n.trim_end_matches('d').trim().parse().unwrap_or(0);
+        } else if let Some(d) = part.strip_prefix("last ") {
+            last_day = day_from_ymd(d.trim()).unwrap_or(0);
+        } else if part == "auto" {
+            auto = true;
+        }
+    }
     Some(Rule {
         key: key.to_string(),
         text,
         support,
         accepted,
+        days,
+        last_day,
+        auto,
     })
 }
 
@@ -1216,6 +1484,125 @@ mod tests {
             }
         );
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The daily pass is what makes learning happen without being asked, so the
+    /// promotion rule has to be exactly "held up on N different days" — not N
+    /// observations, which one busy afternoon produces on its own.
+    #[test]
+    fn a_rule_is_promoted_only_after_several_distinct_days() {
+        let dir = std::env::temp_dir().join("koda-daily-test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut l = Learning::load(&dir);
+        // Evidence that a habit exists: the same command failing, its fix
+        // working — repeated, which is what induce_rules needs.
+        for _ in 0..3 {
+            l.observe(&Observation::Command {
+                command: "pytest".into(),
+                ok: false,
+            });
+            l.observe(&Observation::Command {
+                command: "python -m pytest".into(),
+                ok: true,
+            });
+        }
+
+        // Day one: mined, but nothing is promoted on a single day's evidence.
+        let day = today();
+        let r = l.daily_pass(3, 30).expect("first pass runs");
+        assert!(
+            r.promoted.is_empty(),
+            "promoted too early: {:?}",
+            r.promoted
+        );
+        assert!(!l.candidates().is_empty(), "nothing was mined at all");
+        // Twice in one day is still one day.
+        assert!(l.daily_pass(3, 30).is_none(), "the pass must be once a day");
+
+        // Days two and three: the same evidence keeps holding up.
+        for extra in 1..=2 {
+            for r in l.rules.iter_mut() {
+                r.last_day = day - 1;
+            }
+            l.mark_pass(day - 1);
+            let report = l.daily_pass(3, 30).expect("a new day runs the pass");
+            if extra < 2 {
+                assert!(report.promoted.is_empty(), "promoted on day {}", extra + 1);
+            }
+        }
+        assert!(
+            l.rules.iter().any(|r| r.accepted && r.auto),
+            "a rule seen on three days should be promoted: {:?}",
+            l.rules
+        );
+        assert!(
+            l.brief().contains("pytest"),
+            "a promoted rule must reach the prompt: {}",
+            l.brief()
+        );
+        // The journal records it in a form a person can read.
+        let journal = std::fs::read_to_string(dir.join(".koda/learning/journal.md")).unwrap();
+        assert!(journal.contains("learned:"), "{journal}");
+
+        // Going quiet retires it — back to a candidate, never deleted. "Quiet"
+        // means the log no longer supports it, so clear the evidence first;
+        // while the observations still re-derive it, the rule is still true.
+        std::fs::write(obs_path(&dir), "").unwrap();
+        for r in l.rules.iter_mut() {
+            r.last_day = today() - 40;
+        }
+        l.mark_pass(today() - 1);
+        let report = l.daily_pass(3, 30).expect("runs again the next day");
+        assert!(!report.retired.is_empty(), "{report:?}");
+        assert!(l.rules.iter().all(|r| !r.accepted));
+        assert!(
+            !l.rules.is_empty(),
+            "a retired rule drops to a candidate, it is not deleted"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Day tracking survives a reload, or every restart would look like day one
+    /// and nothing would ever be promoted.
+    #[test]
+    fn day_tracking_round_trips_through_rules_md() {
+        let dir = std::env::temp_dir().join("koda-daily-roundtrip");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut l = Learning::load(&dir);
+        l.rules.push(Rule {
+            key: "cmd.use.pytest".into(),
+            text: "run tests with `python -m pytest`".into(),
+            support: 4,
+            accepted: true,
+            days: 3,
+            last_day: today(),
+            auto: true,
+        });
+        l.dirty = true;
+        l.save().unwrap();
+
+        let back = Learning::load(&dir);
+        let r = back.rules.first().expect("rule survived the round trip");
+        assert_eq!(
+            (r.days, r.last_day, r.auto, r.accepted),
+            (3, today(), true, true)
+        );
+        assert_eq!(r.support, 4);
+        assert_eq!(r.text, "run tests with `python -m pytest`");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Dates are written for people to read and parsed back exactly.
+    #[test]
+    fn day_numbers_and_dates_convert_both_ways() {
+        assert_eq!(ymd(0), "1970-01-01");
+        assert_eq!(ymd(19_000), "2022-01-08");
+        for day in [0u32, 1, 11_000, 19_000, 20_338, 25_000] {
+            assert_eq!(day_from_ymd(&ymd(day)), Some(day), "round trip for {day}");
+        }
+        assert_eq!(day_from_ymd("not-a-date"), None);
     }
 
     #[test]

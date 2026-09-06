@@ -787,7 +787,10 @@ impl App {
                 }
             }
             Event::Skills(list) => self.show_skills(list),
-            Event::TurnEnd { history_tokens } => {
+            Event::TurnEnd {
+                history_tokens,
+                completed,
+            } => {
                 // A turn that has ended must not leave half a sentence hidden.
                 self.transcript.finish_reveal();
                 self.busy = false;
@@ -815,10 +818,14 @@ impl App {
                         )
                     };
                     self.send(Command::User(framed));
-                } else {
-                    // Truly done — no more queued work. Retire any lingering plan
-                    // so the sticky panel and step counter clear, even if the
-                    // model forgot to flip the last step to done.
+                } else if completed {
+                    // Truly done — no more queued work, and the turn reached a
+                    // natural end. Retire any lingering plan so the sticky panel
+                    // and step counter clear, even if the model forgot to flip
+                    // the last step to done. A turn that was cancelled, failed,
+                    // or ran out of steps leaves the plan exactly as it is:
+                    // marking unfinished work "done" is worse than showing it
+                    // unfinished.
                     self.transcript.complete_current_plan();
                 }
             }
