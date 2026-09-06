@@ -512,7 +512,12 @@ impl Client {
     /// had read the image directly. A multimodal model reads layout, tables,
     /// handwriting, and screenshots far better than classic OCR, so this is
     /// tried first and tesseract (`tools::ocr_image`) is the offline fallback.
-    pub async fn describe_image(&self, model: &str, image_url: &str, prompt: &str) -> Result<String> {
+    pub async fn describe_image(
+        &self,
+        model: &str,
+        image_url: &str,
+        prompt: &str,
+    ) -> Result<String> {
         let body = serde_json::json!({
             "model": model,
             "stream": false,
@@ -547,7 +552,9 @@ impl Client {
             .trim()
             .to_string();
         if content.is_empty() {
-            return Err(anyhow::anyhow!("empty response from vision model `{model}`"));
+            return Err(anyhow::anyhow!(
+                "empty response from vision model `{model}`"
+            ));
         }
         Ok(content)
     }

@@ -139,7 +139,9 @@ impl Row {
             Row::BrowserHeadless => "hidden · visible — show the window to watch or sign in",
             Row::BrowserChannel => "chrome · msedge · bundled — which browser to drive",
             Row::Ocr => "OCR images (tesseract, or the model below) when the model can't see them",
-            Row::OcrModel => "enter a vision model to try before tesseract · empty = tesseract only",
+            Row::OcrModel => {
+                "enter a vision model to try before tesseract · empty = tesseract only"
+            }
             Row::Codegraph => "scan the project into a symbol graph on open",
             Row::Debug => "dump raw requests/responses to the debug dir",
             Row::WebUi => "serve the React log/debug UI on 127.0.0.1 (restart to apply)",

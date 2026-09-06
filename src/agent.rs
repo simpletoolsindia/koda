@@ -2044,8 +2044,7 @@ impl Agent {
                             text = Some(t);
                         }
                         Ok(_) => {
-                            let _ =
-                                tx.send(Event::Notice(format!("OCR found no text in {raw}")));
+                            let _ = tx.send(Event::Notice(format!("OCR found no text in {raw}")));
                         }
                         Err(e) => {
                             let _ = tx.send(Event::Notice(format!("could not OCR {raw}: {e}")));

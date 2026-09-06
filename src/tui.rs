@@ -2518,10 +2518,7 @@ impl App {
                 self.cfg.theme = t.name.to_string();
                 match crate::config::save(&self.cfg) {
                     Ok(_) => self.note(format!("theme → {}", t.name)),
-                    Err(e) => self.note(format!(
-                        "theme → {} (not saved: {e})",
-                        t.name
-                    )),
+                    Err(e) => self.note(format!("theme → {} (not saved: {e})", t.name)),
                 }
             }
             None => self.note(format!(
@@ -2976,19 +2973,20 @@ fn git_branch(root: &Path) -> Option<String> {
 
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    // Paint the whole frame in the theme's base surface colour before anything
-    // else. Every other style in the app only ever sets a *foreground* colour
-    // — text, borders, panels — and relies on this fill for contrast. Without
-    // it, text renders against whatever background the user's terminal
-    // happens to have, which is invisible for a light palette (dark text meant
-    // for a light page, shown on a typically dark terminal) and just lucky for
-    // the dark ones. `Color::Reset` (ansi, mono) means "use the terminal's own
-    // colours, unmodified" and is left alone on purpose.
-    if app.theme.surface != Color::Reset {
-        f.render_widget(
-            Block::default().style(Style::default().bg(app.theme.surface)),
-            area,
-        );
+    // Paint the whole frame in the theme's base colour before anything else.
+    // Text, borders and headings only ever set a *foreground* colour and rely
+    // on this fill for contrast; without it they land on whatever background
+    // the terminal happens to have, which is invisible for a light palette
+    // (dark text meant for a light page, shown on a typically dark terminal)
+    // and merely lucky for the dark ones.
+    //
+    // `bg_panel` is the base, not `surface`: the per-kind block fills are
+    // pitched as slight *lifts* off it, and `surface` sits above them all, so
+    // filling with `surface` would sink every block into a hole. `None` (ansi,
+    // mono) means the palette can't know if the terminal is light or dark, so
+    // those two are left to it, as they are everywhere else.
+    if let Some(bg) = app.theme.bg_panel {
+        f.render_widget(Block::default().style(Style::default().bg(bg)), area);
     }
     // Record it here as well as on resize: the first frame never sees a resize
     // event, and layout decisions elsewhere need the real width.
