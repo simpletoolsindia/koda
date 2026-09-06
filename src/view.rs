@@ -41,6 +41,10 @@ pub enum Item {
         depth: u8,
         /// True when another tool card follows immediately: suppresses the pad.
         grouped: bool,
+        /// Live progress while the tool runs: tokens done, and the total when
+        /// it is known. A big read or write reports this as it streams, so the
+        /// card shows movement instead of a spinner that says nothing.
+        progress: Option<(usize, Option<usize>)>,
     },
     Notice(String),
     Error(String),
@@ -71,6 +75,10 @@ struct StreamRender {
     stable_end: usize,
     /// How many leading cached lines came from that prefix.
     stable_lines: usize,
+    /// The code fence left open at `stable_end`, so the tail resumes as code
+    /// rather than as prose. Without this a streaming code block could not be
+    /// split at all, and every frame re-rendered the whole reply.
+    fence: Option<String>,
 }
 
 pub struct Transcript {
@@ -431,7 +439,28 @@ impl Transcript {
             elapsed: None,
             depth,
             grouped: false,
+            progress: None,
         });
+    }
+
+    /// A running tool reported how much it has read or written so far.
+    pub fn tool_progress(&mut self, id: &str, done: usize, total: Option<usize>) {
+        for (i, b) in self.blocks.iter_mut().enumerate().rev() {
+            if let Item::Tool {
+                id: bid,
+                ok: None,
+                progress,
+                ..
+            } = &mut b.item
+            {
+                if bid == id {
+                    *progress = Some((done, total));
+                    b.cache = None;
+                    self.dirty_from = self.dirty_from.min(i);
+                    return;
+                }
+            }
+        }
     }
 
     pub fn tool_end(
@@ -788,6 +817,7 @@ fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
             depth,
             elapsed,
             grouped,
+            progress,
             ..
         } => (
             // A running tool animates, so its frame is part of the signature;
@@ -796,6 +826,9 @@ fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
                 + summary.len()
                 + detail.len()
                 + usize::from(*grouped)
+                // Streamed progress changes what the card says, so it has to
+                // change the key or the count would freeze at its first value.
+                + progress.map(|(d, _)| d + 1).unwrap_or(0)
                 + if ok.is_none() { tick % 10 * 4096 } else { 0 },
             16 | (match ok {
                 None => 0,
@@ -863,7 +896,16 @@ fn stream_render(
     };
     // Exactly the slice the full renderer would show, so the two paths agree.
     let shown = shown_prefix(text, cut);
-    let split = md::stable_prefix_end(shown);
+    // Resume the scan from the split found last frame: a reply only grows, so
+    // everything before it is already decided. Only a state mismatch (new block,
+    // width change, or text that shrank) falls back to a full scan.
+    let resume = match state.as_ref() {
+        Some(s) if s.block == index && s.width == width && s.stable_end <= shown.len() => {
+            (s.stable_end, s.fence.clone())
+        }
+        _ => (0, None),
+    };
+    let (split, fence) = md::stable_prefix_from(shown, resume.0, resume.1);
     if split == 0 {
         return None; // nothing has settled yet: one short render is cheaper
     }
@@ -873,6 +915,7 @@ fn stream_render(
         width,
         stable_end: 0,
         stable_lines: 0,
+        fence: None,
     };
     let st = match state {
         // Same block, same width, and the settled prefix only grew: reusable.
@@ -898,12 +941,15 @@ fn stream_render(
     // `\n` that separates the halves, which `split` on the whole would consume.
     if split > st.stable_end {
         let seg = &shown[st.stable_end..split - 1];
-        lines.extend(md::render(seg, width as usize, theme));
+        let (fresh, _) = md::render_from(seg, width as usize, theme, st.fence.clone());
+        lines.extend(fresh);
         st.stable_end = split;
         st.stable_lines = lines.len();
+        st.fence = fence;
     }
     // Only the unsettled tail is re-rendered every frame.
-    lines.extend(md::render(&shown[split..], width as usize, theme));
+    let (tail, _) = md::render_from(&shown[split..], width as usize, theme, st.fence.clone());
+    lines.extend(tail);
     lines.push(Line::default());
     Some(lines)
 }
@@ -911,16 +957,14 @@ fn stream_render(
 /// The prefix of a reply that is visible mid-reveal. Slicing on a char boundary
 /// matters: cutting a multi-byte character in half would panic.
 fn shown_prefix(text: &str, cut: Option<usize>) -> &str {
+    // One scan, not two: `chars().count()` on every frame is O(reply) on its
+    // own, and the boundary walk below already reports "past the end".
     match cut {
-        Some(n) if n < text.chars().count() => {
-            let end = text
-                .char_indices()
-                .nth(n)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
-            &text[..end]
-        }
-        _ => text,
+        Some(n) => match text.char_indices().nth(n) {
+            Some((i, _)) => &text[..i],
+            None => text,
+        },
+        None => text,
     }
 }
 
@@ -1123,6 +1167,7 @@ fn render_item(
             elapsed,
             depth,
             grouped,
+            progress,
             ..
         } => render_tool(
             name,
@@ -1136,6 +1181,7 @@ fn render_item(
             elapsed,
             *depth,
             *grouped,
+            *progress,
             width,
             t,
             g,
@@ -1180,6 +1226,7 @@ fn render_tool(
     elapsed: &Option<Duration>,
     depth: u8,
     grouped: bool,
+    progress: Option<(usize, Option<usize>)>,
     width: usize,
     t: &Theme,
     g: &Glyphs,
@@ -1197,11 +1244,26 @@ fn render_tool(
         Some(true) => (settled_glyph, t.success),
         Some(false) => (g.fail.to_string(), t.error),
     };
-    let timing = match (ok, elapsed) {
+    let mut timing = match (ok, elapsed) {
         (Some(_), Some(d)) if d.as_millis() >= 10 => vec![human_ms(*d)],
         (None, _) if started.elapsed().as_millis() > 400 => vec![human_ms(started.elapsed())],
         _ => Vec::new(),
     };
+    // A big read or write streams: say how far it has got, in the same token
+    // units the finished card and the status bar use.
+    if ok.is_none() {
+        if let Some((done, total)) = progress {
+            timing.push(match total {
+                Some(total) if total > done => format!(
+                    "{} / {}",
+                    crate::tools::human_tokens(done),
+                    crate::tools::human_tokens(total)
+                ),
+                _ => crate::tools::human_tokens(done),
+            });
+        }
+    }
+    let timing = timing;
 
     // Failures are the same shape for every tool: the header plus the message.
     if *ok == Some(false) {
@@ -1241,6 +1303,7 @@ fn render_tool(
             added,
             removed,
             created,
+            tokens,
         } => {
             let verb = if *created { "Create" } else { title };
             let head = panel::status_line(
@@ -1251,14 +1314,28 @@ fn render_tool(
                 t,
                 g,
             );
-            let stats = vec![
+            let mut stats = vec![
                 Span::styled(format!("+{added}"), t.fg(t.diff_add)),
                 Span::styled("/".to_string(), t.dim()),
                 Span::styled(format!("-{removed}"), t.fg(t.diff_del)),
             ];
+            if *tokens > 0 {
+                stats.push(Span::styled(
+                    format!("  {}", crate::tools::human_tokens(*tokens)),
+                    t.dim(),
+                ));
+            }
             let from = diff.find("@@ ").unwrap_or(0);
-            let mut body = md::render_diff(&diff[from..], avail.saturating_sub(4), t);
-            let clipped = clip_body(&mut body, expanded, 12, t, g);
+            // Only the hunks that fit are parsed: a diff of a generated file can
+            // be tens of thousands of lines long.
+            let budget = body_budget(expanded, 12);
+            let shown = &diff[from..];
+            let (shown, skipped) = match shown.match_indices('\n').nth(budget) {
+                Some((cut, _)) => (&shown[..cut], shown[cut..].lines().count()),
+                None => (shown, 0),
+            };
+            let mut body = md::render_diff(shown, avail.saturating_sub(4), t);
+            let clipped = clip_body_of(&mut body, expanded, 12, skipped, t, g);
             let tail = if clipped {
                 Some(vec![panel::expand_hint(t)])
             } else {
@@ -1289,12 +1366,21 @@ fn render_tool(
             } else {
                 t.body()
             };
+            // Stop wrapping once the card is full: a command that printed a
+            // megabyte of build output is otherwise laid out in full, every
+            // frame it is on screen, to show eleven rows of it.
+            let budget = body_budget(expanded, 11);
+            let mut skipped = 0usize;
             for l in out.lines() {
+                if body.len() > budget {
+                    skipped += 1;
+                    continue;
+                }
                 for piece in md::hard_wrap(l.trim_end(), avail.saturating_sub(4)) {
                     body.push(Line::from(Span::styled(piece, stream_style)));
                 }
             }
-            let clipped = clip_body(&mut body, expanded, 11, t, g);
+            let clipped = clip_body_of(&mut body, expanded, 11, skipped, t, g);
             let state = if *code == 0 {
                 panel::Frame::Done
             } else {
@@ -1319,8 +1405,12 @@ fn render_tool(
             start,
             total,
             truncated,
+            tokens,
         } => {
             let mut meta = vec![format!("{total} lines")];
+            if *tokens > 0 {
+                meta.push(crate::tools::human_tokens(*tokens));
+            }
             meta.extend(timing.clone());
             if *truncated {
                 meta.push("truncated".into());
@@ -1328,6 +1418,7 @@ fn render_tool(
             let head =
                 panel::status_line(Some(icon), title, Some((path.clone(), t.info)), &meta, t, g);
             let gw = (start + src.len()).to_string().len().max(2);
+            let (src, skipped) = visible_slice(src, expanded, 14);
             let mut body: Vec<Line<'static>> = src
                 .iter()
                 .enumerate()
@@ -1347,7 +1438,7 @@ fn render_tool(
                     Line::from(spans)
                 })
                 .collect();
-            let clipped = clip_body(&mut body, expanded, 14, t, g);
+            let clipped = clip_body_of(&mut body, expanded, 14, skipped, t, g);
             panel::railed(
                 head,
                 body,
@@ -1536,12 +1627,15 @@ fn render_tool(
                     "run_command" => "shell",
                     _ => "text",
                 };
+                let budget = body_budget(expanded, 40);
                 let mut body: Vec<Line<'static>> = detail
                     .lines()
+                    .take(budget + 1)
                     .flat_map(|l| md::hard_wrap(l.trim_end(), avail.saturating_sub(4)))
                     .map(|s| Line::from(md::highlight(&s, lang, t)))
                     .collect();
-                clip_body(&mut body, expanded, 40, t, g);
+                let skipped = detail.lines().count().saturating_sub(budget + 1);
+                clip_body_of(&mut body, expanded, 40, skipped, t, g);
                 for l in body {
                     let mut row = vec![Span::styled(format!(" {} ", g.rail), t.dim())];
                     row.extend(l.spans);
@@ -1587,24 +1681,49 @@ fn render_tool(
 }
 
 /// Trim a body to `cap` rows, leaving a dim marker. Returns whether it clipped.
-fn clip_body(
+/// The most body rows a card can ever show. Anything past this is thrown away,
+/// so it must not be laid out in the first place: highlighting and wrapping a
+/// 20,000-line file to display 14 rows of it is what made a big `read_file`
+/// freeze the frame.
+fn body_budget(expanded: bool, cap: usize) -> usize {
+    if expanded {
+        200
+    } else {
+        cap
+    }
+}
+
+/// Clip a body whose source was pre-limited to `body_budget`:
+/// `skipped` is how many source lines were never laid out, so the "N more
+/// lines" note still counts the whole file rather than only what was rendered.
+fn clip_body_of(
     body: &mut Vec<Line<'static>>,
     expanded: bool,
     cap: usize,
+    skipped: usize,
     t: &Theme,
     g: &Glyphs,
 ) -> bool {
-    let hard = if expanded { 200 } else { cap };
-    if body.len() <= hard {
+    let hard = body_budget(expanded, cap);
+    if body.len() <= hard && skipped == 0 {
         return false;
     }
-    let extra = body.len() - hard + 1;
+    let extra = (body.len() + skipped).saturating_sub(hard) + 1;
     body.truncate(hard.saturating_sub(1));
     body.push(Line::from(Span::styled(
         format!("{} {extra} more lines", g.ellipsis),
         t.dim(),
     )));
     true
+}
+
+/// The head of `src` that can actually be shown, plus how much was left behind.
+fn visible_slice<T>(src: &[T], expanded: bool, cap: usize) -> (&[T], usize) {
+    let budget = body_budget(expanded, cap);
+    if src.len() <= budget {
+        return (src, 0);
+    }
+    (&src[..budget], src.len() - budget)
 }
 
 /// "1 match" / "5 matches" — getting this wrong is the kind of small wrongness
@@ -1980,7 +2099,7 @@ mod tests {
         Transcript::new(ANSI, UNICODE)
     }
 
-    fn flat(lines: &[Line<'_>]) -> String {
+    pub(super) fn flat(lines: &[Line<'_>]) -> String {
         lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -2153,6 +2272,7 @@ mod tests {
                 start: 10,
                 total: 40,
                 truncated: true,
+                tokens: 0,
             },
             72,
         );
@@ -2180,6 +2300,7 @@ mod tests {
                 added: 1,
                 removed: 1,
                 created: false,
+                tokens: 1_200,
             },
             72,
         );
@@ -2188,6 +2309,7 @@ mod tests {
             out.contains("+1") && out.contains("-1"),
             "stats in footer: {out}"
         );
+        assert!(out.contains("1.2k tokens"), "token cost in footer: {out}");
         println!("\n--- diff ---\n{out}");
     }
 
@@ -2472,5 +2594,74 @@ mod tests {
         assert_eq!(human_ms(Duration::from_millis(12)), "12ms");
         assert_eq!(human_ms(Duration::from_millis(1500)), "1.5s");
         assert_eq!(human_ms(Duration::from_secs(75)), "1m15s");
+    }
+}
+
+#[cfg(test)]
+mod perf {
+    use super::tests::flat;
+    use super::*;
+
+    /// A tool card shows at most 200 rows, so a huge result must not be laid out
+    /// in full first — and the "N more lines" note must still count the whole
+    /// thing, not just the part that was rendered.
+    #[test]
+    fn a_huge_read_card_lays_out_only_what_it_shows() {
+        let mut t = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        let lines: Vec<String> = (0..20_000)
+            .map(|i| format!("let value_{i} = compute({i});"))
+            .collect();
+        t.tool_start("1".into(), "read_file".into(), "read_file big.rs".into(), 0);
+        let started = std::time::Instant::now();
+        t.tool_end(
+            "1",
+            true,
+            "read big.rs".into(),
+            String::new(),
+            crate::tools::ToolView::Read {
+                path: "big.rs".into(),
+                lang: "rust".into(),
+                lines,
+                start: 1,
+                total: 20_000,
+                truncated: false,
+                tokens: 0,
+            },
+        );
+        t.relayout(100);
+        let shown = flat(&t.window(0, t.total_lines()));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "rendering a 20k-line read took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            shown.contains("19987 more lines"),
+            "the count must cover the whole file, not the rendered part: {shown}"
+        );
+    }
+
+    /// A streaming reply must cost the same per frame however long it has been
+    /// going, and whatever it contains. A code fence used to have no safe split
+    /// at all, so every frame re-rendered the whole block: 17.7ms/frame at 75KB
+    /// against 0.2ms once the split may land inside the fence, and 24µs once the
+    /// scan for it resumes instead of restarting. The bound below is ~50x the
+    /// measured cost, so it catches a return to quadratic without being a
+    /// stopwatch test.
+    #[test]
+    fn streaming_a_long_code_block_stays_linear() {
+        let mut t = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+        t.assistant_delta("here you go:\n\n```rust\n");
+        let started = std::time::Instant::now();
+        for i in 0..1500 {
+            t.assistant_delta(&format!("    let x{i} = compute({i}, \"a string\");\n"));
+            t.relayout(100);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "1500 streamed code lines took {elapsed:?} — the incremental render \
+             is not being used"
+        );
     }
 }

@@ -352,6 +352,8 @@ async fn headless(
                 let _ = stdout.flush();
             }
             Event::ToolStart { label, .. } => eprintln!("· {label}"),
+            // Headless: the card that would show streamed progress isn't there.
+            Event::ToolProgress { .. } => {}
             Event::ToolEnd { ok, summary, .. } => {
                 if !ok {
                     eprintln!("✗ {summary}");

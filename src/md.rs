@@ -8,48 +8,108 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 /// Where a growing markdown document can be split without changing how it
-/// renders.
+/// renders, and the renderer state that holds at that point.
 ///
-/// `render` is a single pass over lines whose only cross-line state is (a) being
-/// inside a fenced code block and (b) the contiguous rows of a table. So for a
-/// byte offset `p` that starts a line, if no fence is open there and the line
-/// before it is blank, then
+/// `render` is a single pass over lines whose only cross-line state is (a) the
+/// open fenced code block, if any, and (b) the contiguous rows of a table. So
+/// for a byte offset `p` that starts a line, if the line before it is blank and
+/// no fence is open, or if `p` sits inside a fence (where every line renders on
+/// its own),
 ///
 /// ```text
-/// render(text[..p-1]) ++ render(text[p..]) == render(text)
+/// render(text[..p-1]) ++ render_from(text[p..], fence) == render(text)
 /// ```
 ///
 /// (the dropped byte is the `\n` that separated the two halves, which `split`
 /// consumes). A blank line before `p` is what rules out splitting a table.
 ///
-/// Returns the largest such `p`, or 0 when the document has no safe split yet.
-/// This is what lets a streaming reply re-render only its tail instead of the
-/// whole block on every frame.
-pub fn stable_prefix_end(text: &str) -> usize {
-    let mut in_fence = false;
-    let mut best = 0usize;
-    let mut offset = 0usize;
-    for line in text.split('\n') {
+/// Settling inside a fence is what keeps a streaming code block linear: without
+/// it a reply that opens with ```` ``` ```` has no safe split at all, so every
+/// frame re-renders the whole block and a long answer costs O(reply²) — measured
+/// at 17.7ms/frame for a 200KB fence against 0.57ms for the same size in prose.
+///
+/// Returns the largest such `p` (0 when nothing has settled yet) together with
+/// the code fence open at `p`, which the caller must pass to `render_from`.
+pub fn stable_prefix(text: &str) -> (usize, Option<String>) {
+    stable_prefix_from(text, 0, None)
+}
+
+/// `stable_prefix`, resuming from a split already found for a shorter prefix of
+/// the same document.
+///
+/// A streaming reply only ever grows, so re-deriving the split from byte 0 on
+/// every frame is O(reply) work to answer a question whose answer changed by at
+/// most the newest chunk — 220µs/frame at 80KB, and rising. Given the previous
+/// split and the fence open there, only the bytes after it have to be scanned.
+///
+/// `start` must be a line boundary previously returned by this function (or 0),
+/// and `fence` the state that came back with it. Returns an absolute offset,
+/// never less than `start`.
+pub fn stable_prefix_from(
+    text: &str,
+    start: usize,
+    fence: Option<String>,
+) -> (usize, Option<String>) {
+    if start > text.len() || !text.is_char_boundary(start) {
+        return stable_prefix(text);
+    }
+    let mut fence = fence;
+    let mut best = start;
+    let mut best_fence = fence.clone();
+    let mut offset = start;
+    for line in text[start..].split('\n') {
         // `offset` is this line's start; the next line starts after its '\n'.
         let next = offset + line.len() + 1;
-        let fence = line.trim_start();
-        if fence.starts_with("```") || fence.starts_with("~~~") {
-            in_fence = !in_fence;
-        } else if !in_fence && line.trim_end().is_empty() && next <= text.len() {
+        let marker = line.trim_start();
+        let complete = next <= text.len();
+        if marker.starts_with("```") || marker.starts_with("~~~") {
+            fence = match fence {
+                Some(_) => None,
+                // The fence header line is rendered by whichever half contains
+                // it, so a split may only land *after* it.
+                None => Some(normalize_lang(marker[3..].trim())),
+            };
+            // Right after a closing fence the document is back to prose, but the
+            // next line may still continue a paragraph, so only a fence body is
+            // settled here.
+            if complete && fence.is_some() {
+                best = next;
+                best_fence.clone_from(&fence);
+            }
+        } else if fence.is_some() {
+            // Inside a fence every complete line renders independently.
+            if complete {
+                best = next;
+                best_fence.clone_from(&fence);
+            }
+        } else if line.trim_end().is_empty() && complete {
             // A blank line outside a fence: everything up to here is settled, so
             // the next line is a safe place to resume.
             best = next;
+            best_fence = None;
         }
         offset = next;
     }
-    best
+    (best, best_fence)
 }
 
 pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
+    render_from(text, width, t, None).0
+}
+
+/// `render`, resuming inside an already-open code fence. Returns the lines and
+/// the fence still open at the end, so a streaming caller can continue from
+/// exactly where this left off.
+pub fn render_from(
+    text: &str,
+    width: usize,
+    t: &Theme,
+    open_fence: Option<String>,
+) -> (Vec<Line<'static>>, Option<String>) {
     let width = width.max(8);
     let dim = || t.dim();
     let mut out: Vec<Line<'static>> = Vec::new();
-    let mut code_lang: Option<String> = None;
+    let mut code_lang: Option<String> = open_fence;
 
     let all: Vec<&str> = text.split('\n').collect();
     let mut i = 0usize;
@@ -157,7 +217,7 @@ pub fn render(text: &str, width: usize, t: &Theme) -> Vec<Line<'static>> {
 
         out.extend(wrap_spans(inline(trimmed, t.body(), t), width, 0));
     }
-    out
+    (out, code_lang)
 }
 
 /// Render a unified diff the way `git diff` reads: a line-number gutter, then
@@ -943,9 +1003,10 @@ mod tests {
     use super::*;
 
     /// The invariant the incremental streaming render depends on: splitting at
-    /// `stable_prefix_end` and rendering the halves separately must produce
-    /// exactly what rendering the whole document produces. If this ever fails,
-    /// a streaming reply would render differently from a settled one.
+    /// `stable_prefix` and rendering the halves separately — carrying the fence
+    /// state across the seam — must produce exactly what rendering the whole
+    /// document produces. If this ever fails, a streaming reply would render
+    /// differently from a settled one.
     #[test]
     fn splitting_at_a_stable_point_renders_identically() {
         let t = crate::theme::resolve("default");
@@ -963,12 +1024,13 @@ mod tests {
         ];
         for doc in corpus {
             let whole = render(doc, 60, &t);
-            let p = stable_prefix_end(doc);
+            let (p, fence) = stable_prefix(doc);
             if p == 0 {
                 continue; // no safe split yet; the full render is the only option
             }
-            let mut split = render(&doc[..p - 1], 60, &t);
-            split.extend(render(&doc[p..], 60, &t));
+            let (mut split, open) = render_from(&doc[..p - 1], 60, &t, None);
+            assert_eq!(open, fence, "reported fence state is wrong for {doc:?}");
+            split.extend(render_from(&doc[p..], 60, &t, fence).0);
             assert_eq!(
                 fmt(&whole),
                 fmt(&split),
@@ -977,19 +1039,59 @@ mod tests {
         }
     }
 
-    /// A split must never land inside a code fence, because the fence changes how
-    /// every following line is rendered.
+    /// A split inside a code fence is allowed — a long streaming code block is
+    /// exactly the case that needs it — but only with the fence reported back,
+    /// because it changes how every following line renders.
     #[test]
-    fn a_split_never_lands_inside_a_fence() {
-        // The only blank line is inside the fence, so there is no safe split.
-        assert_eq!(stable_prefix_end("```\ncode\n\nmore code\n"), 0);
-        // Once the fence closes, the blank line after it is safe.
+    fn a_split_inside_a_fence_reports_the_fence() {
+        let doc = "```rust\ncode\n\nmore code\n";
+        let (p, fence) = stable_prefix(doc);
+        assert_eq!(&doc[p..], "", "the whole fence body has settled: p={p}");
+        assert_eq!(fence.as_deref(), Some("rust"));
+        // A closed header line is itself a safe seam: the first half renders the
+        // header, the second resumes inside the fence.
+        let (p, fence) = stable_prefix("```rust\n");
+        assert_eq!((p, fence.as_deref()), (8, Some("rust")));
+        // An unterminated header settles nothing — its language is still arriving.
+        assert_eq!(stable_prefix("```rus"), (0, None));
+        // Once the fence closes, the blank line after it is safe and the state
+        // is back to prose.
         let doc = "```\ncode\n```\n\ntail";
-        let p = stable_prefix_end(doc);
+        let (p, fence) = stable_prefix(doc);
         assert!(p > 0 && &doc[p..] == "tail", "p={p} rest={:?}", &doc[p..]);
-        // Splitting mid-table is impossible: a table has no blank line in it.
-        let doc = "| a | b |\n|---|---|\n| 1 | 2 |";
-        assert_eq!(stable_prefix_end(doc), 0);
+        assert_eq!(fence, None);
+        // Splitting mid-table is still impossible: a table has no blank line.
+        assert_eq!(stable_prefix("| a | b |\n|---|---|\n| 1 | 2 |"), (0, None));
+    }
+
+    /// Resuming the scan from the previous split must give the same answer as
+    /// scanning from the start — that equality is the whole basis for making
+    /// the per-frame cost independent of how much has already been streamed.
+    #[test]
+    fn an_incremental_split_matches_a_full_scan() {
+        let docs = [
+            "alpha\n\nbeta\n\ngamma\n\ndelta tail",
+            "intro\n\n```py\nx = 1\ny = 2\n\nz = 3\n```\n\nafter\n\nmore",
+            "```\nno language\nlines\nkeep\ncoming\n",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\ntext after a table\n\nend",
+        ];
+        for doc in docs {
+            let mut state = (0usize, None);
+            for end in 1..=doc.len() {
+                if !doc.is_char_boundary(end) {
+                    continue;
+                }
+                let grown = &doc[..end];
+                let inc = stable_prefix_from(grown, state.0, state.1.clone());
+                assert_eq!(
+                    inc,
+                    stable_prefix(grown),
+                    "incremental split diverged at {end} of {doc:?}"
+                );
+                assert!(inc.0 >= state.0, "split moved backwards at {end}");
+                state = inc;
+            }
+        }
     }
 
     /// Streaming appends, so the split point may only ever move forward — that is
@@ -1002,7 +1104,7 @@ mod tests {
             if !full.is_char_boundary(end) {
                 continue;
             }
-            let p = stable_prefix_end(&full[..end]);
+            let p = stable_prefix(&full[..end]).0;
             assert!(p >= last, "split moved backwards: {last} -> {p} at {end}");
             last = p;
         }

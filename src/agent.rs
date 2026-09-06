@@ -57,6 +57,14 @@ pub enum Event {
         /// 0 = this agent, 1 = inside a delegated subagent.
         depth: u8,
     },
+    /// A running tool has read or written this many tokens so far, out of the
+    /// total when it is known. Only the file tools report this, and only for
+    /// content big enough that the wait would otherwise be a bare spinner.
+    ToolProgress {
+        id: String,
+        done: usize,
+        total: Option<usize>,
+    },
     ToolEnd {
         id: String,
         ok: bool,
@@ -370,6 +378,8 @@ impl Agent {
         let ctx = ToolCtx {
             root,
             cfg: cfg.clone(),
+            // Filled in per call, so a tool reports progress to its own card.
+            progress: None,
         };
         Ok(Self {
             model: cfg.model.clone(),
@@ -837,17 +847,29 @@ impl Agent {
         let mut status = crate::trace::Status::Ok;
         let mut reply = String::new();
         let mut steps = 0usize;
+        // The step budget starts at `max_steps` but is not necessarily the end
+        // of the turn: when it runs out `extend_budget` asks the model whether
+        // the work is actually finished, and grants another slice if not.
+        let mut budget = self.cfg.max_steps.max(1);
         loop {
             if self.cancelled() {
                 let _ = tx.send(Event::Notice("cancelled".into()));
                 status = crate::trace::Status::Cancelled;
                 break;
             }
-            if steps >= self.cfg.max_steps {
-                let _ = tx.send(Event::Notice(format!(
-                    "stopped after {steps} steps (max_steps); send another message to continue"
-                )));
-                break;
+            if steps >= budget {
+                match self.extend_budget(&input, steps, budget, tx).await {
+                    Some(next) => budget = next,
+                    None => {
+                        // Esc pressed during the step check: report it as a
+                        // cancellation, not as a clean stop.
+                        if self.cancelled() {
+                            let _ = tx.send(Event::Notice("cancelled".into()));
+                            status = crate::trace::Status::Cancelled;
+                        }
+                        break;
+                    }
+                }
             }
             steps += 1;
 
@@ -1091,6 +1113,157 @@ impl Agent {
             crate::trace::end_turn(self.trace_turn, status, &reply, self.history_tokens());
             self.trace_turn = None;
         }
+    }
+
+    /// The step budget ran out. Rather than cutting the turn off mid-task,
+    /// ask the model — in one cheap, tool-free call — whether the work is
+    /// actually finished. "STOP" (or `step_check = false`, or a failed/garbled
+    /// answer) ends the turn as before; "CONTINUE" buys another `max_steps`,
+    /// bounded by `max_steps_hard` so a confused model still cannot spin
+    /// forever. Returns the new budget, or `None` to break the loop.
+    async fn extend_budget(
+        &mut self,
+        input: &str,
+        steps: usize,
+        budget: usize,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> Option<usize> {
+        let stop = |tx: &mpsc::UnboundedSender<Event>, why: &str| {
+            let _ = tx.send(Event::Notice(format!(
+                "stopped after {steps} steps ({why}); send another message to continue"
+            )));
+            None
+        };
+        if !self.cfg.step_check {
+            return stop(tx, "max_steps");
+        }
+        let cap = self.cfg.max_steps_hard.max(self.cfg.max_steps).max(1);
+        if budget >= cap {
+            return stop(tx, "max_steps_hard");
+        }
+        if self.cancelled() {
+            return None;
+        }
+
+        let _ = tx.send(Event::Notice(format!(
+            "{steps} steps used — checking whether the task still needs more"
+        )));
+        let verdict = self.ask_should_continue(input).await;
+        if self.cancelled() {
+            // Esc during the check: the loop's own cancel handling reports it.
+            return None;
+        }
+        match verdict {
+            Ok(Some(reason)) => {
+                let next = (budget + self.cfg.max_steps.max(1)).min(cap);
+                crate::tel_info!(
+                    "agent", "step budget extended",
+                    "steps" => steps, "budget" => next, "reason" => reason.clone(),
+                );
+                let _ = tx.send(Event::Notice(format!(
+                    "continuing to {next} steps — {reason}"
+                )));
+                // Tell the model what it has left, so it spends the extension
+                // on finishing rather than on more exploration.
+                self.history.push(Message::user(format!(
+                    "[Step budget check: you have used {steps} of {next} steps for this turn. \
+                     Finish the remaining work now — do the essential steps first and stop \
+                     with a plain-text summary as soon as the task is done.]"
+                )));
+                Some(next)
+            }
+            Ok(None) => stop(tx, "the model reported the task complete"),
+            Err(e) => {
+                crate::tel_warn!("agent", "step check failed", "detail" => format!("{e:#}"));
+                stop(tx, "max_steps")
+            }
+        }
+    }
+
+    /// One tool-free model call asking whether this turn has more real work to
+    /// do. `Some(reason)` means keep going, `None` means the task is done.
+    async fn ask_should_continue(&self, input: &str) -> anyhow::Result<Option<String>> {
+        let messages = vec![
+            Message::system(
+                "You are supervising a coding agent that has just used up its step budget. \
+                 Decide whether it still has necessary work left, or whether the task is \
+                 essentially done (or so stuck that more steps will not help). Answer with \
+                 ONE word on the first line: CONTINUE or STOP. Then one short sentence \
+                 saying why. Choose STOP if the request is satisfied, if the agent is \
+                 repeating itself, or if it needs the user to answer something. Choose \
+                 CONTINUE only when concrete steps remain that the agent can do on its own.",
+            ),
+            Message::user(format!(
+                "The user asked:\n{}\n\nRecent activity (oldest first):\n{}\n\n\
+                 Does the agent need more steps? Answer CONTINUE or STOP.",
+                tools::truncate(input.trim(), 2_000),
+                self.recent_digest(14),
+            )),
+        ];
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages,
+            temperature: 0.0,
+            top_p: self.cfg.top_p,
+            max_tokens: 128,
+            tools: None,
+            reasoning_effort: "off".into(),
+        };
+        let (stx, mut srx) = mpsc::unbounded_channel();
+        // One attempt: this is a guard rail, not the work — if the server is
+        // unhappy the caller falls back to the old hard stop.
+        let res = self.client.stream_with_retry(&req, &stx, 1).await;
+        drop(stx);
+        let mut out = String::new();
+        while let Some(ev) = srx.recv().await {
+            if let StreamEvent::Text(t) = ev {
+                out.push_str(&t);
+            }
+        }
+        res?;
+        if self.cancelled() {
+            return Ok(None);
+        }
+        Ok(parse_continue(&out))
+    }
+
+    /// A compact, readable trace of the last `n` history entries for the step
+    /// check: what was asked for, what tools ran, and how they answered.
+    fn recent_digest(&self, n: usize) -> String {
+        let start = self.history.len().saturating_sub(n);
+        let mut out = String::new();
+        for m in &self.history[start..] {
+            let text = m.content.as_deref().unwrap_or("").trim();
+            match m.role {
+                Role::System => continue,
+                Role::User => {
+                    out.push_str(&format!("USER: {}\n", tools::truncate(text, 300)));
+                }
+                Role::Assistant => {
+                    if !text.is_empty() {
+                        out.push_str(&format!("AGENT: {}\n", tools::truncate(text, 300)));
+                    }
+                    for c in m.tool_calls.iter().flatten() {
+                        out.push_str(&format!(
+                            "AGENT CALLS: {} {}\n",
+                            c.function.name,
+                            tools::truncate(c.function.arguments.trim(), 160)
+                        ));
+                    }
+                }
+                Role::Tool => {
+                    out.push_str(&format!(
+                        "RESULT ({}): {}\n",
+                        m.name.as_deref().unwrap_or("tool"),
+                        tools::truncate(text, 300)
+                    ));
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push_str("(nothing recorded)\n");
+        }
+        out
     }
 
     /// Which tools this agent may call right now: the subagent subset, or in
@@ -1436,6 +1609,9 @@ impl Agent {
     /// loop that follows — only the I/O is parallelised.
     async fn prefetch_parallel(&mut self, calls: &[ToolCall]) {
         self.prefetched.clear();
+        if self.cancelled() {
+            return;
+        }
         let safe: Vec<&ToolCall> = calls
             .iter()
             .filter(|c| tools::is_parallel_safe(&c.function.name) && !c.args().is_null())
@@ -1443,18 +1619,60 @@ impl Agent {
         if safe.len() < 2 {
             return;
         }
-        let futures = safe.iter().map(|c| {
-            let name = c.function.name.clone();
+        // A model batching the same lookup twice is common (two hunks of one
+        // file, the same grep issued for two reasons). Run each distinct call
+        // once and hand the result to every id that asked for it.
+        let mut order: Vec<(String, Value, Vec<String>)> = Vec::new();
+        for c in &safe {
             let args = c.args();
-            let ctx = self.ctx.clone();
-            let id = c.id.clone();
-            async move { (id, tools::run(&name, args, &ctx).await) }
-        });
-        let results = futures_util::future::join_all(futures).await;
-        for (id, outcome) in results {
-            self.prefetched.insert(id, outcome);
+            match order
+                .iter_mut()
+                .find(|(n, a, _)| *n == c.function.name && *a == args)
+            {
+                Some((_, _, ids)) => ids.push(c.id.clone()),
+                None => order.push((c.function.name.clone(), args, vec![c.id.clone()])),
+            }
         }
-        crate::tel_debug!("agent", "parallel prefetch", "count" => self.prefetched.len());
+
+        // Bounded concurrency: a batch of twenty reads should not put twenty
+        // blocking file tasks on the pool at once, which turns a fast batch
+        // into disk thrash and starves the streaming UI of its thread.
+        let limit = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 8);
+        let sem = Arc::new(tokio::sync::Semaphore::new(limit));
+        let futures = order.into_iter().map(|(name, args, ids)| {
+            let ctx = self.ctx.clone();
+            let sem = sem.clone();
+            async move {
+                // A closed semaphore cannot happen here (it lives as long as
+                // this call), so treat a failure as "just run it".
+                let _permit = sem.acquire().await;
+                (ids, tools::run(&name, args, &ctx).await)
+            }
+        });
+        let all = futures_util::future::join_all(futures);
+        // Esc must end a slow batch (a grep over a huge tree) rather than
+        // leaving the user watching work they already cancelled.
+        let notify = self.notify.clone();
+        let results = tokio::select! {
+            biased;
+            _ = notify.notified() => {
+                crate::tel_debug!("agent", "parallel prefetch cancelled");
+                return;
+            }
+            r = all => r,
+        };
+        for (ids, outcome) in results {
+            for id in ids {
+                self.prefetched.insert(id, outcome.clone());
+            }
+        }
+        crate::tel_debug!(
+            "agent", "parallel prefetch",
+            "calls" => self.prefetched.len(), "limit" => limit,
+        );
     }
 
     /// Run one tool call, recording it as a step in the turn's trace: the
@@ -1713,7 +1931,7 @@ impl Agent {
             _ => match self.prefetched.remove(&call.id) {
                 // Reuse the result computed concurrently in prefetch_parallel.
                 Some(o) => o,
-                None => tools::run(&name, args, &self.ctx).await,
+                None => tools::run(&name, args, &self.streaming_ctx(&call.id, tx)).await,
             },
         };
         if self.depth == 0
@@ -1882,6 +2100,24 @@ impl Agent {
 
     /// Remember a file's contents before we change it. Bounded, because the
     /// point is recovering from the last mistake, not full history.
+    /// A tool context whose progress reports land on this call's card.
+    ///
+    /// Only the file tools use it, and only past the first chunk, so the cost
+    /// is one clone of the context per call rather than an event per byte.
+    fn streaming_ctx(&self, id: &str, tx: &mpsc::UnboundedSender<Event>) -> ToolCtx {
+        let mut ctx = self.ctx.clone();
+        let id = id.to_string();
+        let tx = tx.clone();
+        ctx.progress = Some(tools::Progress::new(move |done, total| {
+            let _ = tx.send(Event::ToolProgress {
+                id: id.clone(),
+                done,
+                total,
+            });
+        }));
+        ctx
+    }
+
     fn snapshot(&mut self, args: &Value, tool: &str) {
         const DEPTH: usize = 25;
         let Some(rel) = args.get("path").and_then(|p| p.as_str()) else {
@@ -3215,14 +3451,32 @@ impl Agent {
         args: &Value,
         tx: &mpsc::UnboundedSender<Event>,
     ) -> bool {
-        if !tools::is_mutating(name)
-            || self.auto_approve
-            || self.auto_tier.auto_allows(name)
-            || self.always.contains(name)
+        // An irreversible command is worth one keypress even in full-auto:
+        // auto-approve is there to skip the routine, not to make `rm -rf ~`
+        // silent. `always` cannot pre-approve these either, since it is granted
+        // per tool, not per command.
+        let destructive = (name == "run_command" && self.cfg.confirm_destructive)
+            .then(|| {
+                args.get("command")
+                    .and_then(|c| c.as_str())
+                    .and_then(tools::destructive_reason)
+            })
+            .flatten();
+        if destructive.is_none()
+            && (!tools::is_mutating(name)
+                || self.auto_approve
+                || self.auto_tier.auto_allows(name)
+                || self.always.contains(name))
         {
             // Not gated: nothing was asked of the user.
             self.last_approval = Some(crate::trace::Approval::Auto);
             return true;
+        }
+        if let Some(why) = destructive {
+            crate::tel_warn!("agent", "destructive command held for approval", "why" => why);
+            let _ = tx.send(Event::Notice(format!(
+                "this command {why} — approve it explicitly, or press esc to skip it"
+            )));
         }
         let (reply, rx) = oneshot::channel();
         let _ = tx.send(Event::ToolPending {
@@ -3233,6 +3487,12 @@ impl Agent {
         });
         match rx.await {
             Ok(Approval::Once) => {
+                self.last_approval = Some(crate::trace::Approval::Approved);
+                true
+            }
+            // "always allow this tool" must not blanket-approve every future
+            // destructive command, so it degrades to a one-time yes here.
+            Ok(Approval::AlwaysThisTool) if destructive.is_some() => {
                 self.last_approval = Some(crate::trace::Approval::Approved);
                 true
             }
@@ -3557,6 +3817,36 @@ fn required_params_hint(name: &str) -> String {
 
 /// One plain sentence for the screen. `ApiError` already carries a written
 /// message; anything else gets its chain flattened rather than debug-printed.
+/// Read the step-check verdict. `Some(reason)` = continue, `None` = stop.
+/// Anything ambiguous counts as a stop: the old behaviour is the safe one.
+fn parse_continue(reply: &str) -> Option<String> {
+    // Thinking models may narrate first; the verdict is the last decisive word.
+    let upper = reply.to_ascii_uppercase();
+    let cont = upper.rfind("CONTINUE");
+    let stop = upper.rfind("STOP");
+    match (cont, stop) {
+        (Some(c), Some(s)) if c < s => return None,
+        (None, _) => return None,
+        _ => {}
+    }
+    let reason = reply
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .find(|l| {
+            let u = l.to_ascii_uppercase();
+            let bare = u.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            bare != "CONTINUE" && !u.starts_with("CONTINUE:")
+        })
+        .map(|l| {
+            l.trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+                .trim()
+        })
+        .filter(|l| !l.is_empty())
+        .unwrap_or("more work left");
+    Some(crate::tools::truncate(reason, 160).trim().to_string())
+}
+
 pub fn user_message(e: &anyhow::Error) -> String {
     if let Some(api) = e.downcast_ref::<crate::llm::ApiError>() {
         return api.user.clone();
@@ -3690,6 +3980,28 @@ fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The step check decides whether a turn keeps running, so an ambiguous
+    /// or failed answer must fall back to the old hard stop.
+    #[test]
+    fn step_check_verdict_parsing() {
+        assert_eq!(
+            parse_continue("CONTINUE\nThe tests still need to be run."),
+            Some("The tests still need to be run.".to_string())
+        );
+        assert!(parse_continue("STOP\nThe file was written and verified.").is_none());
+        // A thinking model narrating both words: the last one is the verdict.
+        assert!(parse_continue("It could continue, but really: STOP. Done.").is_none());
+        assert!(parse_continue("Maybe stop? No — CONTINUE, the build is unfinished.").is_some());
+        // Nothing decisive, an empty reply, or a refusal all mean stop.
+        assert!(parse_continue("").is_none());
+        assert!(parse_continue("I am not sure what you mean.").is_none());
+        // A verdict with no reason still continues, with a placeholder.
+        assert_eq!(
+            parse_continue("CONTINUE"),
+            Some("more work left".to_string())
+        );
+    }
 
     #[test]
     fn scanner_hides_tool_blocks() {

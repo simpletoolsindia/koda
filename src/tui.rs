@@ -658,6 +658,9 @@ impl App {
                 }
                 self.follow = true;
             }
+            Event::ToolProgress { id, done, total } => {
+                self.transcript.tool_progress(&id, done, total);
+            }
             Event::ToolEnd {
                 id,
                 ok,

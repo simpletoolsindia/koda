@@ -581,7 +581,9 @@ fn config_json(root: &Path) -> String {
         "reasoning_effort": cfg.reasoning_effort,
         "temperature": cfg.temperature,
         "max_steps": cfg.max_steps,
+        "max_steps_hard": cfg.max_steps_hard,
         "toggles": {
+            "step_check": cfg.step_check,
             "learning": cfg.learning,
             "memory": cfg.memory,
             "codegraph": cfg.codegraph,
@@ -672,6 +674,12 @@ fn save_config(root: &Path, body: &str) -> String {
             _ => errors.push("max_steps must be between 1 and 500".into()),
         }
     }
+    if let Some(s) = v.get("max_steps_hard") {
+        match s.as_u64() {
+            Some(n) if (1..=2000).contains(&n) => cfg.max_steps_hard = n as usize,
+            _ => errors.push("max_steps_hard must be between 1 and 2000".into()),
+        }
+    }
     if let Some(toggles) = v.get("toggles") {
         let set = |key: &str, slot: &mut bool, errors: &mut Vec<String>| {
             if let Some(x) = toggles.get(key) {
@@ -681,6 +689,7 @@ fn save_config(root: &Path, body: &str) -> String {
                 }
             }
         };
+        set("step_check", &mut cfg.step_check, &mut errors);
         set("learning", &mut cfg.learning, &mut errors);
         set("memory", &mut cfg.memory, &mut errors);
         set("codegraph", &mut cfg.codegraph, &mut errors);

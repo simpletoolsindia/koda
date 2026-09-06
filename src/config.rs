@@ -210,6 +210,13 @@ pub struct Config {
     pub tool_protocol: ToolProtocol,
     /// Max model<->tool round trips per user turn.
     pub max_steps: usize,
+    /// When the step budget runs out, ask the model whether the task is really
+    /// unfinished instead of stopping flat. A "keep going" answer extends the
+    /// budget by another `max_steps`, up to `max_steps_hard`.
+    pub step_check: bool,
+    /// Absolute ceiling on steps per turn once `step_check` starts extending
+    /// the budget. Never below `max_steps`.
+    pub max_steps_hard: usize,
     /// Skip approval prompts for mutating tools.
     pub auto_approve: bool,
     /// Tiered autonomy: ask (default), write (auto-approve writes), or full
@@ -217,6 +224,10 @@ pub struct Config {
     pub auto_tier: AutoTier,
     /// Confine file tools to the workspace root.
     pub sandbox: bool,
+    /// Ask before an irreversible shell command (a recursive delete outside the
+    /// project, a force push, `git reset --hard`, a pipe from curl into a
+    /// shell) even when auto-approve would otherwise allow it.
+    pub confirm_destructive: bool,
     pub shell: String,
     pub command_timeout_ms: u64,
     pub max_file_bytes: usize,
@@ -527,9 +538,12 @@ impl Default for Config {
             context_tokens: 110_000,
             tool_protocol: ToolProtocol::Auto,
             max_steps: 24,
+            step_check: true,
+            max_steps_hard: 96,
             auto_approve: false,
             auto_tier: AutoTier::Ask,
             sandbox: true,
+            confirm_destructive: true,
             shell: default_shell(),
             command_timeout_ms: 120_000,
             max_file_bytes: 256 * 1024,
@@ -851,11 +865,19 @@ context_tokens = 16000  # soft budget; history is trimmed to fit
 tool_protocol = "auto"
 
 max_steps = 24
+# When the step budget runs out, ask the model whether it is actually done
+# before stopping; if it says no, the budget grows by another `max_steps` until
+# `max_steps_hard`. Set false to stop hard at `max_steps` (one less model call).
+step_check = true
+max_steps_hard = 96
 auto_approve = false    # true = never ask before writes/commands (same as auto_tier=full)
 # Tiered autonomy, cycled live with /auto: ask (prompt for every write/command),
 # write (auto-approve writes, still ask before commands), full (approve everything).
 auto_tier = "ask"
 sandbox = true          # confine file tools to the workspace root
+# Ask before irreversible shell commands (rm -rf outside the project, force
+# push, git reset --hard, curl | sh) even when auto-approve is on.
+confirm_destructive = true
 
 shell = "/bin/sh"
 command_timeout_ms = 120000

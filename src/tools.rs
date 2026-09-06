@@ -20,6 +20,56 @@ pub struct Spec {
 pub struct ToolCtx {
     pub root: PathBuf,
     pub cfg: Arc<Config>,
+    /// Where a long-running tool reports how far it has got. `None` outside the
+    /// TUI (tests, subagents), which is why every tool has to work without it.
+    pub progress: Option<Progress>,
+}
+
+/// A live progress channel for one tool call: how many tokens of content have
+/// been read or written so far, and how many are expected in total.
+///
+/// A callback rather than an event sender, so `tools` stays independent of the
+/// agent's event type — and cheap enough to call from inside a read loop.
+#[derive(Clone)]
+pub struct Progress {
+    report: Arc<dyn Fn(usize, Option<usize>) + Send + Sync>,
+}
+
+impl Progress {
+    pub fn new(report: impl Fn(usize, Option<usize>) + Send + Sync + 'static) -> Self {
+        Self {
+            report: Arc::new(report),
+        }
+    }
+
+    /// Report `done` tokens processed out of `total`, if known.
+    pub fn tokens(&self, done: usize, total: Option<usize>) {
+        (self.report)(done, total);
+    }
+}
+
+impl std::fmt::Debug for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Progress")
+    }
+}
+
+/// The same ~4 chars per token estimate the history budget uses, so the number
+/// on a tool card and the number in the status bar mean the same thing.
+pub fn approx_tokens(bytes: usize) -> usize {
+    bytes.div_ceil(4)
+}
+
+/// Token counts the way a reader wants them: exact when small, `1.1k` past a
+/// thousand, `1.2M` past a million.
+pub fn human_tokens(n: usize) -> String {
+    if n < 1_000 {
+        format!("{n} tokens")
+    } else if n < 1_000_000 {
+        format!("{:.1}k tokens", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M tokens", n as f64 / 1_000_000.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +103,9 @@ pub enum ToolView {
         start: usize,
         total: usize,
         truncated: bool,
+        /// Estimated tokens of the file's text, so the card can say what the
+        /// read actually cost the context.
+        tokens: usize,
     },
     Listing {
         path: String,
@@ -78,6 +131,8 @@ pub enum ToolView {
         added: usize,
         removed: usize,
         created: bool,
+        /// Estimated tokens written.
+        tokens: usize,
     },
     Run {
         command: String,
@@ -545,6 +600,73 @@ fn build_specs() -> Vec<Spec> {
 /// shared state matters.
 pub const PARALLEL_SAFE: &[&str] = &["read_file", "list_dir", "find_files", "search"];
 
+/// Why a shell command is irreversible, or `None` if it is ordinary.
+///
+/// Auto-approve exists so a session does not stop every thirty seconds to ask
+/// about a `cargo test`. It does not exist to make `rm -rf ~` silent. These are
+/// the commands whose damage cannot be undone by `/undo`, git, or a rebuild —
+/// so they are worth one keypress even in full-auto, and the reason is shown to
+/// the user rather than a bare "are you sure".
+pub fn destructive_reason(command: &str) -> Option<&'static str> {
+    // Compare on a normalised form: collapsed whitespace, no quotes, so
+    // `rm  -r -f  "/"` reads the same as `rm -rf /`.
+    let flat = command
+        .replace(['"', '\''], "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let has = |needle: &str| flat.contains(needle);
+
+    // A recursive force-delete of something that is not a path inside the
+    // project: `rm -rf build` is routine, `rm -rf /` or `rm -rf ~` is not.
+    let recursive_rm = flat.split(" && ").chain(flat.split(" ; ")).any(|seg| {
+        let seg = seg.trim_start_matches("sudo ").trim();
+        if !seg.starts_with("rm ") {
+            return false;
+        }
+        let flags: String = seg
+            .split_whitespace()
+            .filter(|w| w.starts_with('-'))
+            .collect();
+        let recursive = flags.contains('r') || flags.contains('R');
+        let targets: Vec<&str> = seg
+            .split_whitespace()
+            .skip(1)
+            .filter(|w| !w.starts_with('-'))
+            .collect();
+        recursive
+            && targets.iter().any(|t| {
+                let t = t.trim_end_matches('/');
+                t.is_empty() || t == "~" || t == "." || t == ".." || t.starts_with('/') || t == "*"
+            })
+    });
+    if recursive_rm {
+        return Some("recursively deletes a path outside the project");
+    }
+    if has("mkfs") || has("dd if=") || has("> /dev/") {
+        return Some("writes directly to a device");
+    }
+    if has("git push --force") || has("git push -f") {
+        return Some("force-pushes, which can destroy commits on the remote");
+    }
+    if has("git reset --hard") || has("git checkout -- .") || has("git clean -fd") {
+        return Some("discards uncommitted work in the working tree");
+    }
+    if has("history -c") || has("shutdown") || has("reboot") || has("halt") {
+        return Some("affects the machine, not the project");
+    }
+    if has("chmod -r 777") || has("chown -r") {
+        return Some("rewrites permissions recursively");
+    }
+    // `curl … | sh` runs code nobody has read, which no approval tier should
+    // wave through silently.
+    if (has("curl ") || has("wget ")) && (has("| sh") || has("| bash") || has("|sh")) {
+        return Some("pipes downloaded code straight into a shell");
+    }
+    None
+}
+
 /// Whether a tool may be executed concurrently with other parallel-safe tools.
 pub fn is_parallel_safe(name: &str) -> bool {
     PARALLEL_SAFE.contains(&name)
@@ -732,14 +854,55 @@ fn resolve(ctx: &ToolCtx, raw: &str) -> Result<PathBuf> {
         ctx.root.join(expanded)
     };
     let norm = normalize(&joined);
-    if ctx.cfg.sandbox && !norm.starts_with(&ctx.root) {
-        bail!(
-            "path `{}` is outside the workspace ({}); sandbox is enabled",
-            raw,
-            ctx.root.display()
-        );
+    if ctx.cfg.sandbox {
+        if !norm.starts_with(&ctx.root) {
+            bail!(
+                "path `{}` is outside the workspace ({}); sandbox is enabled",
+                raw,
+                ctx.root.display()
+            );
+        }
+        // `normalize` is lexical, so a symlink *inside* the workspace that
+        // points out of it satisfies the check above while still writing
+        // outside — which is the sandbox failing at the one job it has. Compare
+        // real paths as well.
+        let real_root = real_path(&ctx.root);
+        if !real_path(&norm).starts_with(&real_root) {
+            bail!(
+                "path `{}` resolves outside the workspace ({}) through a symlink; \
+                 sandbox is enabled",
+                raw,
+                ctx.root.display()
+            );
+        }
     }
     Ok(norm)
+}
+
+/// The path with every existing symlink resolved. Files that do not exist yet
+/// still resolve through their nearest existing ancestor, which is what a write
+/// to `link/new-file.txt` needs.
+fn real_path(p: &Path) -> PathBuf {
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cur) {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (cur.file_name().map(|n| n.to_os_string()), cur.parent()) {
+            (Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
+                rest.push(name);
+                cur = parent.to_path_buf();
+            }
+            // Nothing on this path exists: nothing to resolve, so the lexical
+            // form is already the real one.
+            _ => return p.to_path_buf(),
+        }
+    }
 }
 
 pub fn rel(ctx: &ToolCtx, p: &Path) -> String {
@@ -1266,7 +1429,7 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     if meta.is_dir() {
         return Ok(Outcome::err(format!("{path} is a directory; use list_dir")));
     }
-    let bytes = std::fs::read(&full).with_context(|| format!("reading {path}"))?;
+    let bytes = read_bytes_streaming(&full, ctx).with_context(|| format!("reading {path}"))?;
 
     // Rich document formats (CSV/XLSX/DOCX/PDF) are extracted to text *before*
     // the binary guard, since XLSX/DOCX/PDF are binary containers. Images are
@@ -1339,20 +1502,27 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     if out.is_empty() {
         out.push_str("(empty file)\n");
     }
-    Ok(
-        Outcome::ok(out, format!("read {} ({} lines)", rel(ctx, &full), total)).with(
-            ToolView::Read {
-                path: rel(ctx, &full),
-                lang: doc_kind
-                    .map(|k| k.tag().to_string())
-                    .unwrap_or_else(|| lang_of(&full)),
-                lines: all[start..end].iter().map(|l| l.to_string()).collect(),
-                start: start + 1,
-                total,
-                truncated: end < total,
-            },
+    // What this read costs the context is the shown slice, not the whole file.
+    let tokens = approx_tokens(out.len());
+    Ok(Outcome::ok(
+        out,
+        format!(
+            "read {} ({total} lines, {})",
+            rel(ctx, &full),
+            human_tokens(tokens)
         ),
     )
+    .with(ToolView::Read {
+        path: rel(ctx, &full),
+        lang: doc_kind
+            .map(|k| k.tag().to_string())
+            .unwrap_or_else(|| lang_of(&full)),
+        lines: all[start..end].iter().map(|l| l.to_string()).collect(),
+        start: start + 1,
+        total,
+        truncated: end < total,
+        tokens,
+    }))
 }
 
 /// Language tag for a path, used to pick a syntax highlighter.
@@ -1768,12 +1938,13 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     }
     let existed = full.exists();
     let old = if existed {
-        std::fs::read_to_string(&full).unwrap_or_default()
+        read_streaming(&full, ctx).unwrap_or_default()
     } else {
         String::new()
     };
-    std::fs::write(&full, &content).with_context(|| format!("writing {path}"))?;
+    write_streaming(&full, &content, ctx).with_context(|| format!("writing {path}"))?;
     let lines = content.lines().count();
+    let tokens = approx_tokens(content.len());
     let verb = if existed { "overwrote" } else { "created" };
     let diff = unified_diff(&old, &content, &rel(ctx, &full));
     let (added, removed) = diff_stats(&diff);
@@ -1783,7 +1954,11 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             rel(ctx, &full),
             truncate(&diff, 4000)
         ),
-        format!("{verb} {} ({lines} lines)", rel(ctx, &full)),
+        format!(
+            "{verb} {} ({lines} lines, {})",
+            rel(ctx, &full),
+            human_tokens(tokens)
+        ),
     )
     .with(ToolView::Diff {
         path: rel(ctx, &full),
@@ -1791,7 +1966,102 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         added,
         removed,
         created: !existed,
+        tokens,
     }))
+}
+
+/// Write a file in chunks, reporting tokens as they land.
+///
+/// A single `fs::write` of a large file is one long blocking call that the card
+/// cannot show anything about; chunking turns it into visible progress at no
+/// real cost. The chunk is large enough that the syscall count stays in the
+/// hundreds even for a multi-megabyte write.
+const STREAM_CHUNK: usize = 64 * 1024;
+
+fn write_streaming(full: &Path, content: &str, ctx: &ToolCtx) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let total = approx_tokens(content.len());
+    // Write beside the target, then rename over it. Writing in place truncates
+    // first, so a failure halfway through — a full disk, a killed process —
+    // leaves the user with half a file and no way back. A rename is atomic on
+    // every platform koda runs on, so the file is either the old one or the
+    // new one, never a torn mix.
+    let dir = full.parent().unwrap_or(Path::new("."));
+    let stem = full.file_name().map(|n| n.to_string_lossy().to_string());
+    let tmp = dir.join(format!(
+        ".{}.koda-{}.tmp",
+        stem.as_deref().unwrap_or("out"),
+        std::process::id()
+    ));
+    let written = (|| -> std::io::Result<()> {
+        let file = std::fs::File::create(&tmp)?;
+        let mut out = std::io::BufWriter::with_capacity(STREAM_CHUNK, file);
+        let bytes = content.as_bytes();
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let end = (done + STREAM_CHUNK).min(bytes.len());
+            out.write_all(&bytes[done..end])?;
+            done = end;
+            if let Some(p) = &ctx.progress {
+                p.tokens(approx_tokens(done), Some(total));
+            }
+        }
+        out.flush()?;
+        // Durability: without this the rename can land before the contents do,
+        // and a crash leaves an empty file where the old one was.
+        out.into_inner()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .sync_all()?;
+        // An existing file's mode is part of what it is — a rewritten hook or
+        // script must stay executable.
+        #[cfg(unix)]
+        if let Ok(meta) = std::fs::metadata(full) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(
+                &tmp,
+                std::fs::Permissions::from_mode(meta.permissions().mode()),
+            );
+        }
+        std::fs::rename(&tmp, full)
+    })();
+    if written.is_err() {
+        // Never leave the scratch file behind on a failure.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
+    if let Some(p) = &ctx.progress {
+        p.tokens(total, Some(total));
+    }
+    Ok(())
+}
+
+/// Read a file in chunks, reporting tokens as they arrive. Same idea as
+/// `write_streaming`: the work is unchanged, the waiting becomes visible.
+fn read_streaming(full: &Path, ctx: &ToolCtx) -> std::io::Result<String> {
+    let bytes = read_bytes_streaming(full, ctx)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn read_bytes_streaming(full: &Path, ctx: &ToolCtx) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(full)?;
+    let expected = file
+        .metadata()
+        .ok()
+        .map(|m| approx_tokens(m.len() as usize));
+    let mut buf = Vec::with_capacity(expected.map(|t| t * 4).unwrap_or(STREAM_CHUNK));
+    let mut chunk = vec![0u8; STREAM_CHUNK];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(p) = &ctx.progress {
+            p.tokens(approx_tokens(buf.len()), expected);
+        }
+    }
+    Ok(buf)
 }
 
 /// Count added and removed lines in a unified diff, ignoring the header.
@@ -1892,7 +2162,7 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         )));
     }
 
-    std::fs::write(&full, &content).with_context(|| format!("writing {path}"))?;
+    write_streaming(&full, &content, ctx).with_context(|| format!("writing {path}"))?;
     let diff = unified_diff(&original, &content, &rel(ctx, &full));
     let (added, removed) = diff_stats(&diff);
     let n_edits = edits.len();
@@ -1914,6 +2184,7 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         added,
         removed,
         created: false,
+        tokens: approx_tokens(content.len()),
     }))
 }
 
@@ -2456,7 +2727,9 @@ pub fn find_agent_browser(configured: &str) -> Option<PathBuf> {
     }
 
     static DEFAULT_AGENT_BROWSER: OnceLock<Option<PathBuf>> = OnceLock::new();
-    DEFAULT_AGENT_BROWSER.get_or_init(find_agent_browser_uncached).clone()
+    DEFAULT_AGENT_BROWSER
+        .get_or_init(find_agent_browser_uncached)
+        .clone()
 }
 
 /// A stable session ID scoped to the workspace root.
@@ -2490,7 +2763,9 @@ fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             b' ' => out.push('+'),
             _ => {
                 out.push('%');
@@ -2531,13 +2806,18 @@ fn run_agent_browser_batch(
             return Err(e.into());
         }
     }
-    let out = child.wait_with_output().context("waiting for agent-browser batch")?;
+    let out = child
+        .wait_with_output()
+        .context("waiting for agent-browser batch")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let stdout_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if let Some(start) = stdout_str.find('[') {
             if let Ok(v) = serde_json::from_str::<Vec<Value>>(&stdout_str[start..]) {
-                if let Some(first_err) = v.iter().find_map(|item| item.get("error").and_then(|e| e.as_str())) {
+                if let Some(first_err) = v
+                    .iter()
+                    .find_map(|item| item.get("error").and_then(|e| e.as_str()))
+                {
                     bail!("{first_err}");
                 }
             }
@@ -2572,7 +2852,28 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
     } else if !matches!(
         action.as_str(),
-        "read" | "navigate" | "click" | "type" | "input" | "select" | "check" | "uncheck" | "hover" | "press" | "scroll" | "back" | "forward" | "reload" | "screenshot" | "screenshot_element" | "search" | "wait" | "upload" | "tab" | "download" | "close"
+        "read"
+            | "navigate"
+            | "click"
+            | "type"
+            | "input"
+            | "select"
+            | "check"
+            | "uncheck"
+            | "hover"
+            | "press"
+            | "scroll"
+            | "back"
+            | "forward"
+            | "reload"
+            | "screenshot"
+            | "screenshot_element"
+            | "search"
+            | "wait"
+            | "upload"
+            | "tab"
+            | "download"
+            | "close"
     ) {
         return Ok(Outcome::err(
             "browse action must be \"navigate\"/\"read\", \"search\", \"click\", \"type\", \"select\", \"check\", \"uncheck\", \"hover\", \"press\", \"scroll\", \"back\", \"forward\", \"reload\", \"screenshot\", \"screenshot_element\", \"wait\", \"upload\", \"tab\", \"download\", or \"close\"",
@@ -2596,7 +2897,11 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         return Ok(Outcome::ok("closed browser session", "browser closed"));
     }
 
-    let raw_url = args.get("url").and_then(|u| u.as_str()).unwrap_or("").trim();
+    let raw_url = args
+        .get("url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .trim();
     if !raw_url.is_empty() && !(raw_url.starts_with("http://") || raw_url.starts_with("https://")) {
         return Ok(Outcome::err("browse only opens http(s) URLs"));
     }
@@ -2612,47 +2917,87 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         .to_string();
     let cap = arg_usize(args, "max_bytes").unwrap_or(ctx.cfg.max_tool_output_bytes);
     let target_index = args.get("index").and_then(|i| i.as_u64());
-    let selector = args.get("selector").and_then(|s| s.as_str()).unwrap_or("").trim();
+    let selector = args
+        .get("selector")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim();
     let text = args.get("text").and_then(|t| t.as_str()).unwrap_or("");
-    let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("").trim();
+    let key = args
+        .get("key")
+        .and_then(|k| k.as_str())
+        .unwrap_or("")
+        .trim();
     let clear = args.get("clear").and_then(|c| c.as_bool()).unwrap_or(true);
-    let press_enter = args.get("press_enter").and_then(|p| p.as_bool()).unwrap_or(false);
-    let direction = args.get("direction").and_then(|d| d.as_str()).unwrap_or("down");
+    let press_enter = args
+        .get("press_enter")
+        .and_then(|p| p.as_bool())
+        .unwrap_or(false);
+    let direction = args
+        .get("direction")
+        .and_then(|d| d.as_str())
+        .unwrap_or("down");
     let pages = args.get("pages").and_then(|p| p.as_f64()).unwrap_or(1.0);
     let seconds = args.get("seconds").and_then(|s| s.as_f64()).unwrap_or(0.0);
     let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
-    let engine = args.get("engine").and_then(|e| e.as_str()).unwrap_or("duckduckgo");
-    let highlight = args.get("highlight").and_then(|h| h.as_bool()).unwrap_or(ctx.cfg.browser_highlight);
+    let engine = args
+        .get("engine")
+        .and_then(|e| e.as_str())
+        .unwrap_or("duckduckgo");
+    let highlight = args
+        .get("highlight")
+        .and_then(|h| h.as_bool())
+        .unwrap_or(ctx.cfg.browser_highlight);
     let use_session = ctx.cfg.browser_session;
-    let full_page = args.get("full_page").and_then(|f| f.as_bool()).unwrap_or(false);
+    let full_page = args
+        .get("full_page")
+        .and_then(|f| f.as_bool())
+        .unwrap_or(false);
     let tab = args.get("tab").and_then(|t| t.as_u64());
     let file_arg = args.get("file").and_then(|f| f.as_str()).unwrap_or("");
 
     if action == "search" && query.trim().is_empty() {
-        return Ok(Outcome::err("action 'search' requires a non-empty 'query' parameter"));
+        return Ok(Outcome::err(
+            "action 'search' requires a non-empty 'query' parameter",
+        ));
     }
     if (action == "type" || action == "input") && target_index.is_none() && selector.is_empty() {
-        return Ok(Outcome::err("action 'type' requires an 'index' or 'selector' target"));
+        return Ok(Outcome::err(
+            "action 'type' requires an 'index' or 'selector' target",
+        ));
     }
     if action == "select" {
         if target_index.is_none() && selector.is_empty() {
-            return Ok(Outcome::err("action 'select' requires an 'index' or 'selector' target"));
+            return Ok(Outcome::err(
+                "action 'select' requires an 'index' or 'selector' target",
+            ));
         }
         if text.trim().is_empty() {
-            return Ok(Outcome::err("action 'select' requires an option label or value in 'text'"));
+            return Ok(Outcome::err(
+                "action 'select' requires an option label or value in 'text'",
+            ));
         }
     }
-    if (action == "click" || action == "hover" || action == "check" || action == "uncheck") && target_index.is_none() && selector.is_empty() {
-        return Ok(Outcome::err(format!("action '{action}' requires an 'index' or 'selector' target")));
+    if (action == "click" || action == "hover" || action == "check" || action == "uncheck")
+        && target_index.is_none()
+        && selector.is_empty()
+    {
+        return Ok(Outcome::err(format!(
+            "action '{action}' requires an 'index' or 'selector' target"
+        )));
     }
     if action == "press" && key.is_empty() {
         return Ok(Outcome::err("action 'press' requires a 'key' parameter"));
     }
     if action == "screenshot_element" && target_index.is_none() && selector.is_empty() {
-        return Ok(Outcome::err("action 'screenshot_element' requires an 'index' or 'selector' target"));
+        return Ok(Outcome::err(
+            "action 'screenshot_element' requires an 'index' or 'selector' target",
+        ));
     }
     if action == "tab" && tab.is_none() {
-        return Ok(Outcome::err("action 'tab' requires a 'tab' number (e.g. tab=1, tab=2)"));
+        return Ok(Outcome::err(
+            "action 'tab' requires a 'tab' number (e.g. tab=1, tab=2)",
+        ));
     }
     let upload_file_path = if action == "upload" {
         if file_arg.trim().is_empty() {
@@ -2660,10 +3005,15 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
         let p = ctx.root.join(file_arg);
         if ctx.cfg.sandbox && !p.starts_with(&ctx.root) {
-            return Ok(Outcome::err("refusing to access files outside the workspace (set sandbox=false to allow)"));
+            return Ok(Outcome::err(
+                "refusing to access files outside the workspace (set sandbox=false to allow)",
+            ));
         }
         if !p.exists() {
-            return Ok(Outcome::err(format!("file not found to upload: {}", p.display())));
+            return Ok(Outcome::err(format!(
+                "file not found to upload: {}",
+                p.display()
+            )));
         }
         p.to_string_lossy().to_string()
     } else {
@@ -2671,10 +3021,15 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     };
 
     // screenshot/download write a file; resolve the destination inside the workspace.
-    let out_path: Option<std::path::PathBuf> = if matches!(action.as_str(), "screenshot" | "screenshot_element" | "download") {
+    let out_path: Option<std::path::PathBuf> = if matches!(
+        action.as_str(),
+        "screenshot" | "screenshot_element" | "download"
+    ) {
         let name = args.get("to").and_then(|t| t.as_str()).map(str::to_string);
         let name = name.unwrap_or_else(|| match action.as_str() {
-            "screenshot" | "screenshot_element" => format!("koda-screenshot-{}.png", std::process::id()),
+            "screenshot" | "screenshot_element" => {
+                format!("koda-screenshot-{}.png", std::process::id())
+            }
             _ => {
                 let base = url
                     .rsplit('/')
@@ -2730,7 +3085,9 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             cmd.arg("--full");
         }
         cmd.arg(p);
-        let res = cmd.output().context("capturing screenshot with agent-browser")?;
+        let res = cmd
+            .output()
+            .context("capturing screenshot with agent-browser")?;
         if !res.status.success() {
             let err = String::from_utf8_lossy(&res.stderr);
             return Ok(Outcome::err(format!("screenshot failed: {}", err.trim())));
@@ -2752,10 +3109,15 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
         cmd.args(["screenshot", &target]);
         cmd.arg(p);
-        let res = cmd.output().context("capturing element screenshot with agent-browser")?;
+        let res = cmd
+            .output()
+            .context("capturing element screenshot with agent-browser")?;
         if !res.status.success() {
             let err = String::from_utf8_lossy(&res.stderr);
-            return Ok(Outcome::err(format!("element screenshot failed: {}", err.trim())));
+            return Ok(Outcome::err(format!(
+                "element screenshot failed: {}",
+                err.trim()
+            )));
         }
         let rel = p.strip_prefix(&ctx.root).unwrap_or(p).to_string_lossy();
         return Ok(Outcome::ok(
@@ -2775,7 +3137,9 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
             cmd.args(["download", &target]);
             cmd.arg(p);
-            let res = cmd.output().context("downloading element with agent-browser")?;
+            let res = cmd
+                .output()
+                .context("downloading element with agent-browser")?;
             if !res.status.success() {
                 let err = String::from_utf8_lossy(&res.stderr);
                 return Ok(Outcome::err(format!("download failed: {}", err.trim())));
@@ -2787,11 +3151,13 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
                 .arg(&url)
                 .status();
             match status {
-                Ok(s) if s.success() => {},
+                Ok(s) if s.success() => {}
                 _ => return Ok(Outcome::err(format!("failed to download {url}"))),
             }
         } else {
-            return Ok(Outcome::err("action 'download' requires a 'url' or an 'index'/'selector' target"));
+            return Ok(Outcome::err(
+                "action 'download' requires a 'url' or an 'index'/'selector' target",
+            ));
         }
         let bytes = p.metadata().map(|m| m.len()).unwrap_or(0);
         let rel = p.strip_prefix(&ctx.root).unwrap_or(p).to_string_lossy();
@@ -2860,7 +3226,10 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             if direction == "top" {
                 action_cmds.push(vec!["eval".into(), "window.scrollTo(0, 0)".into()]);
             } else if direction == "bottom" {
-                action_cmds.push(vec!["eval".into(), "window.scrollTo(0, document.body.scrollHeight)".into()]);
+                action_cmds.push(vec![
+                    "eval".into(),
+                    "window.scrollTo(0, document.body.scrollHeight)".into(),
+                ]);
             } else {
                 let px = (pages * 700.0).round() as u64;
                 action_cmds.push(vec!["scroll".into(), direction.to_string(), px.to_string()]);
@@ -2885,7 +3254,11 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             action_notice = format!("switched to tab {t_num}\n");
         }
         "upload" => {
-            action_cmds.push(vec!["upload".into(), target.clone(), upload_file_path.clone()]);
+            action_cmds.push(vec![
+                "upload".into(),
+                target.clone(),
+                upload_file_path.clone(),
+            ]);
             action_notice = format!("uploaded file to {target}\n");
         }
         "wait" => {
@@ -2939,7 +3312,12 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 
     let snapshot_idx = if interactive {
         let idx = action_cmds.len();
-        action_cmds.push(vec!["snapshot".into(), "-i".into(), "--urls".into(), "--compact".into()]);
+        action_cmds.push(vec![
+            "snapshot".into(),
+            "-i".into(),
+            "--urls".into(),
+            "--compact".into(),
+        ]);
         Some(idx)
     } else {
         None
@@ -2969,7 +3347,8 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
     };
 
-    let inspect_obj = results.get(inspect_idx)
+    let inspect_obj = results
+        .get(inspect_idx)
         .and_then(|r| r.get("result"))
         .and_then(|res| res.get("result").or(Some(res)));
 
@@ -2991,7 +3370,8 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let body = truncate(text.trim(), cap);
 
     let elements_block = if let Some(idx) = snapshot_idx {
-        if let Some(snap) = results.get(idx)
+        if let Some(snap) = results
+            .get(idx)
             .and_then(|r| r.get("result"))
             .and_then(|res| res.get("snapshot"))
             .and_then(|s| s.as_str())
@@ -3008,7 +3388,8 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         String::new()
     };
 
-    let tabs_block = if let Some(tabs) = results.get(get_tabs_idx)
+    let tabs_block = if let Some(tabs) = results
+        .get(get_tabs_idx)
         .and_then(|r| r.get("result"))
         .and_then(|res| res.get("tabs"))
         .and_then(|t| t.as_array())
@@ -3017,7 +3398,10 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             let mut s = format!("\n\nOpen Tabs ({}):\n", tabs.len());
             for t in tabs {
                 let tid = t.get("tabId").and_then(|i| i.as_str()).unwrap_or("");
-                let ttitle = t.get("title").and_then(|s| s.as_str()).unwrap_or("Untitled");
+                let ttitle = t
+                    .get("title")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("Untitled");
                 let turl = t.get("url").and_then(|s| s.as_str()).unwrap_or("");
                 let active = t.get("active").and_then(|b| b.as_bool()).unwrap_or(false);
                 let mark = if active { "* " } else { "  " };
@@ -3129,7 +3513,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("koda-ab-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let fake_bin = dir.join(if cfg!(windows) { "agent-browser.cmd" } else { "agent-browser" });
+        let fake_bin = dir.join(if cfg!(windows) {
+            "agent-browser.cmd"
+        } else {
+            "agent-browser"
+        });
         std::fs::write(&fake_bin, "#!/bin/sh\nexit 0\n").unwrap();
         #[cfg(unix)]
         {
@@ -3138,11 +3526,20 @@ mod tests {
         }
 
         // Direct file path
-        assert_eq!(find_agent_browser(fake_bin.to_str().unwrap()), Some(fake_bin.clone()));
+        assert_eq!(
+            find_agent_browser(fake_bin.to_str().unwrap()),
+            Some(fake_bin.clone())
+        );
         // Directory containing binary
-        assert_eq!(find_agent_browser(dir.to_str().unwrap()), Some(fake_bin.clone()));
+        assert_eq!(
+            find_agent_browser(dir.to_str().unwrap()),
+            Some(fake_bin.clone())
+        );
         // Nonexistent configured path returns None
-        assert_eq!(find_agent_browser("/definitely/not/a/real/binary/path"), None);
+        assert_eq!(
+            find_agent_browser("/definitely/not/a/real/binary/path"),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3150,7 +3547,10 @@ mod tests {
     #[test]
     fn url_encode_encodes_special_characters() {
         assert_eq!(url_encode("hello world"), "hello+world");
-        assert_eq!(url_encode("Quantum Computing & AI?"), "Quantum+Computing+%26+AI%3F");
+        assert_eq!(
+            url_encode("Quantum Computing & AI?"),
+            "Quantum+Computing+%26+AI%3F"
+        );
         assert_eq!(url_encode("abc-123_.~"), "abc-123_.~");
     }
 
@@ -3171,6 +3571,7 @@ mod tests {
         let ctx = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(Config::default()),
+            progress: None,
         };
         for bad in [
             "file:///etc/passwd",
@@ -3190,18 +3591,29 @@ mod tests {
     fn test_browse_live_agent_browser() {
         let dir = std::env::temp_dir().join(format!("koda-live-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let cfg = Config { browser_headless: true, ..Config::default() };
+        let cfg = Config {
+            browser_headless: true,
+            ..Config::default()
+        };
         let ctx = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
+            progress: None,
         };
-        let res = browse(&json!({
-            "action": "search",
-            "query": "Quantum computing",
-            "engine": "duckduckgo"
-        }), &ctx).unwrap();
+        let res = browse(
+            &json!({
+                "action": "search",
+                "query": "Quantum computing",
+                "engine": "duckduckgo"
+            }),
+            &ctx,
+        )
+        .unwrap();
         println!("RES OK: {}", res.ok);
-        println!("RES CONTENT:\n{}", res.content.chars().take(400).collect::<String>());
+        println!(
+            "RES CONTENT:\n{}",
+            res.content.chars().take(400).collect::<String>()
+        );
         assert!(res.ok);
         assert!(res.content.to_lowercase().contains("quantum"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3212,49 +3624,72 @@ mod tests {
     fn test_browse_wikipedia_search_and_read() {
         let dir = std::env::temp_dir().join(format!("koda-wiki-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let cfg = Config { browser_headless: true, browser_session: true, ..Config::default() };
+        let cfg = Config {
+            browser_headless: true,
+            browser_session: true,
+            ..Config::default()
+        };
         let ctx = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
+            progress: None,
         };
 
         // Step 1: Open wikipedia
-        let res1 = browse(&json!({
-            "action": "navigate",
-            "url": "https://www.wikipedia.org"
-        }), &ctx).unwrap();
+        let res1 = browse(
+            &json!({
+                "action": "navigate",
+                "url": "https://www.wikipedia.org"
+            }),
+            &ctx,
+        )
+        .unwrap();
         println!("\n=== STEP 1: OPEN WIKIPEDIA ===");
         println!("OK: {}", res1.ok);
         println!("SUMMARY: {}", res1.summary);
         assert!(res1.ok);
 
         // Step 2: Type 'Quantum Computing' into search box and press enter
-        let res2 = browse(&json!({
-            "action": "type",
-            "selector": "input[name='search']",
-            "text": "Quantum computing",
-            "press_enter": true
-        }), &ctx).unwrap();
+        let res2 = browse(
+            &json!({
+                "action": "type",
+                "selector": "input[name='search']",
+                "text": "Quantum computing",
+                "press_enter": true
+            }),
+            &ctx,
+        )
+        .unwrap();
         println!("\n=== STEP 2: TYPE & PRESS ENTER ===");
         println!("OK: {}", res2.ok);
         println!("SUMMARY: {}", res2.summary);
-        println!("CONTENT PREVIEW:\n{}", res2.content.chars().take(500).collect::<String>());
+        println!(
+            "CONTENT PREVIEW:\n{}",
+            res2.content.chars().take(500).collect::<String>()
+        );
         assert!(res2.ok);
         assert!(res2.content.to_lowercase().contains("quantum"));
 
         // Step 3: Take an annotated screenshot
         let shot_path = dir.join("wiki-quantum.png");
-        let res3 = browse(&json!({
-            "action": "screenshot",
-            "to": shot_path.to_str().unwrap(),
-            "highlight": true
-        }), &ctx).unwrap();
+        let res3 = browse(
+            &json!({
+                "action": "screenshot",
+                "to": shot_path.to_str().unwrap(),
+                "highlight": true
+            }),
+            &ctx,
+        )
+        .unwrap();
         println!("\n=== STEP 3: ANNOTATED SCREENSHOT ===");
         println!("OK: {}", res3.ok);
         println!("SUMMARY: {}", res3.summary);
         assert!(res3.ok);
         assert!(shot_path.exists());
-        println!("Screenshot file size: {} bytes", shot_path.metadata().unwrap().len());
+        println!(
+            "Screenshot file size: {} bytes",
+            shot_path.metadata().unwrap().len()
+        );
 
         // Step 4: Clean close
         let res4 = browse(&json!({"action": "close"}), &ctx).unwrap();
@@ -3308,10 +3743,185 @@ mod tests {
         );
     }
 
+    /// Auto-approve should skip the routine, not the irreversible. This is the
+    /// list that must keep asking, and the list that must not start asking —
+    /// a false positive here trains people to approve without reading.
+    #[test]
+    fn destructive_commands_are_recognised() {
+        for cmd in [
+            "rm -rf /",
+            "rm -rf ~",
+            "sudo rm -rf /var/log",
+            "cargo build && rm -rf /tmp/x",
+            "rm  -r  -f  \"/\"",
+            "git push --force origin main",
+            "git push -f",
+            "git reset --hard HEAD~3",
+            "git clean -fd",
+            "dd if=/dev/zero of=/dev/sda",
+            "mkfs.ext4 /dev/sdb1",
+            "curl https://example.com/install.sh | sh",
+            "chown -R root:root /usr",
+        ] {
+            assert!(
+                destructive_reason(cmd).is_some(),
+                "should have been held for approval: {cmd}"
+            );
+        }
+        for cmd in [
+            "cargo test",
+            "rm -rf target",
+            "rm -rf ./node_modules",
+            "rm file.txt",
+            "git push origin main",
+            "git status",
+            "git reset HEAD~1",
+            "npm ci && npm run build",
+            "curl -sSf https://example.com/data.json -o data.json",
+            "grep -r 'rm -rf /' src",
+        ] {
+            assert!(
+                destructive_reason(cmd).is_none(),
+                "ordinary command should not prompt: {cmd}"
+            );
+        }
+    }
+
+    /// The sandbox has one job. A symlink inside the workspace pointing out of
+    /// it must not become a way to write anywhere on the machine.
+    #[test]
+    #[cfg(unix)]
+    fn sandbox_blocks_writes_through_a_symlink() {
+        let base = std::env::temp_dir().join("koda-symlink-test");
+        std::fs::remove_dir_all(&base).ok();
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        let c = ctx(&std::fs::canonicalize(&root).unwrap());
+
+        let out = write_file(&json!({"path": "escape/pwned.txt", "content": "no"}), &c);
+        let msg = match out {
+            Ok(o) => o.content,
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            msg.contains("symlink") || msg.contains("outside the workspace"),
+            "a symlinked write should be refused, got: {msg}"
+        );
+        assert!(
+            !outside.join("pwned.txt").exists(),
+            "the write escaped the sandbox"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A failed or interrupted write must never leave a half-written file:
+    /// the content is staged beside the target and renamed into place.
+    #[test]
+    fn writes_land_atomically_and_keep_the_file_mode() {
+        let dir = std::env::temp_dir().join("koda-atomic-test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = ctx(&dir);
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = write_file(
+            &json!({"path": "run.sh", "content": "#!/bin/sh\necho new\n"}),
+            &c,
+        )
+        .unwrap();
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            "#!/bin/sh\necho new\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "an executable file stayed executable");
+        }
+        // No scratch files left behind.
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("koda-") || n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "scratch files left: {leftovers:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Token counts are read at a glance, so they round the way a reader
+    /// expects: exact until a thousand, then `1.1k`, then `1.2M`.
+    #[test]
+    fn token_counts_are_human_readable() {
+        assert_eq!(human_tokens(0), "0 tokens");
+        assert_eq!(human_tokens(999), "999 tokens");
+        assert_eq!(human_tokens(1_000), "1.0k tokens");
+        assert_eq!(human_tokens(1_100), "1.1k tokens");
+        assert_eq!(human_tokens(23_456), "23.5k tokens");
+        assert_eq!(human_tokens(1_200_000), "1.2M tokens");
+        // The same ~4 chars/token estimate the context budget uses.
+        assert_eq!(approx_tokens(0), 0);
+        assert_eq!(approx_tokens(1), 1);
+        assert_eq!(approx_tokens(4_000), 1_000);
+    }
+
+    /// A big read and a big write both report progress as they stream, so the
+    /// card can show movement rather than a bare spinner — and the last report
+    /// must be the true total, or the card would freeze just short of done.
+    #[test]
+    fn file_tools_report_streamed_progress() {
+        let dir = std::env::temp_dir().join("koda-progress-test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut c = ctx(&dir);
+        let sink = seen.clone();
+        c.progress = Some(Progress::new(move |done, total| {
+            sink.lock().unwrap().push((done, total));
+        }));
+
+        // ~512KB, so the 64KB chunking reports several times.
+        let body = "abcdefgh".repeat(64 * 1024);
+        let out = write_file(&json!({"path": "big.txt", "content": body}), &c).unwrap();
+        assert!(out.ok, "{}", out.content);
+        let reports = seen.lock().unwrap().clone();
+        assert!(reports.len() > 4, "write should stream: {reports:?}");
+        let expect = approx_tokens(body.len());
+        assert_eq!(reports.last().copied(), Some((expect, Some(expect))));
+        assert!(
+            out.summary.contains("tokens"),
+            "the write card says what it cost: {}",
+            out.summary
+        );
+
+        seen.lock().unwrap().clear();
+        let out = read_file(&json!({"path": "big.txt"}), &c).unwrap();
+        assert!(out.ok, "{}", out.content);
+        let reports = seen.lock().unwrap().clone();
+        assert!(reports.len() > 4, "read should stream: {reports:?}");
+        assert_eq!(reports.last().map(|(d, _)| *d), Some(expect));
+        match out.view {
+            ToolView::Read { tokens, .. } => assert!(tokens > 0, "read reports its token cost"),
+            other => panic!("expected a Read view, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn ctx(root: &Path) -> ToolCtx {
         ToolCtx {
             root: root.to_path_buf(),
             cfg: Arc::new(Config::default()),
+            progress: None,
         }
     }
 
@@ -3920,6 +4530,7 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         let c = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
+            progress: None,
         };
         let out = read_file(&json!({"path": "big.csv"}), &c).unwrap();
         assert!(!out.ok);
@@ -4015,6 +4626,7 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         let c = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
+            progress: None,
         };
         let res = view_image(&json!({"path": "test.png"}), &c).await.unwrap();
         assert!(
@@ -4052,6 +4664,7 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         let c = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
+            progress: None,
         };
         let res = browse(&json!({"action": "click", "index": 1}), &c).unwrap();
         assert!(!res.ok);
@@ -4072,6 +4685,7 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         let c = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(Config::default()),
+            progress: None,
         };
         let res = browse(&json!({"action": "close"}), &c).unwrap();
         assert!(res.ok);
@@ -4096,6 +4710,7 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         let c = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(Config::default()),
+            progress: None,
         };
 
         let res = browse(&json!({"action": "search", "query": ""}), &c).unwrap();
@@ -4145,4 +4760,3 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         std::fs::remove_dir_all(&dir).ok();
     }
 }
-

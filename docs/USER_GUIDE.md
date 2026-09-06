@@ -140,7 +140,9 @@ its default:
 | `max_tokens` | `0` | 0 = let the server decide. |
 | `context_tokens` | `16000` | Soft budget; history is trimmed to fit. |
 | `tool_protocol` | `auto` | `auto`, `native`, or `text`. |
-| `max_steps` | `24` | Max model↔tool round trips per user turn. |
+| `max_steps` | `24` | Model↔tool round trips per user turn before the step check runs. |
+| `step_check` | `true` | At `max_steps`, ask the model whether work remains instead of stopping flat; a "keep going" answer buys another `max_steps`. |
+| `max_steps_hard` | `96` | Absolute ceiling on steps per turn once `step_check` starts extending the budget. |
 | `auto_approve` | `false` | Skip approval prompts (equivalent to `auto_tier = full`). |
 | `auto_tier` | `ask` | Tiered autonomy: `ask`, `write`, or `full`. |
 | `sandbox` | `true` | Confine file tools to the workspace root. |

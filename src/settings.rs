@@ -147,7 +147,9 @@ impl Row {
             Row::Browser => "open pages in a real browser (agent-browser)",
             Row::BrowserHeadless => "hidden · visible — show the window to watch or sign in",
             Row::BrowserChannel => "chrome · msedge · bundled — which browser to drive",
-            Row::BrowserInteractive => "browser-use interactive exploration (click/type/keys/scroll)",
+            Row::BrowserInteractive => {
+                "browser-use interactive exploration (click/type/keys/scroll)"
+            }
             Row::BrowserHighlight => "draw bounding boxes and element badge numbers on screenshots",
             Row::BrowserSession => "keep browser session alive across tool calls via CDP",
             Row::Ocr => "OCR images (tesseract, or the model below) when the model can't see them",
