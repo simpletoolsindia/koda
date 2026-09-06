@@ -16,6 +16,11 @@ use tokio::sync::{mpsc, oneshot, Notify};
 const TOOL_OPEN: &str = "<tool_call>";
 const TOOL_CLOSE: &str = "</tool_call>";
 
+/// How long the vision relay may take before OCR falls through to tesseract.
+/// Generous, because a local multimodal model transcribing a full screenshot
+/// on CPU is genuinely slow -- but finite, because the wait blocks the turn.
+const VISION_OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
     Once,
@@ -1928,9 +1933,22 @@ impl Agent {
             non-text visual content (diagrams, photos, UI elements) that a \
             reader would need to understand the image. Do not add commentary \
             beyond that.";
-        self.client
-            .describe_image(&self.cfg.ocr_model, &url, PROMPT)
-            .await
+        // Bounded, unlike the chat stream. This runs while the user's message
+        // is still being assembled -- before the turn starts, so there is no
+        // stream to watch and nothing for ctrl+c to interrupt -- and the client
+        // sets no total timeout on purpose, so a model that accepts the request
+        // and then thinks forever would wedge koda with a dead prompt. Falling
+        // through to tesseract after a wait is a far better end than that.
+        match tokio::time::timeout(
+            VISION_OCR_TIMEOUT,
+            self.client
+                .describe_image(&self.cfg.ocr_model, &url, PROMPT),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("no reply within {}s", VISION_OCR_TIMEOUT.as_secs()),
+        }
     }
 
     async fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
@@ -2017,6 +2035,13 @@ impl Agent {
             if self.cfg.ocr {
                 let mut text: Option<String> = None;
                 if !self.cfg.ocr_model.trim().is_empty() {
+                    // Said before the call, not after: this blocks the turn
+                    // from starting, so without it the UI sits silent with no
+                    // hint of what it is waiting on.
+                    let _ = tx.send(Event::Notice(format!(
+                        "reading {raw} with {}...",
+                        self.cfg.ocr_model
+                    )));
                     match self.vision_ocr(&full).await {
                         Ok(t) if !t.trim().is_empty() => {
                             let _ = tx.send(Event::Notice(format!(
@@ -2063,31 +2088,48 @@ impl Agent {
                 )));
             }
         }
-        if !doc_blocks.is_empty() {
-            // Same shape as the OCR path: the text the user pointed at, folded
-            // into their message, with the mention itself removed so the model
-            // reads content rather than a filename.
-            let stripped = Self::strip_attached_paths(input, &attached);
-            let combined = format!("{stripped}\n\n{}", doc_blocks.join("\n\n"));
-            if images.is_empty() {
-                return Message::user(combined);
-            }
-            return Message::user_with_images(combined, images);
-        }
-        if !ocr_blocks.is_empty() {
-            // Fold OCR'd text into the message so the model actually receives it.
-            let combined = format!("{input}\n\n{}", ocr_blocks.join("\n\n"));
-            return Message::user(combined);
-        }
-        if images.is_empty() {
-            Message::user(input)
+        // Documents and OCR both fold text into the message, and one mention of
+        // each kind in a single line is ordinary -- `@spec.pdf @shot.png does
+        // this match?`. They are therefore assembled together: handling them as
+        // two separate early returns dropped whichever lost the race, so the
+        // OCR text was thrown away (after the notice had already said it was
+        // read, and after the vision relay had been paid for) whenever a
+        // document was mentioned alongside it.
+        doc_blocks.append(&mut ocr_blocks);
+        Self::compose_user_message(input, &attached, &doc_blocks, images)
+    }
+
+    /// Assemble the message: what the user wrote, the text pulled in on their
+    /// behalf, and any images going up as pixels.
+    fn compose_user_message(
+        input: &str,
+        attached: &[String],
+        blocks: &[String],
+        images: Vec<String>,
+    ) -> Message {
+        // The path was how the bytes got here; it is not part of what the user
+        // said. Left in, the model reads a filename as if it were content --
+        // and a model that cannot see the image has nothing but that filename
+        // to answer from, which is how "analyse this screenshot" comes back as
+        // a guess about /var/folders.
+        //
+        // Only *attached* mentions go: an OCR'd image is deliberately not one,
+        // because its mention is what ties the sentence to the `[OCR text of
+        // ...]` block below it.
+        let text = if attached.is_empty() {
+            input.to_string()
         } else {
-            // The path was how the bytes got here; it is not part of what the
-            // user said. Left in, the model reads a temp filename as if it were
-            // content -- and a model that cannot see the image has nothing but
-            // that filename to answer from, which is how "analyse this
-            // screenshot" comes back as a guess about /var/folders.
-            Message::user_with_images(Self::strip_attached_paths(input, &attached), images)
+            Self::strip_attached_paths(input, attached)
+        };
+        let text = if blocks.is_empty() {
+            text
+        } else {
+            format!("{text}\n\n{}", blocks.join("\n\n"))
+        };
+        if images.is_empty() {
+            Message::user(text)
+        } else {
+            Message::user_with_images(text, images)
         }
     }
 
@@ -3932,6 +3974,50 @@ mod tests {
         let text = format!("{msg:?}");
         assert!(text.contains("@main.rs"), "left as a mention: {text}");
         assert!(!text.contains("contents of main.rs"), "not inlined: {text}");
+    }
+
+    /// A document and an OCR'd image in the same line both have to survive.
+    /// They used to be two separate early returns, so mentioning a document
+    /// alongside a picture threw the picture's text away -- silently, after the
+    /// notice had already told the user it was read, and after the vision relay
+    /// had been paid for.
+    #[test]
+    fn a_document_and_an_ocr_block_both_reach_the_model() {
+        let msg = Agent::compose_user_message(
+            "@spec.pdf @shot.png does this match?",
+            &["spec.pdf".to_string()],
+            &[
+                "[contents of spec.pdf]\nthe widget is blue".to_string(),
+                "[OCR text of shot.png]\nWidget: red".to_string(),
+            ],
+            Vec::new(),
+        );
+        let text = msg.content.unwrap_or_default();
+        assert!(text.contains("the widget is blue"), "document kept: {text}");
+        assert!(text.contains("Widget: red"), "ocr kept: {text}");
+        assert!(text.contains("does this match?"), "question kept: {text}");
+        // The attached document's mention goes; the OCR'd image's stays, since
+        // it is what ties the sentence to its `[OCR text of ...]` block.
+        assert!(!text.contains("@spec.pdf"), "attached mention gone: {text}");
+        assert!(text.contains("@shot.png"), "ocr mention kept: {text}");
+    }
+
+    /// With nothing attached the sentence is passed through untouched, rather
+    /// than run through the stripper and silently reflowed.
+    #[test]
+    fn an_ocr_only_message_keeps_the_users_line_verbatim() {
+        let msg = Agent::compose_user_message(
+            "@shot.png  read   this",
+            &[],
+            &["[OCR text of shot.png]\nhello".to_string()],
+            Vec::new(),
+        );
+        let text = msg.content.unwrap_or_default();
+        assert!(
+            text.starts_with("@shot.png  read   this"),
+            "verbatim: {text}"
+        );
+        assert!(text.contains("hello"), "ocr kept: {text}");
     }
 
     fn test_agent() -> Agent {
