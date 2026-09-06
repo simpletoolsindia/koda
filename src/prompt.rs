@@ -15,7 +15,7 @@ Rules:
 - Prefer `edit_file` over `write_file` for existing files.
 - Verify changes by running builds, tests, or linters via `run_command`.
 - Never run destructive commands without explicit request.
-- One tool call per turn. Wait for the result before deciding the next step.
+- Make one write or command at a time, and wait for its result before the next step.
 - When a task takes >2 steps, use `todo` to plan and track progress.
 - Web research: use `web_search`/`web_fetch` for static text. Use `browse` for dynamic sites, forms, tabs, and media downloads.
 - Store durable facts (build commands, architecture) with `remember`.
@@ -33,6 +33,14 @@ Style:
 pub fn base_prompt() -> &'static str {
     BASE
 }
+
+/// Only for the native tool protocol, where one message may carry several
+/// calls. koda runs independent read-only calls concurrently, so a model that
+/// asks for three files at once gets them in the time of the slowest one — but
+/// only if it knows it is allowed to ask. The text protocol carries one call
+/// per message, so this must not be said there.
+const PARALLEL_READS: &str = "\n\n\
+GATHERING CONTEXT: when several read-only lookups are independent — reading three files, a search plus a listing, two codegraph queries — ask for them in ONE step. They run concurrently. Writes, edits and commands stay one at a time, each verified before the next.";
 
 /// Functional guardrail layered onto every prompt while the tool is enabled.
 /// Keep this outside `BASE`: a custom system prompt replaces the base, but must
@@ -154,6 +162,9 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     }
     if cfg.codegraph {
         p.push_str(CODEGRAPH_GUIDANCE);
+    }
+    if !(use_text_protocol || cfg.tool_protocol == ToolProtocol::Text) {
+        p.push_str(PARALLEL_READS);
     }
     match mode {
         Mode::Plan => {
@@ -302,6 +313,29 @@ mod tests {
         // The workflow has to name the calls, not just the tool: a local model
         // that is told "use codegraph" without a shape reaches for grep.
         assert!(prompt.contains("query=symbol"), "{prompt}");
+    }
+
+    /// koda runs independent read-only calls concurrently, but only if the
+    /// model batches them — and the text protocol cannot carry a batch, so the
+    /// invitation must not appear there.
+    #[test]
+    fn batched_reads_are_invited_only_on_the_native_protocol() {
+        let cfg = Config {
+            tool_protocol: ToolProtocol::Native,
+            ..Config::default()
+        };
+        let native = build(&cfg, Path::new("/tmp"), false, Mode::Execute);
+        assert!(native.contains("in ONE step"), "{native}");
+        assert!(
+            !native.contains("One tool call per turn"),
+            "the blanket rule keeps every batch serial: {native}"
+        );
+
+        let text = build(&cfg, Path::new("/tmp"), true, Mode::Execute);
+        assert!(
+            !text.contains("in ONE step"),
+            "the text protocol carries one call per message: {text}"
+        );
     }
 
     #[test]

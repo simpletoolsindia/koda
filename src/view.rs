@@ -33,7 +33,11 @@ pub enum Item {
         summary: String,
         detail: String,
         /// Structured result; drives the per-tool layout.
-        view: crate::tools::ToolView,
+        ///
+        /// Boxed because it is 104 bytes and this variant is already the
+        /// largest by far: an enum is as big as its biggest variant, and every
+        /// plain line of assistant prose in the transcript pays for it.
+        view: Box<crate::tools::ToolView>,
         expanded: bool,
         started: Instant,
         elapsed: Option<Duration>,
@@ -445,7 +449,7 @@ impl Transcript {
             ok: None,
             summary: String::new(),
             detail: String::new(),
-            view: crate::tools::ToolView::Plain,
+            view: Box::new(crate::tools::ToolView::Plain),
             expanded: false,
             started: Instant::now(),
             elapsed: None,
@@ -501,7 +505,7 @@ impl Transcript {
                     *ok = Some(ok_v);
                     *summary = summary_v;
                     *detail = detail_v;
-                    *view = view_v;
+                    **view = view_v;
                     *elapsed = Some(started.elapsed());
                     // Show failures, and always show a diff of your own files:
                     // those are the results you must not have to ask for.
