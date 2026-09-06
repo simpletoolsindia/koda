@@ -2431,13 +2431,7 @@ fn find_agent_browser_uncached() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/agent-browser"));
     candidates.push(PathBuf::from("/usr/bin/agent-browser"));
 
-    for c in candidates {
-        if c.is_file() {
-            return Some(c);
-        }
-    }
-
-    None
+    candidates.into_iter().find(|c| c.is_file())
 }
 
 /// Locate the `agent-browser` executable.
@@ -2531,7 +2525,11 @@ fn run_agent_browser_batch(
     let mut child = cmd.spawn().context("spawning agent-browser batch")?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(&input_json)?;
+        if let Err(e) = stdin.write_all(&input_json) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.into());
+        }
     }
     let out = child.wait_with_output().context("waiting for agent-browser batch")?;
     if !out.status.success() {
@@ -2813,7 +2811,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             }
         }
         "search" => {
-            let q = url_encode(&query);
+            let q = url_encode(query);
             let search_url = match engine {
                 "google" => format!("https://www.google.com/search?q={q}&udm=14"),
                 "youtube" => format!("https://www.youtube.com/results?search_query={q}"),
@@ -3192,8 +3190,7 @@ mod tests {
     fn test_browse_live_agent_browser() {
         let dir = std::env::temp_dir().join(format!("koda-live-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut cfg = Config::default();
-        cfg.browser_headless = true;
+        let cfg = Config { browser_headless: true, ..Config::default() };
         let ctx = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
@@ -3215,9 +3212,7 @@ mod tests {
     fn test_browse_wikipedia_search_and_read() {
         let dir = std::env::temp_dir().join(format!("koda-wiki-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut cfg = Config::default();
-        cfg.browser_headless = true;
-        cfg.browser_session = true;
+        let cfg = Config { browser_headless: true, browser_session: true, ..Config::default() };
         let ctx = ToolCtx {
             root: dir.clone(),
             cfg: Arc::new(cfg),
