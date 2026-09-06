@@ -45,6 +45,25 @@ Fixed. `apply_discount` subtracted the percent instead of applying it.
  qwen2.5-coder:14b ❯ myproject ❯ main ❯ localhost:11434   4.1k tok  ██▎░░░░░ 27%
 ```
 
+## Editions
+
+koda comes in two editions, kept on two branches:
+
+| Edition | Branch | What's different |
+|---|---|---|
+| **Official** | `master` | The standard build. Browsing uses stock Playwright. |
+| **Uncensored** | `uncensored` | Everything in Official, plus a **stealth browsing stack** ([Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)) so the `browse` tool isn't flagged by bot-detection (Cloudflare/DataDome-class fingerprinting, incl. the `Runtime.enable` CDP leak). Uses your real Google Chrome, non-headless. |
+
+The uncensored edition is a superset — it tracks `master` and adds the stealth
+layer on top; the two are maintained separately and not merged into each other.
+Pick the install one-liner for the edition you want below. To switch an existing
+checkout: `git checkout master` or `git checkout uncensored`, then re-run
+`./install.sh`. The one-liners honour `KODA_BRANCH` if you want a specific branch.
+
+> The uncensored edition's stealth stack exists so an agent can read pages that
+> block automation. Respect each site's terms of service and robots policy; how
+> you use it is your call.
+
 ## Install
 
 koda builds from source (one static binary, no runtime deps). The installers
@@ -64,10 +83,17 @@ git clone https://github.com/simpletoolsindia/koda.git && cd koda
 ./install.sh
 ```
 
-Or the one-liner (clones for you):
+Or the one-liner (clones for you) — **official** edition:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
+```
+
+…or the **uncensored** edition (stealth browsing; also installs Patchright + a
+Chromium if `npm` is present):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/uncensored/install.sh | bash
 ```
 
 It installs to `~/.local/bin` (no sudo). Install system-wide with

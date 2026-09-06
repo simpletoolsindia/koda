@@ -361,6 +361,33 @@ instead of applying it.
           </p>
         </div>
 
+        <!-- Edition chooser -->
+        <div class="mt-10 grid sm:grid-cols-2 gap-4">
+          <div class="rounded-2xl border border-edge bg-ink/60 p-5">
+            <p class="text-sm font-semibold text-slate-200">Official <span class="text-slate-500 font-normal">· branch <code class="font-mono text-cyan">master</code></span></p>
+            <p class="mt-2 text-sm text-slate-400 leading-relaxed">The standard build. Browsing uses stock Playwright.</p>
+            <div class="term rounded-xl overflow-hidden mt-4">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-edge bg-panel/60">
+                <span class="text-xs text-slate-500 font-mono">official · macOS / Linux</span>
+                <button class="copy-btn text-xs text-slate-400 hover:text-cyan transition font-mono" data-copy='curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash'>copy</button>
+              </div>
+              <pre class="px-4 py-3.5 overflow-x-auto text-xs font-mono leading-relaxed"><code><span class="text-cyan">$</span> curl -fsSL …/koda/master/install.sh <span class="text-neon">|</span> bash</code></pre>
+            </div>
+          </div>
+          <div class="rounded-2xl border border-neon/40 bg-ink/60 p-5">
+            <p class="text-sm font-semibold text-slate-200">Uncensored <span class="text-slate-500 font-normal">· branch <code class="font-mono text-cyan">uncensored</code></span></p>
+            <p class="mt-2 text-sm text-slate-400 leading-relaxed">Everything in Official plus a <strong class="text-slate-200">stealth browsing stack</strong> (Patchright) so <code class="font-mono text-cyan">browse</code> isn't flagged by bot-detection. Uses your real Chrome, non-headless.</p>
+            <div class="term rounded-xl overflow-hidden mt-4">
+              <div class="flex items-center justify-between px-3 py-2 border-b border-edge bg-panel/60">
+                <span class="text-xs text-slate-500 font-mono">uncensored · macOS / Linux</span>
+                <button class="copy-btn text-xs text-slate-400 hover:text-cyan transition font-mono" data-copy='curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/uncensored/install.sh | bash'>copy</button>
+              </div>
+              <pre class="px-4 py-3.5 overflow-x-auto text-xs font-mono leading-relaxed"><code><span class="text-cyan">$</span> curl -fsSL …/koda/uncensored/install.sh <span class="text-neon">|</span> bash</code></pre>
+            </div>
+          </div>
+        </div>
+        <p class="mt-4 text-sm text-slate-500">The platform one-liners below install the <strong class="text-slate-300">official</strong> edition. For the uncensored edition use the command above, or set <code class="font-mono text-cyan">KODA_BRANCH=uncensored</code>.</p>
+
         <!-- Tabs -->
         <div class="mt-10" role="tablist" aria-label="Install platform">
           <div class="inline-flex rounded-xl border border-edge bg-ink p-1 gap-1">

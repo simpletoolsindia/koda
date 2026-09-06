@@ -2160,7 +2160,11 @@ pub fn base64_encode(data: &[u8]) -> String {
 /// npx cache -- which is where it usually is, because `npx playwright` is how
 /// most people first run it.
 pub fn playwright_dir(root: &Path, configured: &str) -> Option<PathBuf> {
-    let has = |dir: PathBuf| dir.join("playwright").is_dir().then_some(dir);
+    // Accept either Patchright (the stealth drop-in the browse script prefers)
+    // or plain Playwright. Patchright ships as `patchright` + `patchright-core`
+    // and re-exports the same `chromium` API, so a node_modules with it works.
+    let has =
+        |dir: PathBuf| (dir.join("patchright").is_dir() || dir.join("playwright").is_dir()).then_some(dir);
 
     if !configured.trim().is_empty() {
         let p = PathBuf::from(configured.trim());
@@ -2227,7 +2231,12 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     // URL and selector go in as JSON literals, so no quoting inside them can
     // become script.
     let script = format!(
-        "const {{ chromium }} = require('playwright');\n\
+        "// Prefer Patchright (stealth drop-in: patches the Runtime.enable CDP\n\
+         // leak and HeadlessChrome markers anti-bot systems key on); fall back\n\
+         // to stock Playwright if it is not installed. Same chromium API either way.\n\
+         let chromium;\n\
+         try {{ ({{ chromium }} = require('patchright')); }}\n\
+         catch (e) {{ ({{ chromium }} = require('playwright')); }}\n\
          const url = {url}, waitFor = {wait}, headless = {headless}, channel = {chan};\n\
          async function open() {{\n\
            if (channel) {{\n\
@@ -2248,7 +2257,11 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
          (async () => {{\n\
            const b = await open();\n\
            try {{\n\
-             const p = await b.newPage();\n\
+             // viewport:null lets the page take the real window size — a fixed\n\
+             // headless viewport is itself a fingerprint. No custom userAgent or\n\
+             // headers on purpose: with Patchright those *cause* detection.\n\
+             const c = await b.newContext({{ viewport: null }});\n\
+             const p = await c.newPage();\n\
              await p.goto(url, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});\n\
              if (waitFor) {{ try {{ await p.waitForSelector(waitFor, {{ timeout: 15000 }}); }} catch (e) {{}} }}\n\
              try {{ await p.waitForLoadState('networkidle', {{ timeout: 8000 }}); }} catch (e) {{}}\n\

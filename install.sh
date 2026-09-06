@@ -13,6 +13,10 @@ set -euo pipefail
 
 REPO="https://github.com/simpletoolsindia/koda.git"
 BIN_NAME="koda"
+# Edition of koda this installer builds. The `uncensored` branch ships the
+# stealth browsing stack (Patchright) on top of the official tree; override with
+# KODA_BRANCH to install a different branch.
+BRANCH="${KODA_BRANCH:-uncensored}"
 
 C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
 C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
@@ -30,9 +34,27 @@ resolve_src() {
     else
         command -v git >/dev/null 2>&1 || die "git not found — needed to fetch koda."
         SRC="$(mktemp -d)/koda"
-        info "cloning koda…"
-        git clone --depth 1 "$REPO" "$SRC" >/dev/null 2>&1 || die "clone failed"
+        info "cloning koda ($BRANCH edition)…"
+        git clone --depth 1 --branch "$BRANCH" "$REPO" "$SRC" >/dev/null 2>&1 \
+            || die "clone failed"
     fi
+}
+
+# --- uncensored edition: install the stealth browsing dependency -------------
+# Best-effort. The browse tool only needs this when browser=true, and it must
+# never fail the whole install, so a missing npm or a download hiccup is a warn,
+# not a die.
+ensure_patchright() {
+    command -v npm >/dev/null 2>&1 || {
+        warn "npm not found — skipping Patchright (stealth browsing). Install Node,"
+        warn "then run: cd \"$SRC\" && npm i -D patchright && npx patchright install chromium"
+        return 0
+    }
+    info "installing Patchright (stealth browsing)…"
+    ( cd "$SRC" && npm i -D patchright >/dev/null 2>&1 \
+        && npx patchright install chromium >/dev/null 2>&1 ) \
+        && ok "Patchright installed" \
+        || warn "Patchright install had trouble — browse still works via stock Playwright if present"
 }
 
 # --- ensure Rust/cargo is available, offering to install it when it isn't -----
@@ -72,6 +94,7 @@ build_and_install() {
     ensure_rust
     resolve_src
     cd "$SRC"
+    ensure_patchright
     info "building the release binary (a minute or two the first time)…"
     cargo build --release --quiet
     local built="target/release/$BIN_NAME"
