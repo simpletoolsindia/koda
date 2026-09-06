@@ -40,21 +40,22 @@ resolve_src() {
     fi
 }
 
-# --- uncensored edition: install the stealth browsing dependency -------------
+# --- uncensored edition: install the agent-browser dependency -------------
 # Best-effort. The browse tool only needs this when browser=true, and it must
 # never fail the whole install, so a missing npm or a download hiccup is a warn,
 # not a die.
-ensure_patchright() {
+ensure_agent_browser() {
     command -v npm >/dev/null 2>&1 || {
-        warn "npm not found — skipping Patchright (stealth browsing). Install Node,"
-        warn "then run: cd \"$SRC\" && npm i -D patchright && npx patchright install chromium"
+        warn "npm not found — skipping agent-browser. Install Node,"
+        warn "then run: npm i -g @vercel/agent-browser"
         return 0
     }
-    info "installing Patchright (stealth browsing)…"
-    ( cd "$SRC" && npm i -D patchright >/dev/null 2>&1 \
-        && npx patchright install chromium >/dev/null 2>&1 ) \
-        && ok "Patchright installed" \
-        || warn "Patchright install had trouble — browse still works via stock Playwright if present"
+    info "installing agent-browser…"
+    if npm i -g @vercel/agent-browser >/dev/null 2>&1; then
+        ok "agent-browser installed"
+    else
+        warn "agent-browser install had trouble — browse will not work until you install it manually via: npm i -g @vercel/agent-browser"
+    fi
 }
 
 # --- ensure Rust/cargo is available, offering to install it when it isn't -----
@@ -94,7 +95,7 @@ build_and_install() {
     ensure_rust
     resolve_src
     cd "$SRC"
-    ensure_patchright
+    ensure_agent_browser
     info "building the release binary (a minute or two the first time)…"
     cargo build --release --quiet
     local built="target/release/$BIN_NAME"
