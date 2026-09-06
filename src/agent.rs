@@ -4020,15 +4020,171 @@ mod tests {
         assert!(text.contains("hello"), "ocr kept: {text}");
     }
 
+    // ---------------------------------------------------------------- ocr e2e
+    //
+    // The two OCR branches both leave the process -- one over HTTP to a vision
+    // model, one by shelling out to `tesseract` -- so the tests below stand a
+    // stub in for each and drive the whole of `user_message`, rather than
+    // asserting on the pieces and hoping they are wired together.
+
+    /// An OpenAI-shaped endpoint that answers exactly one `/chat/completions`
+    /// with `reply`, or with `status` when that isn't 200. Returns its base URL.
+    async fn stub_endpoint(status: u16, reply: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Drain the request in full before answering. The body carries a
+            // base64 data URL and arrives over several reads; replying and
+            // closing while the client is still writing breaks the pipe under
+            // it, which would look like a relay failure rather than a reply.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let head_end = loop {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break buf.len(),
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+            let len: usize = head
+                .split("content-length:")
+                .nth(1)
+                .and_then(|s| s.split("\r\n").next())
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + len {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let body = if status == 200 {
+                serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": reply}}]
+                })
+                .to_string()
+            } else {
+                serde_json::json!({"error": {"message": reply}}).to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.ok();
+            sock.shutdown().await.ok();
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    /// Put a `tesseract` that prints `TESSERACT TEXT` on PATH, so the fallback
+    /// can be driven without the real binary (which most machines, and CI, do
+    /// not have). Only `tesseract` is shadowed, and nothing else in the suite
+    /// calls it, so prepending for the whole test binary is harmless.
+    #[cfg(unix)]
+    fn stub_tesseract_on_path() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("koda-ocr-bin-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("tesseract");
+            std::fs::write(&bin, "#!/bin/sh\necho 'TESSERACT TEXT'\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{}:{path}", dir.display()));
+        });
+    }
+
+    /// Config for a model that cannot see images, with OCR on.
+    fn ocr_cfg(base_url: String, model: String) -> crate::config::Config {
+        crate::config::Config {
+            base_url,
+            vision: "off".into(),
+            ocr: true,
+            ocr_model: model,
+            ..crate::config::Config::default()
+        }
+    }
+
+    /// The relay's reply reaches the model in place of the picture.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_vision_relay_reply_is_folded_into_the_message() {
+        stub_tesseract_on_path();
+        let url = stub_endpoint(200, "INVOICE TOTAL 42").await;
+        let a = agent_with(ocr_cfg(url, "stub-vl".into()));
+        let (tx, _rx) = mpsc::unbounded_channel::<Event>();
+        std::fs::write(a.ctx.root.join("shot.png"), b"not really a png").unwrap();
+
+        let msg = a.user_message("@shot.png what is the total?", &tx).await;
+        let text = msg.content.unwrap_or_default();
+        assert!(text.contains("INVOICE TOTAL 42"), "relay text: {text}");
+        assert!(text.contains("[OCR text of shot.png]"), "labelled: {text}");
+        assert!(text.contains("what is the total?"), "question kept: {text}");
+        assert!(
+            !text.contains("TESSERACT TEXT"),
+            "tesseract not also run: {text}"
+        );
+        assert!(msg.images.is_empty(), "no pixels to a text-only model");
+    }
+
+    /// A failing relay is not the end of the road: tesseract still runs, so a
+    /// wrong model name or a down endpoint degrades instead of losing the image.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_vision_relay_falls_through_to_tesseract() {
+        stub_tesseract_on_path();
+        let url = stub_endpoint(500, "no such model").await;
+        let a = agent_with(ocr_cfg(url, "stub-vl".into()));
+        let (tx, _rx) = mpsc::unbounded_channel::<Event>();
+        std::fs::write(a.ctx.root.join("shot.png"), b"not really a png").unwrap();
+
+        let msg = a.user_message("@shot.png read it", &tx).await;
+        let text = msg.content.unwrap_or_default();
+        assert!(text.contains("TESSERACT TEXT"), "fell through: {text}");
+        assert!(text.contains("[OCR text of shot.png]"), "labelled: {text}");
+    }
+
+    /// With no `ocr_model` set there is no relay at all -- tesseract is the
+    /// whole of OCR, as it was before.
+    ///
+    /// The endpoint is live and would answer, deliberately: pointing at a dead
+    /// port instead would prove nothing, since a relay that ran and was refused
+    /// falls through to the same tesseract text this asserts on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn without_an_ocr_model_only_tesseract_runs() {
+        stub_tesseract_on_path();
+        let url = stub_endpoint(200, "RELAY RAN").await;
+        let a = agent_with(ocr_cfg(url, String::new()));
+        let (tx, _rx) = mpsc::unbounded_channel::<Event>();
+        std::fs::write(a.ctx.root.join("shot.png"), b"not really a png").unwrap();
+
+        let msg = a.user_message("@shot.png read it", &tx).await;
+        let text = msg.content.unwrap_or_default();
+        assert!(text.contains("TESSERACT TEXT"), "tesseract ran: {text}");
+        assert!(!text.contains("RELAY RAN"), "relay not consulted: {text}");
+    }
+
     fn test_agent() -> Agent {
+        agent_with(crate::config::Config::default())
+    }
+
+    fn agent_with(cfg: crate::config::Config) -> Agent {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("koda-agent-test-{}-{n}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).ok();
-        let cfg = Arc::new(crate::config::Config::default());
         Agent::new(
-            cfg,
+            Arc::new(cfg),
             dir,
             Arc::new(AtomicBool::new(false)),
             Arc::new(Notify::new()),
