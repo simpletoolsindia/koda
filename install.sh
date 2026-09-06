@@ -91,7 +91,7 @@ build_and_install() {
         *) warn "add $bin_dir to your PATH:  export PATH=\"$bin_dir:\$PATH\"" ;;
     esac
     ensure_ripgrep
-    report_ocr
+    ensure_tesseract
     ok "done — run '$BIN_NAME' to start, or '$BIN_NAME --help'"
 }
 
@@ -149,16 +149,14 @@ ensure_ripgrep() {
 # installed and reads layout, tables and handwriting far better; and the
 # `tesseract` CLI as the offline fallback.
 #
-# This reports rather than prompts, unlike ripgrep above. Search is on by
-# default, so ripgrep pays off for everyone; OCR ships *off*, tesseract is a
-# sizeable install (engine plus language data), and the vision relay covers the
-# same ground with no download at all. Nagging every install for a disabled
-# feature's optional half of a fallback would be noise.
-report_ocr() {
+# Installed the same way as ripgrep above: offered, attempted, and non-fatal --
+# a failure here costs the offline fallback, not koda.
+ensure_tesseract() {
     if command -v tesseract >/dev/null 2>&1; then
         ok "tesseract found — offline image OCR is available (turn it on in /settings)"
         return 0
     fi
+    info "tesseract (image OCR) not found."
     local installer=""
     if [ "$(uname)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
         installer="brew install tesseract"
@@ -174,11 +172,34 @@ report_ocr() {
         installer="sudo zypper install -y tesseract-ocr"
     elif command -v apk >/dev/null 2>&1; then
         installer="sudo apk add tesseract-ocr"
-    else
-        installer="https://tesseract-ocr.github.io/tessdoc/Installation.html"
     fi
-    info "image OCR is off by default; to read screenshots on a text-only model,"
-    info "set 'ocr vision model' in /settings, or install tesseract:  $installer"
+    if [ -z "$installer" ]; then
+        warn "no known package manager — install tesseract for image OCR: https://tesseract-ocr.github.io/tessdoc/Installation.html"
+        return 0
+    fi
+    # Every command above but brew begins with sudo. A piped install (curl |
+    # bash) has no terminal to ask at and no way to show a password prompt, so
+    # it prints the command instead of escalating on the user's behalf -- the
+    # same line ensure_ripgrep draws, and for a stronger reason here.
+    if [ ! -t 0 ]; then
+        warn "for offline image OCR, install tesseract:  $installer"
+        return 0
+    fi
+    printf '  Install tesseract now for offline image OCR? [Y/n]: '
+    read -r ans
+    case "${ans:-y}" in
+        [Nn]*)
+            info "skipping tesseract — 'ocr vision model' in /settings does OCR without it"
+            return 0
+            ;;
+    esac
+    info "installing tesseract…"
+    if eval "$installer" >/dev/null 2>&1 && command -v tesseract >/dev/null 2>&1; then
+        ok "tesseract installed — turn OCR on in /settings"
+    else
+        warn "tesseract install failed — koda still runs; for OCR either install it"
+        warn "by hand ($installer) or set 'ocr vision model' in /settings"
+    fi
 }
 
 # --- where koda is actually installed ----------------------------------------

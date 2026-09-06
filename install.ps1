@@ -90,7 +90,7 @@ function Build-And-Install {
     Ok "installed to $BinDir\koda.exe"
 
     Add-ToUserPath $BinDir
-    Report-Ocr
+    Ensure-Tesseract
     Ok "done - run 'koda' to start, or 'koda --help'"
 }
 
@@ -100,38 +100,57 @@ function Build-And-Install {
 # installed and reads layout, tables and handwriting far better; and the
 # `tesseract` CLI as the offline fallback.
 #
-# This reports rather than prompts: OCR ships off, tesseract is a sizeable
-# install, and the vision relay covers the same ground with no download.
-function Report-Ocr {
+# Offered, attempted, and non-fatal: a failure here costs the offline fallback,
+# not koda.
+function Ensure-Tesseract {
     if (Get-Command tesseract -ErrorAction SilentlyContinue) {
         Ok "tesseract found - offline image OCR is available (turn it on in /settings)"
         return
     }
-    # koda shells out to `tesseract` by name, so a copy that isn't on PATH is a
-    # copy koda cannot use. The UB-Mannheim build -- what winget installs, and
-    # what a manual download gives you -- drops it in Program Files without
-    # adding it, which is the usual reason OCR still says "not available" right
-    # after a successful install. choco and scoop put it on PATH themselves, so
-    # the warning is withheld there rather than sending people to edit PATH for
-    # no reason.
-    $needsPathNote = $false
+    Info "tesseract (image OCR) not found."
     $installer =
         if (Get-Command winget -ErrorAction SilentlyContinue) {
-            $needsPathNote = $true
-            "winget install --id UB-Mannheim.TesseractOCR -e"
+            "winget install --id UB-Mannheim.TesseractOCR -e --accept-source-agreements --accept-package-agreements"
         } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
             "choco install tesseract -y"
         } elseif (Get-Command scoop -ErrorAction SilentlyContinue) {
             "scoop install tesseract"
         } else {
-            $needsPathNote = $true
-            "https://github.com/UB-Mannheim/tesseract/wiki"
+            $null
         }
-    Info "image OCR is off by default; to read screenshots on a text-only model,"
-    Info "set 'ocr vision model' in /settings, or install tesseract:  $installer"
-    if ($needsPathNote) {
-        Info "(that installer does not add tesseract to PATH - add"
-        Info "'C:\Program Files\Tesseract-OCR' to PATH afterwards or koda won't find it)"
+    if (-not $installer) {
+        Warn "no winget/choco/scoop - install tesseract for image OCR: https://github.com/UB-Mannheim/tesseract/wiki"
+        return
+    }
+    if (-not [Environment]::UserInteractive) {
+        Warn "for offline image OCR, install tesseract:  $installer"
+        return
+    }
+    $ans = Read-Host "  Install tesseract now for offline image OCR? [Y/n]"
+    if ($ans -match '^[Nn]') {
+        Info "skipping tesseract - 'ocr vision model' in /settings does OCR without it"
+        return
+    }
+    Info "installing tesseract..."
+    try { Invoke-Expression $installer | Out-Null } catch { }
+
+    # koda shells out to `tesseract` by name, so a copy that isn't on PATH is a
+    # copy koda cannot use -- and the UB-Mannheim build that winget installs
+    # lands in Program Files without adding itself, which is exactly why OCR
+    # would otherwise still report "not available" after this succeeded. Put it
+    # on PATH here rather than leaving the user a manual step, since an install
+    # koda cannot see is not an install. choco and scoop do this themselves, so
+    # the probe simply finds nothing to fix.
+    if (-not (Get-Command tesseract -ErrorAction SilentlyContinue)) {
+        foreach ($d in @("$env:ProgramFiles\Tesseract-OCR", "${env:ProgramFiles(x86)}\Tesseract-OCR")) {
+            if (Test-Path (Join-Path $d "tesseract.exe")) { Add-ToUserPath $d; break }
+        }
+    }
+    if (Get-Command tesseract -ErrorAction SilentlyContinue) {
+        Ok "tesseract installed - turn OCR on in /settings"
+    } else {
+        Warn "tesseract install failed - koda still runs; for OCR either install it"
+        Warn "by hand ($installer) or set 'ocr vision model' in /settings"
     }
 }
 

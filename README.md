@@ -49,11 +49,13 @@ Fixed. `apply_discount` subtracted the percent instead of applying it.
 
 koda builds from source (one static binary, no runtime deps). The installers
 build and install it, and will offer to install Rust for you if it's missing.
-They also report on two optional extras, neither of which koda needs to run:
-ripgrep, for faster search (offered if it's missing), and tesseract, for
-[offline image OCR](#reading-files-text-csv-and-images) — which is only one of
-two OCR backends, so a vision model in `ocr_model` does the same job with
-nothing to install.
+They also offer to install two optional extras, neither of which koda needs to
+run: ripgrep, for faster search, and tesseract, for
+[offline image OCR](#reading-files-text-csv-and-images). Both are a single
+`[Y/n]` at the end of the install and are skipped without one when the
+installer is piped (`curl | bash`), since it has no terminal to ask at. OCR has
+a second backend that needs no install at all — a vision model named in
+`ocr_model` — so declining tesseract does not cost you the feature.
 
 **macOS / Linux** — interactive menu (install / system-wide / update / uninstall):
 
