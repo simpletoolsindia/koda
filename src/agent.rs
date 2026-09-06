@@ -1977,28 +1977,8 @@ impl Agent {
                 if self.cfg.browser
                     && tools::find_agent_browser(&self.cfg.browser_path).is_none() =>
             {
-                let _ = tx.send(Event::Notice(format!(
-                    "fetching the browse engine (agent-browser {}) — one time, then it is cached",
-                    crate::engine::VERSION
-                )));
-                match crate::engine::install(false).await {
-                    Ok(path) => {
-                        crate::tel_info!("engine", "provisioned on demand", "path" => path.display().to_string());
-                        let _ = tx.send(Event::Notice("browse engine ready".into()));
-                        match self.prefetched.remove(&call.id) {
-                            Some(o) => o,
-                            None => tools::run(&name, args, &self.streaming_ctx(&call.id, tx)).await,
-                        }
-                    }
-                    Err(e) => tools::Outcome {
-                        ok: false,
-                        content: format!(
-                            "ERROR: could not fetch the browse engine: {e:#}\n\nRun                              `koda browser install` yourself, or set `browser_path` to a                              copy you already have."
-                        ),
-                        summary: "browse: no engine".into(),
-                        view: tools::ToolView::Plain,
-                    },
-                }
+                self.browse_with_provisioned_engine(call, &name, args, tx)
+                    .await
             }
             "browse" if !self.cfg.browser => tools::Outcome {
                 ok: false,
@@ -2223,6 +2203,45 @@ impl Agent {
 
     /// Remember a file's contents before we change it. Bounded, because the
     /// point is recovering from the last mistake, not full history.
+    /// Run `browse` on a machine that has no engine yet: fetch it, then make the
+    /// call. Provisioning is one download into a directory koda owns, so the
+    /// first browse of a fresh install works instead of returning instructions.
+    async fn browse_with_provisioned_engine(
+        &mut self,
+        call: &ToolCall,
+        name: &str,
+        args: Value,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
+        let _ = tx.send(Event::Notice(format!(
+            "fetching the browse engine (agent-browser {}) — one time, then it is cached",
+            crate::engine::VERSION
+        )));
+        match crate::engine::install(false).await {
+            Ok(path) => {
+                crate::tel_info!(
+                    "engine", "provisioned on demand",
+                    "path" => path.display().to_string(),
+                );
+                let _ = tx.send(Event::Notice("browse engine ready".into()));
+                match self.prefetched.remove(&call.id) {
+                    Some(o) => o,
+                    None => tools::run(name, args, &self.streaming_ctx(&call.id, tx)).await,
+                }
+            }
+            Err(e) => tools::Outcome {
+                ok: false,
+                content: format!(
+                    "ERROR: could not fetch the browse engine: {e:#}\n\nRun \
+                     `koda browser install` yourself, or set `browser_path` to a \
+                     copy you already have."
+                ),
+                summary: "browse: no engine".into(),
+                view: tools::ToolView::Plain,
+            },
+        }
+    }
+
     /// A tool context whose progress reports land on this call's card.
     ///
     /// Only the file tools use it, and only past the first chunk, so the cost

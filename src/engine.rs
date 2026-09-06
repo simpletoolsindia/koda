@@ -83,20 +83,36 @@ fn asset_name() -> Result<&'static str> {
 }
 
 /// Alpine and friends need the musl build; the glibc one will not start there.
+///
+/// Detected from the dynamic loader on disk rather than `ldd --version`, which
+/// musl does not implement.
 fn is_musl() -> bool {
-    // A musl system has no glibc loader. Checking for the loader is cheaper and
-    // more reliable than parsing `ldd --version`, which musl does not implement.
-    Path::new("/etc/alpine-release").exists()
-        || (!Path::new("/lib/x86_64-linux-gnu").exists()
-            && !Path::new("/lib64/ld-linux-x86-64.so.2").exists()
-            && !Path::new("/lib/ld-linux-aarch64.so.1").exists()
-            && Path::new("/lib").exists()
-            && std::fs::read_dir("/lib")
-                .map(|d| {
-                    d.flatten()
-                        .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
-                })
-                .unwrap_or(false))
+    if Path::new("/etc/alpine-release").exists() {
+        return true;
+    }
+    if has_glibc_loader() {
+        return false;
+    }
+    has_musl_loader()
+}
+
+fn has_glibc_loader() -> bool {
+    [
+        "/lib/x86_64-linux-gnu",
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-aarch64.so.1",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists())
+}
+
+fn has_musl_loader() -> bool {
+    let Ok(entries) = std::fs::read_dir("/lib") else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
 }
 
 /// Fetch and unpack the engine into koda's own bin directory.
