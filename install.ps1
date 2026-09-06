@@ -86,23 +86,34 @@ function Add-ToUserPath($dir) {
 # browse tool that could not browse. Best-effort, exactly like the shell
 # installer: a missing npm or a download hiccup is a warning, never a failure.
 function Ensure-AgentBrowser {
+    # Already there (npm, scoop, cargo - koda only cares that it is on PATH).
+    if (Get-Command agent-browser -ErrorAction SilentlyContinue) {
+        Ok "agent-browser found - the browse tool is ready"
+        return
+    }
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         Warn "npm not found - skipping agent-browser. Install Node.js, then run:"
-        Warn "  npm i -g @vercel/agent-browser"
+        Warn "  npm i -g agent-browser; agent-browser install"
         return
     }
     Info "installing agent-browser..."
     try {
-        # Quoted: bare `@vercel/...` in argument position is splatting syntax
-        # to the PowerShell parser, not a package name.
-        npm i -g '@vercel/agent-browser' 2>$null | Out-Null
+        npm i -g agent-browser 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0 -and (Get-Command agent-browser -ErrorAction SilentlyContinue)) {
-            Ok "agent-browser installed"
+            # The CLI on its own has no browser to drive; this fetches one.
+            Info "fetching the browser agent-browser drives..."
+            agent-browser install 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Ok "agent-browser installed"
+            } else {
+                Warn "agent-browser installed, but fetching its browser failed -"
+                Warn "run 'agent-browser install' before using the browse tool"
+            }
             return
         }
     } catch { }
     Warn "agent-browser install had trouble - browse will not work until you run:"
-    Warn "  npm i -g @vercel/agent-browser"
+    Warn "  npm i -g agent-browser; agent-browser install"
 }
 
 function Build-And-Install {

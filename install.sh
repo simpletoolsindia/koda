@@ -40,21 +40,41 @@ resolve_src() {
     fi
 }
 
-# --- uncensored edition: install the agent-browser dependency -------------
+# --- the browse tool's engine: agent-browser ---------------------------------
 # Best-effort. The browse tool only needs this when browser=true, and it must
 # never fail the whole install, so a missing npm or a download hiccup is a warn,
 # not a die.
+#
+# The package is `agent-browser`. It was written here as `@vercel/agent-browser`,
+# which does not exist on npm: every install printed "agent-browser install had
+# trouble" and no install of it ever succeeded.
+AGENT_BROWSER_PKG="agent-browser"
 ensure_agent_browser() {
+    # Already there (npm, brew, cargo — koda only cares that it is on PATH).
+    if command -v agent-browser >/dev/null 2>&1; then
+        ok "agent-browser found — the browse tool is ready"
+        return 0
+    fi
     command -v npm >/dev/null 2>&1 || {
         warn "npm not found — skipping agent-browser. Install Node,"
-        warn "then run: npm i -g @vercel/agent-browser"
+        warn "then run: npm i -g $AGENT_BROWSER_PKG && agent-browser install"
         return 0
     }
     info "installing agent-browser…"
-    if npm i -g @vercel/agent-browser >/dev/null 2>&1; then
+    if ! npm i -g "$AGENT_BROWSER_PKG" >/dev/null 2>&1; then
+        warn "agent-browser install had trouble — browse will not work until you"
+        warn "install it by hand: npm i -g $AGENT_BROWSER_PKG && agent-browser install"
+        return 0
+    fi
+    # The CLI on its own has no browser to drive; `agent-browser install`
+    # fetches one. Slow and network-bound, so a failure here is a warning with
+    # the exact command, not a dead install.
+    info "fetching the browser agent-browser drives…"
+    if agent-browser install >/dev/null 2>&1; then
         ok "agent-browser installed"
     else
-        warn "agent-browser install had trouble — browse will not work until you install it manually via: npm i -g @vercel/agent-browser"
+        warn "agent-browser installed, but fetching its browser failed —"
+        warn "run 'agent-browser install' before using the browse tool"
     fi
 }
 
