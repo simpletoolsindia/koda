@@ -13,9 +13,9 @@ set -euo pipefail
 
 REPO="https://github.com/simpletoolsindia/koda.git"
 BIN_NAME="koda"
-# Edition of koda this installer builds. The `uncensored` branch ships the
-# stealth browsing stack (Patchright) on top of the official tree; override with
-# KODA_BRANCH to install a different branch.
+# Edition of koda this installer builds. The `uncensored` branch adds the stealth
+# browsing stack on top of the official tree; override with KODA_BRANCH to
+# install a different branch.
 BRANCH="${KODA_BRANCH:-uncensored}"
 
 C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
@@ -100,11 +100,20 @@ build_and_install() {
     ok "built ($(du -h "$built" | cut -f1))"
 
     mkdir -p "$bin_dir"
-    install -m 0755 "$built" "$bin_dir/$BIN_NAME"
-    # macOS kills a copied ad-hoc-signed binary; re-sign in place so it runs.
+    # Install beside, then rename over. Writing straight onto the destination
+    # fails with "text file busy" when the koda being replaced is running --
+    # which is exactly when people re-run this script -- while a rename works
+    # even then, and is atomic: the binary is never half-written.
+    local staged="$bin_dir/.$BIN_NAME.new"
+    install -m 0755 "$built" "$staged"
+    # macOS kills a copied ad-hoc-signed binary; re-sign before it is in place.
     if [ "$(uname)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign - "$bin_dir/$BIN_NAME" >/dev/null 2>&1 || true
+        codesign --force --sign - "$staged" >/dev/null 2>&1 || true
     fi
+    mv -f "$staged" "$bin_dir/$BIN_NAME" || {
+        rm -f "$staged"
+        die "could not install to $bin_dir/$BIN_NAME"
+    }
     ok "installed to $bin_dir/$BIN_NAME"
 
     ensure_browse_engine "$bin_dir/$BIN_NAME"
@@ -256,7 +265,13 @@ maybe_sudo() {
     fi
 }
 
-version_of() { "$1" --version 2>/dev/null | head -1 || echo "unknown"; }
+# The `|| echo` guarded `head`, not the binary: a koda that could not run left
+# this empty, and the update line read "updated:  → koda 0.1.0".
+version_of() {
+    local v
+    v="$("$1" --version 2>/dev/null | head -1)"
+    printf '%s' "${v:-unknown}"
+}
 
 # --- update: fetch the latest source, then rebuild ---------------------------
 # The old option 3 was byte-for-byte identical to option 1: it rebuilt whatever

@@ -31,7 +31,10 @@ function Resolve-Src {
         return (Get-Location).Path
     } else {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "git not found." }
-        $s = Join-Path ([System.IO.Path]::GetTempPath()) "koda"
+        # A unique directory: cloning into a leftover %TEMP%\koda from an
+        # earlier run fails with "destination path already exists", which read
+        # as "clone failed" with nothing to act on.
+        $s = Join-Path ([System.IO.Path]::GetTempPath()) ("koda-" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
         Info "cloning koda ($Branch edition)..."
         git clone --depth 1 --branch $Branch $Repo $s 2>$null
         if ($LASTEXITCODE -ne 0) { Die "clone failed" }
@@ -109,8 +112,19 @@ function Build-And-Install {
     Ok "built"
 
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    Copy-Item $Built (Join-Path $BinDir "koda.exe") -Force
-    Ok "installed to $BinDir\koda.exe"
+    $dest = Join-Path $BinDir "koda.exe"
+    # Windows refuses to overwrite a running executable, which is exactly the
+    # case when someone re-runs this to update. Renaming one is allowed, so move
+    # the old copy aside first and clear it out next time.
+    $old = "$dest.old"
+    if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $dest) {
+        try { Rename-Item $dest $old -Force -ErrorAction Stop } catch {
+            Die "koda.exe is in use and could not be replaced - close any running koda and re-run"
+        }
+    }
+    Copy-Item $Built $dest -Force
+    Ok "installed to $dest"
 
     Ensure-BrowseEngine (Join-Path $BinDir "koda.exe")
 
