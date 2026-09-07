@@ -215,13 +215,22 @@ koda can ask it directly. The `debug` tool drives a real debugger over the
 model can stop a program on a line and look at what is actually there:
 
 ```
-launch      start the program, stopped at its first line
-set_breakpoint  file + line, optionally with a condition
+launch / attach          start a program, or join one already running
+set_breakpoint           file + line — with a condition, a hit count, or a
+                         log_message, which prints instead of stopping
+set_function_breakpoint  break on a function by name, no line needed
 continue / step_over / step_in / step_out / pause
 stack_trace → scopes → variables      look around where it stopped
-evaluate    ask the program a question in that frame
-output, status, terminate
+evaluate                 ask the program a question in that frame
+breakpoints, output, status, terminate
 ```
+
+Two of those are worth knowing about. A **logpoint** (`log_message`) is a print
+statement you never had to add to the file and never have to remember to
+remove — `"adding {r['amount']} to {total}"` on the line inside a loop prints
+the running total every pass and stops nothing. A **hit condition** (`>5`,
+`%10`) is counted inside the adapter, so skipping to the thousandth iteration
+costs one stop rather than a thousand.
 
 A session looks like this, verbatim from a run against `debugpy`:
 
@@ -237,8 +246,11 @@ total = 49
 
 One session at a time, and `list_adapters` says which debuggers this machine
 has. koda ships the registry, not the debuggers: `debugpy` for Python,
-`lldb-dap`/`codelldb` for Rust and C, `dlv` for Go, `js-debug-adapter` for
-Node — whatever that language's community already ships. Reading a stopped
+`lldb-dap` for Rust and C, `dlv` for Go, `js-debug-adapter` for Node —
+whatever that language's community already ships. All of them over stdio,
+which is why `codelldb` is absent despite covering the same languages as
+`lldb-dap`: it is a TCP adapter, and an entry that starts fine and then never
+answers is worse than no entry at all. Reading a stopped
 program (`stack_trace`, `variables`, `evaluate`, `output`) counts as a read and
 does not stop to ask; running one (`launch`, `continue`, stepping) asks like
 any other command, unless autonomy is turned up.

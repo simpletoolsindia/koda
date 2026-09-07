@@ -58,7 +58,13 @@ pub struct Adapter {
 
 /// The built-in registry. Deliberately short: an adapter that is not installed
 /// is worse than absent, because it fails at launch instead of at selection.
-/// Every one of these is the standard adapter for its language.
+/// Every one of these is the standard adapter for its language, and every one
+/// of them speaks DAP on **stdio** -- which is the only transport here.
+///
+/// That last point is why `codelldb` is not in this list even though it debugs
+/// the same languages as `lldb-dap`: it is a TCP adapter (`--port`), and an
+/// entry that spawns fine and then never answers is worse than no entry at
+/// all. Add it, or anything else, in config once koda speaks TCP.
 pub fn adapters() -> &'static [Adapter] {
     static REG: OnceLock<Vec<Adapter>> = OnceLock::new();
     REG.get_or_init(|| {
@@ -75,13 +81,6 @@ pub fn adapters() -> &'static [Adapter] {
                 command: "lldb-dap",
                 args: &[],
                 extensions: &["rs", "c", "cc", "cpp", "m", "swift", "zig"],
-                launch_defaults: &[],
-            },
-            Adapter {
-                name: "codelldb",
-                command: "codelldb",
-                args: &["--port", "0"],
-                extensions: &["rs", "c", "cc", "cpp"],
                 launch_defaults: &[],
             },
             Adapter {
@@ -579,11 +578,36 @@ fn dispatch(
 
 // ------------------------------------------------------------------- session
 
-/// One breakpoint, as the model asked for it.
+/// One source breakpoint, as the model asked for it.
 #[derive(Debug, Clone)]
 struct Bp {
     line: i64,
+    /// Only stop when this expression is true.
     condition: Option<String>,
+    /// Only stop on some of the hits: `>5`, `%10`, or a bare count. The adapter
+    /// counts, which is the whole point -- a condition evaluated in-process is
+    /// far cheaper than stopping and continuing a thousand times.
+    hit_condition: Option<String>,
+    /// A logpoint: print this instead of stopping. `{expr}` interpolates.
+    /// The cheapest debugging there is -- a print statement you did not have to
+    /// edit the file to add, or remove afterwards.
+    log_message: Option<String>,
+}
+
+impl Bp {
+    fn to_dap(&self) -> Value {
+        let mut v = json!({ "line": self.line });
+        if let Some(c) = &self.condition {
+            v["condition"] = json!(c);
+        }
+        if let Some(h) = &self.hit_condition {
+            v["hitCondition"] = json!(h);
+        }
+        if let Some(m) = &self.log_message {
+            v["logMessage"] = json!(m);
+        }
+        v
+    }
 }
 
 /// The live debug session: the adapter, and what the conversation has to
@@ -599,6 +623,9 @@ pub struct Session {
     /// `setBreakpoints`, so the set has to be kept here to add one without
     /// silently dropping the others.
     breakpoints: BTreeMap<String, Vec<Bp>>,
+    /// Break on entry to these functions, by name. Kept for the same reason as
+    /// the source set: DAP replaces the whole list on every call.
+    function_breakpoints: Vec<String>,
     /// True once `configurationDone` has been sent.
     configured: bool,
 }
@@ -611,6 +638,36 @@ fn slot() -> &'static Mutex<Option<Session>> {
 }
 
 impl Session {
+    /// Attach to a program that is already running.
+    ///
+    /// The other half of `launch`: a server you started yourself, a process
+    /// that is already wedged, something running under a supervisor. The
+    /// arguments an adapter needs differ wildly -- a pid here, a port there --
+    /// so anything the caller passes in `attach_args` is merged over the two
+    /// koda knows how to name.
+    fn attach(
+        adapter: &Adapter,
+        cwd: &Path,
+        pid: Option<i64>,
+        port: Option<i64>,
+        extra: Value,
+    ) -> Result<Session> {
+        let mut args = json!({ "request": "attach" });
+        if let Some(p) = pid {
+            args["processId"] = json!(p);
+        }
+        if let Some(p) = port {
+            // debugpy and js-debug both take the address this way.
+            args["connect"] = json!({ "host": "127.0.0.1", "port": p });
+        }
+        if let Some(obj) = extra.as_object() {
+            for (k, v) in obj {
+                args[k] = v.clone();
+            }
+        }
+        Session::start(adapter, cwd, "attach", args, "(attached)")
+    }
+
     /// Start a program under a debugger and run it to its first stop.
     fn launch(
         adapter: &Adapter,
@@ -618,6 +675,43 @@ impl Session {
         cwd: &Path,
         args: Vec<Value>,
         stop_on_entry: bool,
+    ) -> Result<Session> {
+        let mut launch = json!({
+            // Several adapters read the request kind out of the arguments as
+            // well as the command, and refuse the launch without it.
+            "request": "launch",
+            "program": program,
+            "cwd": cwd.to_string_lossy(),
+            "args": args,
+            "stopOnEntry": stop_on_entry,
+            "noDebug": false,
+            // debugpy and js-debug both want to be told where output goes;
+            // internalConsole keeps it on the DAP `output` event, which is the
+            // only place koda can read it.
+            "console": "internalConsole",
+        });
+        for (k, v) in adapter.launch_defaults {
+            if launch.get(*k).is_none() {
+                launch[*k] = v.clone();
+            }
+        }
+        Session::start(adapter, cwd, "launch", launch, program)
+    }
+
+    /// The handshake both `launch` and `attach` go through.
+    ///
+    /// DAP's opening is not request/response, and getting that wrong is a
+    /// deadlock rather than an error: an adapter answers `launch`/`attach` only
+    /// once the client has finished configuring, and configuring may only start
+    /// once the adapter has said `initialized`. So the request goes out and
+    /// stays in flight while we wait to be invited, configure, and only then
+    /// collect the response.
+    fn start(
+        adapter: &Adapter,
+        cwd: &Path,
+        command: &str,
+        arguments: Value,
+        program: &str,
     ) -> Result<Session> {
         let client = Client::spawn(adapter, cwd)?;
         let caps = client.request(
@@ -638,40 +732,19 @@ impl Session {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let mut launch = json!({
-            "program": program,
-            "cwd": cwd.to_string_lossy(),
-            "args": args,
-            "stopOnEntry": stop_on_entry,
-            "noDebug": false,
-            // debugpy and js-debug both want to be told where output goes;
-            // internalConsole keeps it on the DAP `output` event, which is the
-            // only place koda can read it.
-            "console": "internalConsole",
-        });
-        for (k, v) in adapter.launch_defaults {
-            if launch.get(*k).is_none() {
-                launch[*k] = v.clone();
-            }
-        }
-
         let mut s = Session {
             client,
             adapter: adapter.name.to_string(),
             program: program.to_string(),
             root: cwd.to_path_buf(),
             breakpoints: BTreeMap::new(),
+            function_breakpoints: Vec::new(),
             configured: false,
         };
-        // Note the stop generation before launching: with `stopOnEntry` the
-        // stop can arrive before the launch response does.
+        // Note the stop generation first: with `stopOnEntry` the stop can
+        // arrive before the response does.
         let gen = s.client.stop_generation();
-        // The handshake, in DAP's order and not request/response order: send
-        // `launch` and leave it in flight, wait to be invited to configure,
-        // configure, and only then collect the launch response. Blocking on
-        // that response first is a deadlock -- the adapter is waiting for
-        // `configurationDone` to send it.
-        let pending = s.client.send("launch", launch)?;
+        let pending = s.client.send(command, arguments)?;
         s.client.wait_for_initialized(Duration::from_secs(10));
         if wants_configuration_done {
             let _ = s.client.request("configurationDone", json!({}));
@@ -685,13 +758,7 @@ impl Session {
     /// Push a file's breakpoints to the adapter, replacing its set.
     fn sync_breakpoints(&mut self, path: &str) -> Result<Value> {
         let want = self.breakpoints.get(path).cloned().unwrap_or_default();
-        let bps: Vec<Value> = want
-            .iter()
-            .map(|b| match &b.condition {
-                Some(c) => json!({ "line": b.line, "condition": c }),
-                None => json!({ "line": b.line }),
-            })
-            .collect();
+        let bps: Vec<Value> = want.iter().map(Bp::to_dap).collect();
         self.client.request(
             "setBreakpoints",
             json!({
@@ -700,6 +767,17 @@ impl Session {
                 "sourceModified": false,
             }),
         )
+    }
+
+    /// Push the function breakpoints, replacing the adapter's list.
+    fn sync_function_breakpoints(&mut self) -> Result<Value> {
+        let bps: Vec<Value> = self
+            .function_breakpoints
+            .iter()
+            .map(|n| json!({ "name": n }))
+            .collect();
+        self.client
+            .request("setFunctionBreakpoints", json!({ "breakpoints": bps }))
     }
 
     fn thread_id(&self) -> i64 {
@@ -725,8 +803,9 @@ impl Session {
                 }
             }
             Status::Running => "running".into(),
-            Status::Exited(c) => format!("the program exited with code {c}"),
-            Status::Terminated => "the debug session ended".into(),
+            // These read after "it is …", so they have to be predicates.
+            Status::Exited(c) => format!("no longer running (exit code {c})"),
+            Status::Terminated => "no longer running (the session ended)".into(),
         }
     }
 
@@ -760,6 +839,7 @@ impl Session {
 /// rather than exec, because reading a stack frame changes nothing.
 pub const READONLY_ACTIONS: &[&str] = &[
     "status",
+    "breakpoints",
     "threads",
     "stack_trace",
     "scopes",
@@ -854,6 +934,30 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
         ));
     }
 
+    if action == "attach" {
+        if let Some(mut old) = guard.take() {
+            old.client.shutdown();
+        }
+        let pid = args.get("pid").and_then(Value::as_i64);
+        let port = args.get("port").and_then(Value::as_i64);
+        if pid.is_none() && port.is_none() && args.get("attach_args").is_none() {
+            bail!("attach needs a `pid`, a `port`, or adapter-specific `attach_args`.");
+        }
+        let adapter = pick_adapter(
+            args.get("program").and_then(Value::as_str).unwrap_or(""),
+            args.get("adapter").and_then(Value::as_str),
+        )?;
+        let extra = args.get("attach_args").cloned().unwrap_or(Value::Null);
+        let s = Session::attach(adapter, root, pid, port, extra)?;
+        let where_now = s.where_now();
+        let name = s.adapter.clone();
+        *guard = Some(s);
+        return Ok(format!(
+            "Attached with {name}. It is {where_now}.\n\
+             Set breakpoints, then continue or pause."
+        ));
+    }
+
     let Some(session) = guard.as_mut() else {
         bail!("no debug session. Start one with action=launch, program=<file>.")
     };
@@ -865,13 +969,23 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
                 .get("line")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow!("`line` is required"))?;
-            let condition = args
-                .get("condition")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let text = |k: &str| {
+                args.get(k)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let bp = Bp {
+                line,
+                condition: text("condition"),
+                hit_condition: text("hit_condition"),
+                log_message: text("log_message"),
+            };
+            let logpoint = bp.log_message.is_some();
             let set = session.breakpoints.entry(file.clone()).or_default();
             set.retain(|b| b.line != line);
-            set.push(Bp { line, condition });
+            set.push(bp);
             set.sort_by_key(|b| b.line);
             let body = session.sync_breakpoints(&file)?;
             // The adapter says whether it could bind each one; an unverified
@@ -886,7 +1000,8 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
                 })
                 .unwrap_or(0);
             Ok(format!(
-                "Breakpoint at {}:{line}. {} of {} breakpoints in this file are verified.",
+                "{} at {}:{line}. {} of {} breakpoints in this file are verified.",
+                if logpoint { "Logpoint" } else { "Breakpoint" },
                 rel(root, &file),
                 verified,
                 session.breakpoints.get(&file).map(Vec::len).unwrap_or(0)
@@ -911,6 +1026,59 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
             Ok(match line {
                 Some(l) => format!("Removed the breakpoint at {file}:{l}."),
                 None => format!("Removed every breakpoint in {file}."),
+            })
+        }
+        "set_function_breakpoint" => {
+            let name = need(args, "name")?;
+            if !session.function_breakpoints.contains(&name) {
+                session.function_breakpoints.push(name.clone());
+            }
+            let body = session.sync_function_breakpoints()?;
+            let verified = body
+                .get("breakpoints")
+                .and_then(Value::as_array)
+                .map(|bs| {
+                    bs.iter()
+                        .filter(|b| b.get("verified").and_then(Value::as_bool) == Some(true))
+                        .count()
+                })
+                .unwrap_or(0);
+            Ok(format!(
+                "Breaking on entry to `{name}`. {verified} of {} function breakpoints verified.",
+                session.function_breakpoints.len()
+            ))
+        }
+        "remove_function_breakpoint" => {
+            let name = need(args, "name")?;
+            session.function_breakpoints.retain(|n| n != &name);
+            session.sync_function_breakpoints()?;
+            Ok(format!("No longer breaking on `{name}`."))
+        }
+        "breakpoints" => {
+            let mut out = String::new();
+            for (file, set) in &session.breakpoints {
+                for b in set {
+                    let mut line = format!("- {}:{}", rel(&session.root, file), b.line);
+                    if let Some(c) = &b.condition {
+                        line.push_str(&format!(" when {c}"));
+                    }
+                    if let Some(h) = &b.hit_condition {
+                        line.push_str(&format!(" hits {h}"));
+                    }
+                    if let Some(m) = &b.log_message {
+                        line.push_str(&format!(" logs \"{m}\""));
+                    }
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+            for f in &session.function_breakpoints {
+                out.push_str(&format!("- fn {f}\n"));
+            }
+            Ok(if out.is_empty() {
+                "No breakpoints set.".into()
+            } else {
+                format!("Breakpoints:\n{out}")
             })
         }
         "continue" | "step_over" | "step_in" | "step_out" | "pause" => {
@@ -1073,9 +1241,11 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
             Ok("Debug session ended.".into())
         }
         other => bail!(
-            "unknown debug action `{other}`. Try: launch, set_breakpoint, continue, \
-             step_over, step_in, step_out, stack_trace, scopes, variables, evaluate, \
-             output, status, terminate, list_adapters."
+            "unknown debug action `{other}`. Try: launch, attach, set_breakpoint, \
+             set_function_breakpoint, remove_breakpoint, remove_function_breakpoint, \
+             breakpoints, continue, step_over, step_in, step_out, pause, stack_trace, \
+             threads, scopes, variables, evaluate, output, status, terminate, \
+             list_adapters."
         ),
     }
 }
@@ -1245,7 +1415,15 @@ while True:
         reply(req)
     elif cmd == "setBreakpoints":
         bps = req["arguments"]["breakpoints"]
+        # Echo back what was asked for, so the client's own encoding is checked.
+        sys.stderr.write(json.dumps(bps) + "\n"); sys.stderr.flush()
         reply(req, {"breakpoints": [{"verified": True, "line": b["line"]} for b in bps]})
+    elif cmd == "setFunctionBreakpoints":
+        names = [b["name"] for b in req["arguments"]["breakpoints"]]
+        reply(req, {"breakpoints": [{"verified": True, "name": n} for n in names]})
+    elif cmd == "attach":
+        event("stopped", {"reason": "pause", "threadId": 1})
+        reply(req)
     elif cmd == "continue":
         # The stop arrives BEFORE the response: the race the client must survive.
         event("output", {"category": "stdout", "output": "working\n"})
@@ -1300,6 +1478,7 @@ while True:
             program: "main.py".into(),
             root: dir.to_path_buf(),
             breakpoints: BTreeMap::new(),
+            function_breakpoints: Vec::new(),
             configured: true,
         }
     }
@@ -1335,6 +1514,8 @@ while True:
             vec![Bp {
                 line: 12,
                 condition: None,
+                hit_condition: None,
+                log_message: None,
             }],
         );
         let body = s.sync_breakpoints("/app/main.py").expect("setBreakpoints");
@@ -1360,6 +1541,52 @@ while True:
             .request("variables", json!({ "variablesReference": 100 }))
             .expect("variables");
         assert_eq!(vars["variables"][0]["name"], json!("total"));
+
+        s.client.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The three ways to say "stop here" all have to reach the adapter in the
+    /// shape DAP expects, and survive the whole-list replace on every call.
+    #[test]
+    fn breakpoints_carry_conditions_hit_counts_and_logpoints() {
+        let Some(_) = python() else { return };
+        let dir = std::env::temp_dir().join(format!("koda-dap-bp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let mut s = fake_session(&dir);
+
+        s.breakpoints.insert(
+            "/app/main.py".into(),
+            vec![
+                Bp {
+                    line: 12,
+                    condition: Some("total > 40".into()),
+                    hit_condition: None,
+                    log_message: None,
+                },
+                Bp {
+                    line: 20,
+                    condition: None,
+                    hit_condition: Some(">5".into()),
+                    log_message: Some("total is {total}".into()),
+                },
+            ],
+        );
+        let body = s.sync_breakpoints("/app/main.py").expect("setBreakpoints");
+        assert_eq!(body["breakpoints"].as_array().map(Vec::len), Some(2));
+
+        // What actually went over the wire, echoed back by the adapter.
+        let sent = s.client.output();
+        assert!(sent.contains("\"condition\": \"total > 40\""), "{sent}");
+        assert!(sent.contains("\"hitCondition\": \">5\""), "{sent}");
+        assert!(sent.contains("\"logMessage\""), "{sent}");
+
+        // Function breakpoints are a separate DAP list, kept separately.
+        s.function_breakpoints.push("average".into());
+        let body = s
+            .sync_function_breakpoints()
+            .expect("setFunctionBreakpoints");
+        assert_eq!(body["breakpoints"][0]["name"], json!("average"));
 
         s.client.shutdown();
         let _ = std::fs::remove_dir_all(&dir);

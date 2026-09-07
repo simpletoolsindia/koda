@@ -536,17 +536,21 @@ fn build_specs() -> Vec<Spec> {
                    is actually doing -- what a variable holds here, which branch it takes, why \
                    it crashes. Flow: `launch` (stops at the first line), `set_breakpoint`, \
                    `continue`, then `stack_trace` -> `scopes` -> `variables` to look around, or \
-                   `evaluate` to ask. One session at a time; `terminate` when done. Needs the \
-                   language's debug adapter installed -- `list_adapters` says which are.",
+                   `evaluate` to ask. `set_function_breakpoint` breaks on a function by name when \
+                   you do not know the line; a `log_message` breakpoint prints instead of \
+                   stopping. `attach` joins a program that is already running. One session at a \
+                   time; `terminate` when done. Needs the language's debug adapter installed -- \
+                   `list_adapters` says which are.",
             params: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["launch", "set_breakpoint", "remove_breakpoint", "continue",
-                                 "step_over", "step_in", "step_out", "pause", "stack_trace",
-                                 "threads", "scopes", "variables", "evaluate", "output",
-                                 "status", "terminate", "list_adapters"],
+                        "enum": ["launch", "attach", "set_breakpoint", "set_function_breakpoint",
+                                 "remove_breakpoint", "remove_function_breakpoint", "breakpoints",
+                                 "continue", "step_over", "step_in", "step_out", "pause",
+                                 "stack_trace", "threads", "scopes", "variables", "evaluate",
+                                 "output", "status", "terminate", "list_adapters"],
                         "description": "What to do."
                     },
                     "program": str_prop("For launch: the file to run, relative to the workspace."),
@@ -562,6 +566,12 @@ fn build_specs() -> Vec<Spec> {
                     "file": str_prop("For set_breakpoint / remove_breakpoint: the source file."),
                     "line": { "type": "integer", "description": "For set_breakpoint / remove_breakpoint: the 1-based line." },
                     "condition": str_prop("For set_breakpoint: only stop when this expression is true."),
+                    "hit_condition": str_prop("For set_breakpoint: only stop on some hits — `>5`, `%10`, or a count. The adapter counts, so this is far cheaper than stopping repeatedly."),
+                    "log_message": str_prop("For set_breakpoint: print this instead of stopping (a logpoint). `{expr}` interpolates — a print statement you never had to edit the file to add."),
+                    "name": str_prop("For set_function_breakpoint / remove_function_breakpoint: the function to break on entry to."),
+                    "pid": { "type": "integer", "description": "For attach: the process id to attach to." },
+                    "port": { "type": "integer", "description": "For attach: the debug port to connect to." },
+                    "attach_args": { "type": "object", "description": "For attach: adapter-specific arguments, merged over pid/port." },
                     "frame_id": { "type": "integer", "description": "For scopes / evaluate: which frame (from stack_trace). Defaults to the innermost." },
                     "reference": { "type": "integer", "description": "For variables: the reference from scopes, or from a variable that has children." },
                     "expression": str_prop("For evaluate: the expression to evaluate in the stopped frame."),
