@@ -207,6 +207,19 @@ contents.
 
 The full command list is in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
+## Keeping the plan honest
+
+The `todo` tool draws the plan you see above the input. Left to itself a model
+writes that plan once and never touches it again — real sessions here show one
+`todo` call at the start and, at best, one at the end — so the list sits on step
+one while the work runs past it, which is worse than showing no plan at all.
+
+Two things keep it moving, both where the model is actually reading. Every
+`todo` result echoes the merged list back and names the step it is on, with what
+to send when that step is done. And if six tool calls go by without the list
+moving, the next result carries a reminder naming the stale step — once per
+turn, so it is a nudge and not a nag.
+
 ## Watching it work
 
 A long turn used to look like a hung one. Three things now say otherwise.
@@ -269,7 +282,7 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `list_dir` `find_files` `search` | — | gitignore-aware; glob and regex |
 | `codegraph` | — | where a symbol is defined and who uses it |
 | `skill` | — | project conventions, loaded on demand |
-| `todo` | — | the plan you see in the transcript |
+| `todo` | — | the plan you see in the transcript, kept current as steps finish |
 | `remember` | — | durable facts, kept for next session |
 | `delegate` | — | hand a read-only investigation to a subagent |
 | `manage_skill` | asks | write a procedure it worked out as a skill; with `role`, a delegatable agent |

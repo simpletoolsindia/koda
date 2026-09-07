@@ -500,8 +500,11 @@ fn build_specs() -> Vec<Spec> {
         Spec {
             name: "todo",
             desc: "Track a multi-step task so the user can see the plan and the progress. \
-                   Send the whole list every time, with one item marked in_progress. Use it \
-                   for work with three or more steps; skip it for single edits.",
+                   Send the whole list every time, with exactly one item marked in_progress. \
+                   Call it again the moment a step is finished — mark that step done and the \
+                   next one in_progress — not once at the start and once at the end: the \
+                   user is watching this list to know where you are. Use it for work with \
+                   three or more steps; skip it for single edits.",
             params: json!({
                 "type": "object",
                 "properties": {

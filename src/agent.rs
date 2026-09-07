@@ -327,6 +327,11 @@ pub struct Agent {
     plan: Vec<tools::Todo>,
     /// Whether codegraph has already been called in this turn. Used to give a
     /// single corrective hint when a model greps for a bare symbol first.
+    /// Tool calls since the task list last moved, and whether this turn has
+    /// already said something about it. A plan the model forgets is the most
+    /// visible way a long turn goes quiet.
+    steps_since_plan: usize,
+    plan_nudge_sent: bool,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
     codegraph_hint_sent: bool,
@@ -471,6 +476,8 @@ impl Agent {
             last_failure: None,
             empty_replies: 0,
             plan: Vec::new(),
+            steps_since_plan: 0,
+            plan_nudge_sent: false,
             used_codegraph_this_turn: false,
             codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
@@ -550,6 +557,8 @@ impl Agent {
             last_failure: None,
             empty_replies: 0,
             plan: Vec::new(),
+            steps_since_plan: 0,
+            plan_nudge_sent: false,
             used_codegraph_this_turn: false,
             codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
@@ -898,6 +907,7 @@ impl Agent {
             }
             self.used_codegraph_this_turn = false;
             self.codegraph_hint_sent = false;
+            self.plan_nudge_sent = false;
             self.trace_turn = crate::trace::begin_turn(
                 &self.mode.to_string(),
                 &self.model,
@@ -2061,6 +2071,26 @@ impl Agent {
                         };
                         content.push_str(&format!("[{mark}] {}\n", it.text));
                     }
+                    // A plan is only worth anything if it keeps up with the
+                    // work, and the model reads this result far more carefully
+                    // than the system prompt it saw twenty steps ago. Name the
+                    // step it is on and what to send when that step is done.
+                    if let Some(active) = items
+                        .iter()
+                        .find(|i| i.status == tools::TodoStatus::Active)
+                        .or_else(|| {
+                            items
+                                .iter()
+                                .find(|i| i.status == tools::TodoStatus::Pending)
+                        })
+                    {
+                        let _ = write!(
+                            content,
+                            "\nYou are on: {}. As soon as it is done, call `todo` again \
+                             with that step done and the next one in_progress.",
+                            active.text
+                        );
+                    }
                     tools::Outcome {
                         ok: true,
                         content,
@@ -2075,6 +2105,20 @@ impl Agent {
                 None => tools::run(&name, args, &self.streaming_ctx(&call.id, tx)).await,
             },
         };
+        // A plan that has not moved in several steps is the failure the user
+        // sees: the list on screen still says "in_progress" for something
+        // finished long ago. Nudge once per turn, and never on `todo` itself.
+        if self.depth == 0 && name != "todo" {
+            self.steps_since_plan += 1;
+            if !self.plan_nudge_sent {
+                if let Some(nudge) = plan_reminder(&self.plan, self.steps_since_plan) {
+                    outcome.content.push_str(&nudge);
+                    self.plan_nudge_sent = true;
+                }
+            }
+        } else if name == "todo" {
+            self.steps_since_plan = 0;
+        }
         if self.depth == 0 && self.cfg.codegraph && !self.used_codegraph_this_turn {
             if let Some(symbol) = symbol_being_searched(&name, &args_for_memory) {
                 if !self.codegraph_hint_sent {
@@ -4129,6 +4173,30 @@ fn draft_target(partial: &str) -> Option<String> {
     None
 }
 
+/// What to add to a tool result when the task list has stopped keeping up.
+///
+/// The user watches this list to know where the agent is; a step still marked
+/// current six calls after it was finished is the most visible way a long turn
+/// goes quiet. None when there is no plan, when it is finished, or when it is
+/// still moving.
+fn plan_reminder(plan: &[tools::Todo], steps_since: usize) -> Option<String> {
+    if steps_since < PLAN_STALE_AFTER {
+        return None;
+    }
+    let step = plan.iter().find(|i| i.status != tools::TodoStatus::Done)?;
+    Some(format!(
+        "\n\nPLAN REMINDER: the task list still shows \"{}\" as the current step, \
+         {steps_since} steps later. If it is done, call `todo` now with it marked done \
+         and the next step in_progress — the user is watching that list.",
+        step.text
+    ))
+}
+
+/// Tool calls a plan may go without moving before the model is reminded.
+/// Low enough to catch a stalled list, high enough that a step which genuinely
+/// takes five calls is not nagged mid-way.
+const PLAN_STALE_AFTER: usize = 6;
+
 fn required_params_hint(name: &str) -> String {
     let Some(spec) = tools::spec(name) else {
         return format!("`{name}` is not a known tool.");
@@ -4978,6 +5046,56 @@ mod tests {
     /// so a small model can re-issue the call instead of hitting a hard error.
     /// The path is known long before the content that makes the wait worth
     /// reporting, because it comes first in the arguments.
+    /// The list on screen is the user's view of where the agent is. Sessions
+    /// show the real failure: the model writes a plan once and never touches
+    /// it, so the first step reads "in progress" until the work is finished.
+    #[test]
+    fn a_stalled_plan_is_pointed_out_once_it_stops_moving() {
+        let plan = vec![
+            tools::Todo {
+                text: "read the parser".into(),
+                status: tools::TodoStatus::Done,
+            },
+            tools::Todo {
+                text: "add the token".into(),
+                status: tools::TodoStatus::Active,
+            },
+            tools::Todo {
+                text: "run the tests".into(),
+                status: tools::TodoStatus::Pending,
+            },
+        ];
+        // Still moving: say nothing.
+        assert_eq!(plan_reminder(&plan, PLAN_STALE_AFTER - 1), None);
+        let nudge = plan_reminder(&plan, PLAN_STALE_AFTER).expect("stale");
+        assert!(nudge.contains("add the token"), "{nudge}");
+        assert!(nudge.contains("call `todo` now"), "{nudge}");
+        // Nothing to chase when there is no plan, or it is finished.
+        assert_eq!(plan_reminder(&[], 99), None);
+        let done: Vec<tools::Todo> = plan
+            .iter()
+            .map(|i| tools::Todo {
+                text: i.text.clone(),
+                status: tools::TodoStatus::Done,
+            })
+            .collect();
+        assert_eq!(plan_reminder(&done, 99), None);
+    }
+
+    /// Both places that tell the model about `todo` have to say *when* to call
+    /// it again -- the failure was never that it did not know the tool existed.
+    #[test]
+    fn the_todo_tool_asks_to_be_called_as_steps_finish() {
+        let spec = tools::spec("todo").expect("todo is a tool");
+        assert!(spec.desc.contains("finished"), "{}", spec.desc);
+        assert!(spec.desc.contains("in_progress"), "{}", spec.desc);
+        assert!(
+            crate::prompt::base_prompt().contains("as each step finishes"),
+            "{}",
+            crate::prompt::base_prompt()
+        );
+    }
+
     #[test]
     fn a_target_is_read_out_of_arguments_still_arriving() {
         assert_eq!(

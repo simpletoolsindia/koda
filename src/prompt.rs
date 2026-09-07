@@ -16,7 +16,9 @@ Rules:
 - Verify changes by running builds, tests, or linters via `run_command`.
 - Never run destructive commands without explicit request.
 - Make one write or command at a time, and wait for its result before the next step.
-- When a task takes >2 steps, use `todo` to plan and track progress.
+- When a task takes >2 steps, call `todo` to lay out the plan, then call it again \
+as each step finishes — done for what you completed, in_progress for what you are on. \
+A plan you never update tells the user less than no plan at all.
 - Web research: use `web_search`/`web_fetch` for static text. Use `browse` for dynamic sites, forms, tabs, and media downloads.
 - Store durable facts (build commands, architecture) with `remember`.
 - Store repeatable procedures (release checklists, setup steps) with `manage_skill`.
