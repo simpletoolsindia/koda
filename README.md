@@ -337,6 +337,36 @@ through `remember`, plus which commands succeeded and failed here. Next session
 starts knowing your test runner. It is plain markdown you can read, edit or
 delete — nothing is inferred behind your back and nothing is hidden.
 
+## Fitting a small context
+
+A local model with an 8k window spends most of it on tool results it can no
+longer use: the first read of a file that has since been edited twice, the
+listing from six steps back, the 400-line build log whose only payload was
+"ok". Dropping the oldest messages to make room frees exactly the wrong thing —
+the first message in a session is the description of the job.
+
+So when a request does not fit, koda decides what the model still needs, in
+escalating passes, stopping as soon as it fits:
+
+1. **Supersede** — a `read_file` answered again later, or a file edited since it
+   was read, is stale. Its body becomes one line saying what replaced it.
+2. **Squeeze** — what survives is truncated on a ladder. The step in flight
+   keeps everything, recent steps keep their detail, older ones keep their head
+   and tail, and anything naming what you just asked about keeps twice as much
+   as anything that does not.
+3. **Drop** — only now are whole exchanges removed, oldest first, and never the
+   opening request.
+
+This runs on a copy at send time: your history, the session file and `/compact`
+are untouched, so nothing is lost for good. Raise `context_tokens` and the next
+request carries the full detail again. Under budget it does nothing at all.
+`/compact` is still the tool for a session that has genuinely moved on — it
+writes a real summary; this keeps a long turn working in the meantime.
+
+The memory block scales the same way: one remembered fact per ~1k of window,
+between four and twenty, so a small model is not spending its context on notes
+instead of the task.
+
 ## Web search
 
 Off by default. Turn it on with `/websearch` (or `web_search = true`). It has two
@@ -392,7 +422,8 @@ prefer installing the CA; koda warns at startup whenever it is on.
 
 **Context budget.** `context_tokens` defaults to `110000` and is editable on
 `/setup`. A provider can carry its own, since context size belongs to the model
-behind the endpoint.
+behind the endpoint. When a turn outgrows it, koda curates the request rather
+than truncating the conversation — see below.
 
 **Multiple providers.** Give an endpoint a name in `/provider add` and it is
 saved; `/provider <name>` switches, `/settings` cycles, and the name replaces
@@ -585,6 +616,11 @@ The built-in system prompt is deliberately short, but you can replace it. Open
 the built-in). Your `instructions` are still appended either way, and per-tool
 prompt overrides can be set with a `[tool_prompts]` table in config.
 
+Whichever prompt is in force, koda appends the facts a model cannot know on its
+own: the workspace path, the project type, and the current date, time and UTC
+offset — so it dates a changelog entry from your clock instead of guessing a
+year from its training data.
+
 ## When things go wrong
 
 Failures do not put stack traces on your screen. Transient ones — connection
@@ -649,7 +685,7 @@ model = "qwen2.5-coder:14b"
 temperature = 0.2          # low is better for code
 top_p = 0.95
 max_tokens = 0             # 0 = server default
-context_tokens = 16000     # history is trimmed to fit
+context_tokens = 16000     # requests are curated to fit
 auto_compact_at = 0.85     # summarize at this fraction; 0 disables
 
 mode = "execute"           # plan | execute | vibe

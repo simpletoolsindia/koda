@@ -83,7 +83,8 @@ Stop calling tools as soon as you have the answer.";
 /// System prompt for a delegated subagent.
 pub fn subagent(root: &Path) -> String {
     let mut p = String::from(SUBAGENT);
-    let _ = write!(p, "\n\nWorkspace: {}", root.display());
+    let _ = write!(p, "\n\n{}", now_line());
+    let _ = write!(p, "\nWorkspace: {}", root.display());
     if let Some(ctx) = environment(root) {
         let _ = write!(p, "\n{ctx}");
     }
@@ -134,7 +135,10 @@ pub fn build_with_skills(
     let mut p = build(cfg, root, use_text_protocol, mode);
     p.push_str(&crate::skills::catalogue(skills));
     if cfg.memory {
-        p.push_str(&memory.brief());
+        // One note per ~1k of window, between four and twenty: enough to be
+        // useful on a small model without crowding out the request.
+        let notes = (cfg.context_tokens / 1_000).clamp(4, 20);
+        p.push_str(&memory.brief(notes));
         if !memory.is_empty() {
             p.push_str(
                 "Use `remember` when you discover another durable fact about this project.\n",
@@ -181,7 +185,8 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
         }
     }
 
-    let _ = write!(p, "\n\nWorkspace: {}", root.display());
+    let _ = write!(p, "\n\n{}", now_line());
+    let _ = write!(p, "\nWorkspace: {}", root.display());
     if let Some(ctx) = environment(root) {
         let _ = write!(p, "\n{ctx}");
     }
@@ -290,6 +295,109 @@ fn dedup(v: &[&str]) -> Vec<String> {
     out
 }
 
+/// The current date and time, for the system prompt.
+///
+/// A model with no clock guesses the year from its training data, and then
+/// dates a changelog entry or a copyright header wrong. This is captured when
+/// the prompt is built rather than per turn on purpose: the system prompt is
+/// the cached KV prefix for local models, and rewriting it every message would
+/// throw that cache away for a minute hand nobody reads. The wording says so,
+/// so a long session does not mistake the stamp for the wall clock.
+fn now_line() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let offset = local_offset_seconds();
+    let local = secs + offset as i64;
+
+    let days = local.div_euclid(86_400);
+    let sod = local.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    // 1970-01-01 was a Thursday.
+    const DAY: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let weekday = DAY[(days + 3).rem_euclid(7) as usize];
+
+    let (sign, off) = if offset < 0 {
+        ('-', -offset)
+    } else {
+        ('+', offset)
+    };
+    format!(
+        "Current date and time: {weekday} {y:04}-{m:02}-{d:02} {:02}:{:02} UTC{sign}{:02}:{:02} \
+         (taken when this session's prompt was built; the clock has moved on since).",
+        sod / 3600,
+        (sod % 3600) / 60,
+        off / 3600,
+        (off % 3600) / 60,
+    )
+}
+
+/// Days since the Unix epoch to a civil (year, month, day). Hinnant's
+/// `civil_from_days`, which is exact for every date std can hand us.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// The machine's UTC offset in seconds, probed once per process.
+///
+/// std has no timezone database and koda takes no dependency for one, so the
+/// offset comes from the platform's own date command -- one cheap spawn for the
+/// life of the process, cached. If that fails we report UTC, which is wrong by
+/// hours but never wrong about what it is: the line says which zone it is in.
+fn local_offset_seconds() -> i32 {
+    static OFFSET: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(|| probe_offset().unwrap_or(0))
+}
+
+#[cfg(not(windows))]
+fn probe_offset() -> Option<i32> {
+    let out = std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()?;
+    parse_offset(std::str::from_utf8(&out.stdout).ok()?)
+}
+
+#[cfg(windows)]
+fn probe_offset() -> Option<i32> {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-Date).ToString('zzz')",
+        ])
+        .output()
+        .ok()?;
+    parse_offset(std::str::from_utf8(&out.stdout).ok()?)
+}
+
+/// `+0530`, `-08:00` -> seconds east of UTC.
+fn parse_offset(raw: &str) -> Option<i32> {
+    let s: String = raw.trim().chars().filter(|c| *c != ':').collect();
+    let (sign, digits) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => (1, &s[..]),
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let h: i32 = digits[..2].parse().ok()?;
+    let m: i32 = digits[2..].parse().ok()?;
+    Some(sign * (h * 3600 + m * 60))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +444,35 @@ mod tests {
             !text.contains("in ONE step"),
             "the text protocol carries one call per message: {text}"
         );
+    }
+
+    #[test]
+    fn offsets_parse_in_both_shapes_and_signs() {
+        assert_eq!(parse_offset("+0530\n"), Some(19_800));
+        assert_eq!(parse_offset("-08:00"), Some(-28_800));
+        assert_eq!(parse_offset("+0000"), Some(0));
+        assert_eq!(parse_offset(""), None);
+        assert_eq!(parse_offset("UTC"), None);
+    }
+
+    #[test]
+    fn civil_dates_round_trip_known_days() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        // A leap day, and the century rule that trips naive conversions.
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(20_000), (2024, 10, 4));
+    }
+
+    /// The whole point of the line: a model that asks "what year is it" must
+    /// find the answer in its prompt, in both the main and subagent prompts.
+    #[test]
+    fn prompts_state_the_current_date() {
+        let cfg = Config::default();
+        let main = build(&cfg, Path::new("/tmp"), false, Mode::Execute);
+        assert!(main.contains("Current date and time:"), "{main}");
+        let sub = subagent(Path::new("/tmp"));
+        assert!(sub.contains("Current date and time:"), "{sub}");
     }
 
     #[test]

@@ -1460,9 +1460,30 @@ impl Agent {
         &mut self,
         tx: &mpsc::UnboundedSender<Event>,
     ) -> anyhow::Result<StreamResult> {
-        let mut messages = Vec::with_capacity(self.history.len() + 1);
+        // What the model sees is curated to fit its window: stale results are
+        // stubbed and old ones squeezed before anything is dropped, so a short
+        // context costs detail rather than the task. `self.history` keeps the
+        // full record either way.
+        let budget = self
+            .cfg
+            .context_tokens
+            .saturating_sub(self.system.len() / 4 + 1024)
+            .max(1024);
+        let (curated, report) = crate::context::curate(&self.history, budget);
+        if report.changed() {
+            crate::tel_info!(
+                "context",
+                "curated",
+                "before" => report.before,
+                "after" => report.after,
+                "superseded" => report.superseded,
+                "squeezed" => report.squeezed,
+                "dropped" => report.dropped,
+            );
+        }
+        let mut messages = Vec::with_capacity(curated.len() + 1);
         messages.push(Message::system(self.system.clone()));
-        messages.extend(self.history.iter().cloned());
+        messages.extend(curated);
 
         let req = ChatRequest {
             model: self.model.clone(),
@@ -3883,7 +3904,17 @@ impl Agent {
     fn trim(&mut self) -> usize {
         let before = self.history.len();
         let reserve = self.system.len() / 4 + 1024;
-        let budget = self.cfg.context_tokens.saturating_sub(reserve).max(1024);
+        // Curation fits each request on its own (see `context`), so this is no
+        // longer what makes the model's window work -- it only stops a very
+        // long session from growing without bound in memory. Hence the slack:
+        // dropping here is permanent, and curation can still make good use of
+        // history that does not fit verbatim.
+        let budget = self
+            .cfg
+            .context_tokens
+            .saturating_sub(reserve)
+            .max(1024)
+            .saturating_mul(4);
         loop {
             let total: usize = self.history.iter().map(|m| m.approx_tokens()).sum();
             if total <= budget || self.history.len() <= 3 {

@@ -208,8 +208,13 @@ impl Memory {
 
     /// The part worth putting in a system prompt: facts, and the commands that
     /// actually work here.
-    pub fn brief(&self) -> String {
-        if self.is_empty() {
+    /// The memory block for the system prompt, holding at most `notes` facts.
+    ///
+    /// The cap is the caller's because it depends on the window: twenty notes
+    /// are nothing against 110k tokens and a visible tax against 8k, where
+    /// every line here is a line the model does not have for the actual task.
+    pub fn brief(&self, notes: usize) -> String {
+        if self.is_empty() || notes == 0 {
             return String::new();
         }
         let mut out = String::from("\n\nWhat you learned in this project before:\n");
@@ -217,7 +222,7 @@ impl Memory {
             .notes
             .iter()
             .rev()
-            .take(20)
+            .take(notes)
             .collect::<Vec<_>>()
             .iter()
             .rev()
@@ -363,7 +368,7 @@ mod tests {
         assert_eq!(loaded.hot_files.get("src/agent.rs"), Some(&2));
         assert_eq!(loaded.hot_files.get("src/tui.rs"), Some(&1));
         // Only files touched 2+ times surface in the brief (signal over noise).
-        let b = loaded.brief();
+        let b = loaded.brief(20);
         assert!(b.contains("Files most often worked on here"), "{b}");
         assert!(b.contains("src/agent.rs"), "{b}");
         assert!(
@@ -379,7 +384,7 @@ mod tests {
         m.record_command("just test", true);
         m.record_command("npm test", false);
         m.remember("the API lives in src/api");
-        let b = m.brief();
+        let b = m.brief(20);
         assert!(b.contains("the API lives in src/api"), "{b}");
         assert!(b.contains("Commands that work here: `just test`"), "{b}");
         assert!(b.contains("failed here: `npm test`"), "{b}");
@@ -387,7 +392,7 @@ mod tests {
 
     #[test]
     fn empty_memory_contributes_nothing_to_the_prompt() {
-        assert!(Memory::default().brief().is_empty());
+        assert!(Memory::default().brief(20).is_empty());
     }
 
     #[test]

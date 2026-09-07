@@ -878,7 +878,7 @@ model = ""
 temperature = 0.2
 top_p = 0.95
 max_tokens = 0          # 0 = server default
-context_tokens = 16000  # soft budget; history is trimmed to fit
+context_tokens = 16000  # soft budget; requests are curated to fit
 
 # auto   = native tool calls + text-block fallback (best for local models)
 # native = OpenAI tool_calls only
