@@ -282,10 +282,109 @@ struct Asking {
     question: String,
     options: Vec<String>,
     sel: usize,
-    /// True once the user chose the custom-answer entry: the input becomes the
-    /// answer field and the dropdown is dismissed.
+    /// True while the answer is being typed rather than picked. The field is
+    /// inside the dialog, not the composer below it: a question that opens a
+    /// box in the middle of the screen and then wants the answer somewhere else
+    /// is a question most people answer in the wrong place.
     custom: bool,
+    /// The answer being typed, with its own history and editing keys.
+    editor: Editor,
     reply: oneshot::Sender<String>,
+}
+
+/// What a keypress did to the ask dialog.
+enum AskOutcome {
+    /// The question is answered; the caller hands this to the waiting tool.
+    Answer(String),
+    /// Still open.
+    Stay,
+}
+
+impl Asking {
+    /// The dialog's whole state machine, so it can be exercised without an App.
+    ///
+    /// Two modes: picking from the options, and typing an answer. Typing is not
+    /// a fallback for when the options are wrong -- it is where a question with
+    /// no options starts, and any printable key drops into it from the list.
+    fn on_key(&mut self, key: KeyEvent) -> AskOutcome {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.custom {
+            match key.code {
+                KeyCode::Enter => {
+                    let answer = self.editor.take().trim().to_string();
+                    if answer.is_empty() {
+                        // Nothing typed. With options behind it, go back to
+                        // them rather than answering the question with "".
+                        if !self.options.is_empty() {
+                            self.custom = false;
+                        }
+                        return AskOutcome::Stay;
+                    }
+                    return AskOutcome::Answer(answer);
+                }
+                KeyCode::Esc if !self.options.is_empty() => {
+                    self.editor.clear();
+                    self.custom = false;
+                }
+                KeyCode::Backspace => self.editor.backspace(),
+                KeyCode::Delete => self.editor.delete(),
+                KeyCode::Left => self.editor.left(),
+                KeyCode::Right => self.editor.right(),
+                KeyCode::Home => self.editor.home(),
+                KeyCode::End => self.editor.end(),
+                KeyCode::Char('a') if ctrl => self.editor.home(),
+                KeyCode::Char('e') if ctrl => self.editor.end(),
+                KeyCode::Char('k') if ctrl => {
+                    self.editor.kill_to_end();
+                }
+                KeyCode::Char('u') if ctrl => {
+                    self.editor.kill_to_start();
+                }
+                KeyCode::Char('w') if ctrl => self.editor.kill_word(),
+                KeyCode::Char(c) if !ctrl => self.editor.insert(&c.to_string()),
+                _ => {}
+            }
+            return AskOutcome::Stay;
+        }
+
+        // Picking. The last row is always the type-your-own entry.
+        let total = self.options.len() + 1;
+        match key.code {
+            KeyCode::Up => self.sel = self.sel.saturating_sub(1),
+            KeyCode::Down => self.sel = (self.sel + 1).min(total - 1),
+            // 1-9 pick an option outright.
+            KeyCode::Char(c @ '1'..='9') if !ctrl => {
+                let idx = (c as u8 - b'1') as usize;
+                if idx < self.options.len() {
+                    return AskOutcome::Answer(self.options[idx].clone());
+                }
+                if idx == self.options.len() {
+                    self.custom = true;
+                    self.sel = self.options.len();
+                }
+            }
+            // "None of these" — start typing.
+            KeyCode::Esc => {
+                self.custom = true;
+                self.sel = self.options.len();
+            }
+            KeyCode::Enter => {
+                if self.sel < self.options.len() {
+                    return AskOutcome::Answer(self.options[self.sel].clone());
+                }
+                self.custom = true;
+            }
+            // Any other printable key starts the answer: faced with a list of
+            // things that are not what you want, the instinct is to type.
+            KeyCode::Char(c) if !ctrl => {
+                self.custom = true;
+                self.sel = self.options.len();
+                self.editor.insert(&c.to_string());
+            }
+            _ => {}
+        }
+        AskOutcome::Stay
+    }
 }
 
 pub struct App {
@@ -804,6 +903,7 @@ impl App {
                     options,
                     sel: 0,
                     custom,
+                    editor: Editor::default(),
                     reply,
                 });
                 self.follow = true;
@@ -1152,14 +1252,10 @@ impl App {
             self.choices_key(key);
             return;
         }
-        // Ask-user dropdown: navigate/select options until the user picks the
-        // custom-answer entry, after which typing flows to the input as normal.
-        if self
-            .asking
-            .as_ref()
-            .map(|a| !a.custom && !a.options.is_empty())
-            .unwrap_or(false)
-        {
+        // The ask-user dialog is modal: it owns the keyboard until it is
+        // answered, whether the answer is picked from its list or typed into
+        // its own field.
+        if self.asking.is_some() {
             self.asking_key(key);
             return;
         }
@@ -1420,48 +1516,11 @@ impl App {
         let Some(a) = self.asking.as_mut() else {
             return;
         };
-        // The last row is always the custom-answer entry.
-        let total = a.options.len() + 1;
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => a.sel = a.sel.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => a.sel = (a.sel + 1).min(total - 1),
-            // Number keys 1-9 jump to (and select) an option directly.
-            KeyCode::Char(c @ '1'..='9') => {
-                let idx = (c as u8 - b'1') as usize;
-                if idx < a.options.len() {
-                    let answer = a.options[idx].clone();
-                    let asking = self.asking.take().unwrap();
-                    self.transcript.user(answer.clone());
-                    let _ = asking.reply.send(answer);
-                    self.follow = true;
-                } else if idx == a.options.len() {
-                    // The custom-answer row number.
-                    a.custom = true;
-                    a.sel = a.options.len();
-                    self.note("type your answer and press enter");
-                }
-            }
-            KeyCode::Esc => {
-                // Cancel the picker: fall back to a custom free-text answer.
-                a.custom = true;
-                a.sel = a.options.len();
-                self.note("type your answer and press enter");
-            }
-            KeyCode::Enter => {
-                if a.sel < a.options.len() {
-                    // Chose a concrete option — answer immediately.
-                    let answer = a.options[a.sel].clone();
-                    let asking = self.asking.take().unwrap();
-                    self.transcript.user(answer.clone());
-                    let _ = asking.reply.send(answer);
-                    self.follow = true;
-                } else {
-                    // Chose "custom answer" — switch to free-text input.
-                    a.custom = true;
-                    self.note("type your answer and press enter");
-                }
-            }
-            _ => {}
+        if let AskOutcome::Answer(answer) = a.on_key(key) {
+            let asking = self.asking.take().expect("checked");
+            self.transcript.user(answer.clone());
+            let _ = asking.reply.send(answer);
+            self.follow = true;
         }
     }
 
@@ -2026,8 +2085,10 @@ impl App {
                 return;
             }
         }
-        // If the agent asked a question, this message is the answer, not a new
-        // turn. Echo it and hand it to the waiting tool.
+        // A fallback only: the ask dialog is modal and takes the answer in its
+        // own field, so nothing typed in the composer should reach here while a
+        // question is open. If anything ever does, it is still an answer to the
+        // question rather than the start of a new turn.
         if let Some(asking) = self.asking.take() {
             self.transcript.user(trimmed.clone());
             self.follow = true;
@@ -4449,6 +4510,8 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let picking = !a.options.is_empty() && !a.custom;
     let mut lines: Vec<Line> = Vec::new();
+    // Where the terminal caret goes: (line index within the dialog, column).
+    let mut caret: Option<(usize, usize)> = None;
 
     // Question header — wrapped, emphasized, like oh-my-pi's dialog header.
     for l in md::hard_wrap(&a.question, body_w) {
@@ -4516,13 +4579,35 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ),
         ]));
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", g.arrow), t.fg(t.accent)),
-            Span::styled(
-                "type your answer in the input below, then press enter".to_string(),
-                t.dim(),
-            ),
-        ]));
+        // The answer field, inside the dialog. Drawn like the composer -- a
+        // chevron and the text, with the real terminal caret placed in it -- so
+        // it reads as somewhere to type rather than as a line of prose about
+        // typing somewhere else.
+        let (rows, crow, ccol) = a.editor.visual(body_w.saturating_sub(2));
+        if a.editor.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", g.prompt), t.fg(t.accent)),
+                Span::styled("your answer".to_string(), t.dim()),
+            ]));
+            caret = Some((lines.len() - 1, 0));
+        } else {
+            for (i, row) in rows.iter().enumerate() {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if i == 0 {
+                            format!("{} ", g.prompt)
+                        } else {
+                            "  ".to_string()
+                        },
+                        t.fg(t.accent),
+                    ),
+                    Span::styled(row.clone(), t.body()),
+                ]));
+                if i == crow {
+                    caret = Some((lines.len() - 1, ccol));
+                }
+            }
+        }
     }
 
     let content_w = lines
@@ -4537,20 +4622,22 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
         .unwrap_or(0) as u16;
     let w = (content_w + 6).clamp(44, max_w);
     let h = (lines.len() as u16 + 2).clamp(6, area.height.saturating_sub(4).max(6));
-    // Bottom-anchored, like oh-my-pi: the dialog rises from just above the
-    // input/status dock rather than floating in the middle, so the eye stays
-    // near where typing happens.
+    // Centred. It used to sit on the bottom dock so the eye stayed near the
+    // composer, which was where the answer had to be typed; the answer is typed
+    // in the dialog now, so the dialog is where the eye should be.
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
-        y: area.height.saturating_sub(h),
+        y: (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
     };
 
     let footer = if picking {
-        " ↑↓ move · 1-9 pick · enter select · esc type your own "
+        " ↑↓ move · 1-9 pick · enter select · type for your own answer "
+    } else if a.options.is_empty() {
+        " type your answer · enter to send "
     } else {
-        " enter to send · esc cancel "
+        " enter to send · esc back to the options "
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -4566,6 +4653,15 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(block), rect);
+    // The caret goes last so it lands on top of the dialog, and only when the
+    // dialog is the thing being typed into.
+    if let Some((line, col)) = caret {
+        let x = rect.x + 1 + 2 + col as u16;
+        let y = rect.y + 1 + line as u16;
+        if x < rect.x + rect.width && y < rect.y + rect.height {
+            f.set_cursor_position(Position::new(x, y));
+        }
+    }
 }
 
 // ------------------------------------------------------------------- lifecycle
@@ -5095,6 +5191,82 @@ mod tests {
             .filter_map(|i| tip_for(TIP_AFTER + TIP_EVERY * i as u32, 7))
             .collect();
         assert_eq!(seen.len(), TIPS.len(), "the rotation must cover them all");
+    }
+
+    /// The dialog is where the question is asked, so it is where the answer is
+    /// given. Typing the answer into the composer under it -- which is what the
+    /// dialog used to send people off to do -- is the confusing half.
+    #[test]
+    fn a_question_is_answered_in_its_own_dialog() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let typed = |a: &mut Asking, s: &str| {
+            for c in s.chars() {
+                a.on_key(key(KeyCode::Char(c)));
+            }
+        };
+        let ask = |options: &[&str]| {
+            let (tx, _rx) = oneshot::channel();
+            Asking {
+                question: "Which database?".into(),
+                options: options.iter().map(|s| s.to_string()).collect(),
+                sel: 0,
+                custom: options.is_empty(),
+                editor: Editor::default(),
+                reply: tx,
+            }
+        };
+        let answered = |o: AskOutcome| match o {
+            AskOutcome::Answer(a) => Some(a),
+            AskOutcome::Stay => None,
+        };
+
+        // No options: the dialog opens straight into its own field.
+        let mut free = ask(&[]);
+        assert!(free.custom);
+        typed(&mut free, "  billing-api  ");
+        assert_eq!(
+            answered(free.on_key(key(KeyCode::Enter))).as_deref(),
+            Some("billing-api"),
+            "the typed answer is taken from the dialog, trimmed"
+        );
+
+        // Options: enter picks the focused one.
+        let mut pick = ask(&["Postgres", "SQLite"]);
+        pick.on_key(key(KeyCode::Down));
+        assert_eq!(
+            answered(pick.on_key(key(KeyCode::Enter))).as_deref(),
+            Some("SQLite")
+        );
+
+        // …and a number key picks outright.
+        let mut quick = ask(&["Postgres", "SQLite"]);
+        assert_eq!(
+            answered(quick.on_key(key(KeyCode::Char('1')))).as_deref(),
+            Some("Postgres")
+        );
+
+        // Typing on the list is not a lost keystroke: it starts the answer.
+        let mut other = ask(&["Postgres", "SQLite"]);
+        typed(&mut other, "DuckDB");
+        assert!(other.custom, "typing switches the dialog to its field");
+        assert_eq!(
+            answered(other.on_key(key(KeyCode::Enter))).as_deref(),
+            Some("DuckDB"),
+            "including the first character typed"
+        );
+
+        // Escape from a typed answer goes back to the options, not out of the
+        // question, and an empty field never answers with "".
+        let mut back = ask(&["Postgres", "SQLite"]);
+        typed(&mut back, "Duck");
+        back.on_key(key(KeyCode::Esc));
+        assert!(!back.custom, "esc returns to the list");
+        back.on_key(key(KeyCode::Enter));
+        assert!(back.editor.is_empty(), "the abandoned draft is cleared");
+        let mut empty = ask(&["Postgres"]);
+        empty.on_key(key(KeyCode::Esc));
+        assert!(answered(empty.on_key(key(KeyCode::Enter))).is_none());
     }
 
     #[test]

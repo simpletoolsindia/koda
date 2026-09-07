@@ -246,7 +246,12 @@ koda has three autonomy tiers, cycled live with `/auto` (or set in `/settings`):
 | `AUTO-WRITE` | Auto-approves file writes; still asks before running commands. |
 | `FULL-AUTO` | Approves everything — autonomous, no prompts. Shown in red in the status bar. |
 
-Approval prompts are a loud, docked block: amber for a write, red for a command, with a clear `y / a / n` action row. The agent can also ask *you* a question mid-task with the `ask_user` tool — your next message is the answer.
+Approval prompts are a loud, docked block: amber for a write, red for a command, with a clear `y / a / n` action row. The agent can also ask *you* a question mid-task with the `ask_user` tool. That
+opens a centred dialog and takes the answer **in the dialog**: pick from the
+options with `↑↓` or `1`-`9`, or just start typing and the dialog turns into an
+answer field with the usual editing keys. Escape goes back to the options; it
+never sends you to the composer underneath, which is the part people answered
+in the wrong place.
 
 ## Role agents and orchestration
 
@@ -288,7 +293,7 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `manage_skill` | asks | write a procedure it worked out as a skill; with `role`, a delegatable agent |
 | `web_search` | — | SearXNG or DuckDuckGo, off by default |
 | `web_fetch` | — | GET a URL and read it as text, off by default |
-| `ask_user` | — | asks *you* a question mid-task; your reply is the answer |
+| `ask_user` | — | asks *you* a question mid-task, answered in a centred dialog |
 | `write_file` `edit_file` | asks | shows a diff first |
 | `run_command` | asks | builds, tests, git |
 
