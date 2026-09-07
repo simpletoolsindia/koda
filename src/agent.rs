@@ -3728,7 +3728,7 @@ impl Agent {
             })
             .flatten();
         if destructive.is_none()
-            && (!tools::is_mutating(name)
+            && (!tools::call_is_mutating(name, args)
                 || self.auto_approve
                 || self.auto_tier.auto_allows(name)
                 || self.always.contains(name))

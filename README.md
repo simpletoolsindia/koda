@@ -207,6 +207,44 @@ contents.
 
 The full command list is in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
+## Debugging a program
+
+`print` is how you ask a program a question when you cannot ask it directly.
+koda can ask it directly. The `debug` tool drives a real debugger over the
+[Debug Adapter Protocol][dap] — the same adapters your editor uses — so the
+model can stop a program on a line and look at what is actually there:
+
+```
+launch      start the program, stopped at its first line
+set_breakpoint  file + line, optionally with a condition
+continue / step_over / step_in / step_out / pause
+stack_trace → scopes → variables      look around where it stopped
+evaluate    ask the program a question in that frame
+output, status, terminate
+```
+
+A session looks like this, verbatim from a run against `debugpy`:
+
+```
+Launched buggy.py under debugpy. It is stopped (entry) at buggy.py:1 in <module>.
+Breakpoint at buggy.py:5. 1 of 1 breakpoints in this file are verified.
+continue: it is stopped (breakpoint) at buggy.py:5 in average.
+Stack (innermost first):
+- #3 average at buggy.py:5
+- #4 main at buggy.py:9
+total = 49
+```
+
+One session at a time, and `list_adapters` says which debuggers this machine
+has. koda ships the registry, not the debuggers: `debugpy` for Python,
+`lldb-dap`/`codelldb` for Rust and C, `dlv` for Go, `js-debug-adapter` for
+Node — whatever that language's community already ships. Reading a stopped
+program (`stack_trace`, `variables`, `evaluate`, `output`) counts as a read and
+does not stop to ask; running one (`launch`, `continue`, stepping) asks like
+any other command, unless autonomy is turned up.
+
+[dap]: https://microsoft.github.io/debug-adapter-protocol/
+
 ## Keeping the plan honest
 
 The `todo` tool draws the plan you see above the input. Left to itself a model
@@ -288,6 +326,7 @@ leave on. Attachments are size-capped at `max_file_bytes`.
 | `codegraph` | — | where a symbol is defined and who uses it |
 | `skill` | — | project conventions, loaded on demand |
 | `todo` | — | the plan you see in the transcript, kept current as steps finish |
+| `debug` | ● | run a program under a real debugger: breakpoints, stepping, variables |
 | `remember` | — | durable facts, kept for next session |
 | `delegate` | — | hand a read-only investigation to a subagent |
 | `manage_skill` | asks | write a procedure it worked out as a skill; with `role`, a delegatable agent |

@@ -4794,6 +4794,9 @@ fn setup(mouse: bool) -> Result<Term> {
 }
 
 pub fn restore() {
+    // A debug adapter is a child process holding a debuggee. Leaving one alive
+    // after koda exits leaves a stopped program nobody can reach.
+    crate::dap::shutdown();
     let mut out = io::stdout();
     let _ = execute!(
         out,

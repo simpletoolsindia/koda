@@ -530,6 +530,48 @@ fn build_specs() -> Vec<Spec> {
             mutating: false,
         },
         Spec {
+            name: "debug",
+            desc: "Debug a running program: breakpoints, stepping, and live state. Prefer this \
+                   over print statements and `run_command` when the question is what a program \
+                   is actually doing -- what a variable holds here, which branch it takes, why \
+                   it crashes. Flow: `launch` (stops at the first line), `set_breakpoint`, \
+                   `continue`, then `stack_trace` -> `scopes` -> `variables` to look around, or \
+                   `evaluate` to ask. One session at a time; `terminate` when done. Needs the \
+                   language's debug adapter installed -- `list_adapters` says which are.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["launch", "set_breakpoint", "remove_breakpoint", "continue",
+                                 "step_over", "step_in", "step_out", "pause", "stack_trace",
+                                 "threads", "scopes", "variables", "evaluate", "output",
+                                 "status", "terminate", "list_adapters"],
+                        "description": "What to do."
+                    },
+                    "program": str_prop("For launch: the file to run, relative to the workspace."),
+                    "adapter": str_prop("For launch: force an adapter (see list_adapters). Usually inferred from the file type."),
+                    "args": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "For launch: arguments to the program."
+                    },
+                    "stop_on_entry": {
+                        "type": "boolean",
+                        "description": "For launch: stop at the first line (default true) so breakpoints can be set."
+                    },
+                    "file": str_prop("For set_breakpoint / remove_breakpoint: the source file."),
+                    "line": { "type": "integer", "description": "For set_breakpoint / remove_breakpoint: the 1-based line." },
+                    "condition": str_prop("For set_breakpoint: only stop when this expression is true."),
+                    "frame_id": { "type": "integer", "description": "For scopes / evaluate: which frame (from stack_trace). Defaults to the innermost." },
+                    "reference": { "type": "integer", "description": "For variables: the reference from scopes, or from a variable that has children." },
+                    "expression": str_prop("For evaluate: the expression to evaluate in the stopped frame."),
+                    "levels": { "type": "integer", "description": "For stack_trace: how many frames (default 20)." }
+                },
+                "required": ["action"]
+            }),
+            mutating: true,
+        },
+        Spec {
             name: "delegate",
             desc: "Hand a self-contained investigation to a subagent that has its own fresh \
                    context. Use it for wide searches so only the findings come back to you, \
@@ -872,6 +914,18 @@ pub fn spec(name: &str) -> Option<&'static Spec> {
 
 pub fn is_mutating(name: &str) -> bool {
     spec(name).map(|s| s.mutating).unwrap_or(true)
+}
+
+/// Whether one *call* needs approval, which for most tools is just whether the
+/// tool does. `debug` is the exception: it both runs programs and reads their
+/// state, and asking before every look at a variable would make stepping
+/// through a function a dialogue about permission.
+pub fn call_is_mutating(name: &str, args: &Value) -> bool {
+    if name == "debug" {
+        let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+        return crate::dap::action_is_mutating(action);
+    }
+    is_mutating(name)
 }
 
 /// OpenAI `tools` array. `allow` restricts it to a named subset.
@@ -1518,6 +1572,19 @@ fn run_sync(name: &str, args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         "edit_file" => edit_file(args, ctx),
         "about_creator" => about_creator(),
         "browse" => browse(args, ctx),
+        "debug" => crate::dap::run(args, &ctx.root).map(|content| {
+            let summary = args
+                .get("action")
+                .and_then(Value::as_str)
+                .map(|a| format!("debug: {a}"))
+                .unwrap_or_else(|| "debug".into());
+            Outcome {
+                ok: true,
+                summary,
+                content,
+                view: ToolView::Plain,
+            }
+        }),
         other => Ok(Outcome::err(format!("unknown tool `{other}`"))),
     }
 }
