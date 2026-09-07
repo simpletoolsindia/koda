@@ -2409,6 +2409,16 @@ impl App {
                 let width = self.panel_width();
                 let mut p =
                     Panel::new("Tools", width).footer("the agent picks these · ● asks approval");
+                // The name column is as wide as the widest name. It used to be
+                // a hardcoded 12, so `manage_skill` (exactly 12) lost its gap
+                // and `about_creator` (13) ran straight into its description.
+                let name_w = crate::tools::specs()
+                    .iter()
+                    .map(|s| s.name.chars().count())
+                    .max()
+                    .unwrap_or(12);
+                // 2 for the approval mark, and the space after the name.
+                let desc_w = p.inner().saturating_sub(name_w + 5);
                 for spec in crate::tools::specs() {
                     let desc: String = spec
                         .desc
@@ -2416,7 +2426,7 @@ impl App {
                         .collect::<Vec<_>>()
                         .join(" ")
                         .chars()
-                        .take(p.inner().saturating_sub(18))
+                        .take(desc_w)
                         .collect();
                     // A dot marks tools that pause for your approval.
                     let mark = if spec.mutating {
@@ -2427,7 +2437,7 @@ impl App {
                     p.row(vec![
                         mark,
                         Span::styled(
-                            format!("{:<12}", spec.name),
+                            format!("{:<name_w$} ", spec.name),
                             if spec.mutating {
                                 self.theme.emphasis(self.theme.warning)
                             } else {

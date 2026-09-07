@@ -290,19 +290,31 @@ impl Transcript {
         })
     }
 
-    /// Mark every step of the current plan done. Called when a turn ends with no
-    /// further work queued: small models often finish the task but forget the
-    /// final `todo` update that flips the last step to done, which would leave
-    /// the sticky plan and step counter lingering forever. This retires the plan
-    /// cleanly once the agent has actually stopped working.
+    /// Retire the current plan when the agent stops with one step left hanging.
+    ///
+    /// A model often finishes the work but forgets the last `todo` call that
+    /// flips the final step to done, and a plan stuck at 4/5 lingers above the
+    /// input for ever. That is worth tidying — but only that case. This used to
+    /// mark *every* step done on any completed turn, so a plan the model wrote
+    /// once and never tracked (which the sessions here show is the common one)
+    /// jumped straight from "just written" to "all done": the list never
+    /// appeared to update, and it claimed work that was never reported. A
+    /// checklist that lies is worse than one that is behind.
+    ///
+    /// So: only when the plan was genuinely being tracked — at least one step
+    /// already marked done — and exactly one step is left.
     pub fn complete_current_plan(&mut self) {
         for (i, b) in self.blocks.iter_mut().enumerate().rev() {
             if let Item::Todos(items) = &mut b.item {
                 if items.is_empty() {
                     continue;
                 }
-                let changed = items.iter().any(|it| it.status != TodoStatus::Done);
-                if changed {
+                let unfinished = items
+                    .iter()
+                    .filter(|it| it.status != TodoStatus::Done)
+                    .count();
+                let tracked = items.iter().any(|it| it.status == TodoStatus::Done);
+                if unfinished == 1 && tracked {
                     for it in items.iter_mut() {
                         it.status = TodoStatus::Done;
                     }
@@ -904,6 +916,16 @@ fn is_running(item: &Item) -> bool {
     matches!(item, Item::Tool { ok: None, .. })
 }
 
+/// A step's status as a number, so the render cache can see it change. Spread
+/// far apart so two steps swapping statuses cannot sum to the same total.
+fn status_rank(s: TodoStatus) -> usize {
+    match s {
+        TodoStatus::Pending => 0,
+        TodoStatus::Active => 977,
+        TodoStatus::Done => 4_099,
+    }
+}
+
 fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
     let (len, flags) = match item {
         Item::User(s) | Item::Assistant(s) | Item::Notice(s) | Item::Error(s) => (s.len(), 0u8),
@@ -911,7 +933,13 @@ fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
         // key has to describe the content or one will render as the other.
         Item::Raw(lines) => (raw_hash(lines), 64),
         Item::Todos(items) => (
-            items.iter().map(|i| i.text.len() + 1).sum::<usize>(),
+            // Statuses are part of what is drawn, so they belong in the key:
+            // keyed on the done count alone, a step going from pending to
+            // in_progress changed nothing the cache could see.
+            items
+                .iter()
+                .map(|i| i.text.len() + 1 + status_rank(i.status))
+                .sum::<usize>(),
             32 | items
                 .iter()
                 .filter(|i| i.status == TodoStatus::Done)
@@ -2097,6 +2125,89 @@ mod tests {
             sig(&tr),
             settled,
             "a finished block does not re-render on the clock"
+        );
+    }
+
+    /// The UI must not claim work the agent never reported. A plan the model
+    /// wrote once and never tracked -- which is what the sessions here show --
+    /// used to be marked complete the moment the turn ended, so it went from
+    /// "just written" to "all done" having never appeared to update at all.
+    #[test]
+    fn an_untracked_plan_is_left_truthful_when_the_turn_ends() {
+        use crate::tools::{Todo, TodoStatus};
+        let step = |t: &str, s: TodoStatus| Todo {
+            text: t.into(),
+            status: s,
+        };
+        let plan = |items: Vec<Todo>| {
+            let mut t = Transcript::new(crate::theme::resolve("auto"), crate::theme::UNICODE);
+            t.user("do the parser work".into());
+            t.todos(items);
+            t
+        };
+        let statuses = |t: &Transcript| -> Vec<TodoStatus> {
+            t.current_todos()
+                .unwrap_or_default()
+                .iter()
+                .map(|i| i.status)
+                .collect()
+        };
+
+        // Never tracked: one step in progress, nothing done. Left alone.
+        let mut untracked = plan(vec![
+            step("read the parser", TodoStatus::Active),
+            step("add the token", TodoStatus::Pending),
+            step("run the tests", TodoStatus::Pending),
+        ]);
+        untracked.complete_current_plan();
+        assert_eq!(
+            statuses(&untracked),
+            vec![TodoStatus::Active, TodoStatus::Pending, TodoStatus::Pending],
+            "nothing was reported done, so nothing is"
+        );
+
+        // Tracked, with two still open: the agent stopped mid-plan. Truthful.
+        let mut midway = plan(vec![
+            step("read the parser", TodoStatus::Done),
+            step("add the token", TodoStatus::Active),
+            step("run the tests", TodoStatus::Pending),
+        ]);
+        midway.complete_current_plan();
+        assert_eq!(statuses(&midway)[2], TodoStatus::Pending);
+
+        // The case this is for: tracked all the way, one last flip forgotten.
+        let mut last = plan(vec![
+            step("read the parser", TodoStatus::Done),
+            step("add the token", TodoStatus::Done),
+            step("run the tests", TodoStatus::Active),
+        ]);
+        last.complete_current_plan();
+        assert!(
+            statuses(&last).iter().all(|s| *s == TodoStatus::Done),
+            "a plan tracked to its last step is retired"
+        );
+    }
+
+    /// The card draws statuses, so the render cache has to see them change:
+    /// keyed on the done count alone, a step starting was invisible.
+    #[test]
+    fn starting_a_step_changes_what_the_cache_sees() {
+        use crate::tools::{Todo, TodoStatus};
+        let items = |second| {
+            Item::Todos(vec![
+                Todo {
+                    text: "read the parser".into(),
+                    status: TodoStatus::Done,
+                },
+                Todo {
+                    text: "add the token".into(),
+                    status: second,
+                },
+            ])
+        };
+        assert_ne!(
+            signature(&items(TodoStatus::Pending), true, 0),
+            signature(&items(TodoStatus::Active), true, 0),
         );
     }
 

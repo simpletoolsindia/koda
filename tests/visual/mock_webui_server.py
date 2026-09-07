@@ -10,6 +10,42 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 DIST = os.path.join(ROOT, "web-ui", "dist", "index.html")
 
 # In-memory skills store so POST/DELETE visibly change the list.
+# The endpoints a role agent can be pointed at, and what each one has. The
+# second is deliberately down: a provider that cannot answer must not stop the
+# form saving a typed model id.
+PROVIDERS = {
+    "providers": [
+        {"name": "local", "base_url": "http://127.0.0.1:1234/v1",
+         "model": "mtplx-qwen38-27b-bare-speed-fp16", "vision": False,
+         "has_api_key": False, "active": True},
+        {"name": "cloud", "base_url": "https://api.example.com/v1",
+         "model": "big-model-70b", "vision": True, "has_api_key": True, "active": False},
+    ],
+    "active": "local",
+    "current_model": "mtplx-qwen38-27b-bare-speed-fp16",
+}
+PROVIDERS_MODELS = {
+    "local": ["mtplx-qwen38-27b-bare-speed-fp16", "qwen2.5-coder:14b"],
+    "cloud": [],
+}
+
+# A session mid-turn: writing a file, with a plan part-way through. `activity`
+# is the string the TUI status row shows, which is the same one published here.
+STATUS = {
+    "busy": True,
+    "activity": "writing src/context.rs · 12.4 KB",
+    "tokens": 18_400,
+    "context_tokens": 65_536,
+    "model": "mtplx-qwen38-27b-bare-speed-fp16",
+    "mode": "vibe",
+    "plan": [
+        {"text": "read the parser", "status": "done"},
+        {"text": "add the token", "status": "in_progress"},
+        {"text": "run the tests", "status": "pending"},
+    ],
+    "plan_done": 1,
+}
+
 SKILLS = [
     {"name": "rust-error-handling", "when": "writing Rust that returns Result",
      "role": None, "body": "Prefer ? over unwrap. Use anyhow::Context for messages.",
@@ -279,6 +315,21 @@ class H(BaseHTTPRequestHandler):
             }))
         if path == "/api/codegraph":
             return self._send(200, "application/json", json.dumps(GRAPH))
+        if path.startswith("/api/providers/") and path.endswith("/models"):
+            from urllib.parse import unquote
+            name = unquote(path[len("/api/providers/"):-len("/models")])
+            models = PROVIDERS_MODELS.get(name, [])
+            return self._send(200, "application/json", json.dumps(
+                {"models": models, "error": "" if models else f"{name} did not answer"}))
+        if path == "/api/providers":
+            # The role-agent form reads this to suggest endpoints and models.
+            return self._send(200, "application/json", json.dumps(PROVIDERS))
+        if path == "/api/status":
+            # What the session is doing right now. The header badge reads this,
+            # and it is the one endpoint the real server has that this fixture
+            # did not -- so every page load logged a 404 the console-error
+            # assertion then failed on.
+            return self._send(200, "application/json", json.dumps(STATUS))
         if path == "/api/skills":
             return self._send(200, "application/json", json.dumps(SKILLS))
         if path == "/api/settings":

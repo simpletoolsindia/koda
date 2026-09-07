@@ -154,8 +154,10 @@ test('palette, logs drawer and manage panel keep every feature reachable', async
 
   await manage.getByRole('tab', { name: 'Agents & Skills' }).click();
   await expect(manage.getByText(/rust-error-handling/).first()).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/11b-manage-skills.png` });
   await manage.getByRole('tab', { name: 'System Prompt' }).click();
   await expect(manage.getByRole('textbox', { name: 'System prompt', exact: true })).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/11c-manage-prompt.png` });
   await manage.getByRole('tab', { name: 'Raw Captures' }).click();
   await expect(manage.getByText('rr-session-1').first()).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/12-manage-captures.png` });
@@ -185,4 +187,54 @@ test('mobile layout reaches every region without horizontal overflow', async ({ 
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(1);
+});
+
+// The header badge is the one thing on screen that says what the session is
+// doing right now, and it is fed by /api/status — the endpoint this fixture was
+// missing, which every page load then logged a 404 for.
+test('the header follows what the session is doing', async ({ page }) => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+
+  const badge = page.getByTitle(/writing src\/context\.rs/);
+  await expect(badge).toBeVisible();
+  // The activity string the TUI status row shows, published verbatim.
+  await expect(badge).toContainText('writing src/context.rs · 12.4 KB');
+  // …and how far the plan has got, so a watcher knows where in the task it is.
+  await expect(badge).toContainText('1/3');
+  await page.screenshot({ path: `${SHOTS}/15-session-status.png` });
+});
+
+// A fixture that has drifted from the real server is a test suite that passes
+// while the product 404s. Walk every screen and let nothing fail quietly.
+test('no screen asks for an endpoint the server does not serve', async ({ page }) => {
+  const failed = [];
+  page.on('response', r => { if (r.status() >= 400) failed.push(`${r.status()} ${r.url()}`); });
+  const consoleErrors = [];
+  page.on('pageerror', e => consoleErrors.push(String(e)));
+
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+
+  // Every manage tab.
+  await page.getByRole('button', { name: 'Manage' }).click();
+  const manage = page.getByRole('dialog', { name: 'Manage' });
+  for (const tab of ['Code Graph', 'Agents & Skills', 'System Prompt', 'Raw Captures']) {
+    await manage.getByRole('tab', { name: tab }).click();
+    await page.waitForTimeout(250);
+  }
+  await manage.getByRole('button', { name: 'Close manage' }).click();
+
+  // The control rail, the logs drawer, and a finished turn in the waterfall.
+  await page.getByRole('tab', { name: 'Control' }).click();
+  await expect(page.getByLabel('Model id')).toBeVisible();
+  await page.getByRole('button', { name: 'Logs' }).click();
+  await expect(page.getByRole('log', { name: 'Live log output' })).toBeVisible();
+  await page.getByRole('button', { name: 'Hide logs' }).click();
+  await page.getByRole('listbox', { name: 'Agent turns' }).getByText(/Fix the off-by-one/).click();
+  await expect(page.getByRole('list', { name: 'Turn steps' }).getByText('read_file').first()).toBeVisible();
+
+  // Let the status poll tick at least once more.
+  await page.waitForTimeout(1700);
+
+  expect(failed, failed.join('\n')).toEqual([]);
+  expect(consoleErrors, consoleErrors.join('\n')).toEqual([]);
 });
