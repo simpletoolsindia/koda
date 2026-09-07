@@ -3186,7 +3186,13 @@ fn draw(f: &mut Frame, app: &mut App) {
     } else {
         3
     };
-    let input_h = rows.len().saturating_add(1).clamp(min_input, max_input) as u16;
+    // Two rows go to the frame, except on a screen too short to spare them.
+    let border_h: u16 = if m.tiny { 0 } else { 2 };
+    let input_h = rows
+        .len()
+        .saturating_add(1)
+        .clamp(min_input, max_input)
+        .saturating_add(border_h as usize) as u16;
 
     // A one-row gap between the transcript/hint area and the input keeps the
     // last line of tool output (a long command, a diff) from colliding with the
@@ -3355,7 +3361,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             Span::styled(label, style),
         ])]
     } else {
-        let shown = input_h as usize;
+        let shown = input_h.saturating_sub(border_h) as usize;
         rows.iter()
             .skip(rows.len().saturating_sub(shown))
             .enumerate()
@@ -3377,21 +3383,53 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Pad up to the full box height so the whole taller field is one solid
     // tinted surface, not a single lit line with dead space beneath it.
     let mut input_lines = input_lines;
-    while input_lines.len() < input_h as usize {
+    while input_lines.len() < input_h.saturating_sub(border_h) as usize {
         input_lines.push(Line::from(vec![Span::raw("  ".to_string())]));
     }
-    f.render_widget(
-        Paragraph::new(panel::fill(input_lines, area.width as usize, t.bg_panel, 1)),
-        input,
-    );
+    if border_h == 0 {
+        // Too short a screen to spend two rows on a frame.
+        f.render_widget(
+            Paragraph::new(panel::fill(input_lines, area.width as usize, t.bg_panel, 1)),
+            input,
+        );
+    } else {
+        // The field is framed in the colour of the mode it will send in, with
+        // the mode named in the top edge. It is the one border you look at
+        // while typing, so it is the one worth making say something.
+        let (mode_c, mode_name) = match app.mode {
+            Mode::Plan => (t.warning, "plan"),
+            Mode::Execute => (t.success, "execute"),
+            Mode::Vibe => (t.accent_alt, "vibe"),
+        };
+        // Dimmed while a turn runs: the field is not what to look at then.
+        let edge = if app.busy { t.muted } else { mode_c };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(t.fg(edge))
+            .title(Span::styled(
+                format!(" {mode_name} "),
+                Style::default().fg(edge).add_modifier(Modifier::BOLD),
+            ));
+        let inner = panel::fill(
+            input_lines,
+            area.width.saturating_sub(2) as usize,
+            t.bg_panel,
+            1,
+        );
+        f.render_widget(Paragraph::new(inner).block(block), input);
+    }
 
     f.render_widget(Paragraph::new(powerline(app, area.width, m)), status);
 
-    // Caret.
-    let first_shown = rows.len().saturating_sub(input_h as usize);
+    // Caret, offset by the frame when there is one.
+    let inset = border_h / 2; // 1 with a frame, 0 without
+    let first_shown = rows
+        .len()
+        .saturating_sub(input_h.saturating_sub(border_h) as usize);
     if crow >= first_shown {
-        let y = input.y + (crow - first_shown) as u16;
-        let x = input.x + 3 + ccol as u16;
+        let y = input.y + inset + (crow - first_shown) as u16;
+        let x = input.x + inset + 3 + ccol as u16;
         f.set_cursor_position(Position::new(x.min(area.width.saturating_sub(1)), y));
     }
 
@@ -3945,12 +3983,22 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     let total = items.len();
     let avail = rect.width.saturating_sub(4) as usize;
 
+    // The edge carries how the plan is going: amber while a step is running,
+    // accent while it waits, green once everything is done.
+    let edge = if items.iter().any(|i| i.status == TodoStatus::Active) {
+        t.warning
+    } else if done == total {
+        t.success
+    } else {
+        t.accent
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
-    // Header row: a pin-style marker, "Plan", and live progress.
+    // Header row: the bracket opens on it, like a tool card.
     lines.push(Line::from(vec![
-        Span::styled(format!("{} ", g.pending), t.fg(t.accent)),
+        Span::styled(format!("{}{} ", g.corner_tl, g.hline), t.fg(edge)),
         Span::styled("Plan".to_string(), t.emphasis(t.heading)),
         Span::styled(format!("  {done}/{total} done"), t.dim()),
+        Span::styled(format!("  {}", gauge(done, total, 10, g)), t.fg(edge)),
     ]));
 
     // Show the tasks; if there are more than fit, keep the active one in view by
@@ -3980,14 +4028,30 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
             ),
             TodoStatus::Pending => (g.pending, t.dim(), t.dim()),
         };
-        let text: String = it.text.chars().take(avail.saturating_sub(3)).collect();
+        let text: String = it.text.chars().take(avail.saturating_sub(5)).collect();
         lines.push(Line::from(vec![
-            Span::styled(format!(" {glyph} "), gstyle),
+            Span::styled(format!("{}  ", g.vline), t.fg(edge)),
+            Span::styled(format!("{glyph} "), gstyle),
             Span::styled(text, tstyle),
         ]));
     }
 
     f.render_widget(Paragraph::new(lines), rect);
+}
+
+/// A tiny progress gauge: `▰▰▰▱▱▱`. Enough to read the shape of a plan at a
+/// glance without reading the steps.
+fn gauge(done: usize, total: usize, width: usize, g: &Glyphs) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let filled = (done * width).div_ceil(total).min(width);
+    let (on, off) = if g.fine_blocks {
+        ("▰", "▱")
+    } else {
+        ("#", "-")
+    };
+    format!("{}{}", on.repeat(filled), off.repeat(width - filled))
 }
 
 /// The `#` action palette, drawn above the input like the other popups.

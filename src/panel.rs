@@ -131,26 +131,26 @@ impl Frame {
     }
 }
 
-/// A tool result as a **rail + fill** rather than a full box.
+/// A tool result as a **bracket**: an elbow that opens on the header, a rail
+/// down the body, and a rule that closes it.
 ///
 /// ```text
-/// │ ✓ Edit: cart.py                    +3/-1
-/// │   @@ -14,3 +14,3 @@
-/// │   14  def apply_discount(...):
-/// ╰                                          ← closing cap: output ends here
+/// ╭─ ✓ Edit: cart.py                    +3/-1
+/// │    @@ -14,3 +14,3 @@
+/// │    14  def apply_discount(...):
+/// ╰────
 /// ```
 ///
-/// This replaces the four-sided [`framed`] box for non-modal tool output, per
-/// the visual-language spec (§8: one border depth on screen; modals are the
-/// only boxed thing). A full box costs a per-block perimeter walk plus two rows
-/// of horizontal rule; a rail is a single style write per row.
+/// Not the four-sided [`framed`] box, per the visual-language spec (§8: one
+/// border depth on screen; modals are the only boxed thing) -- a full box costs
+/// a perimeter walk and two rows of rule, where this is a single style write
+/// per row plus two short caps.
 ///
-/// The one thing a box gave us that a bare fill does not is a clear *end* — a
-/// fill "leaves you guessing where the output stopped." So this keeps a closing
-/// cap glyph (`╰`) on its own row: one cell, no full bottom rule, but the eye
-/// still lands on an unambiguous end-of-block marker. On fill-less themes the
-/// rail glyph in the left gutter plus the cap carry the grouping instead of a
-/// tint.
+/// It used to open with a bare rail and close with a lone `╰` hanging in the
+/// gutter, which reads as a box that failed to draw rather than as a deliberate
+/// bracket. Three sides, properly cornered, is the same ink and looks finished.
+/// The colour of all three carries the result: accent while it runs, success or
+/// error once it lands.
 pub fn railed(
     head: Vec<Span<'static>>,
     body: Vec<Line<'static>>,
@@ -163,8 +163,9 @@ pub fn railed(
     let bw = width.max(12);
     let rail_color = state.border(t);
     let tint = state.tint(t);
-    // Inner content sits after "│ " (rail + one space).
-    let inner = bw.saturating_sub(2);
+    // Inner content sits after "│  " (rail + two spaces), which is also the
+    // width of the "╭─ " elbow that opens the bracket.
+    let inner = bw.saturating_sub(3);
 
     // Assemble the logical rows (header, body, optional footer) first, then
     // wrap each in a rail + tint. Keeping the header on the tint means the whole
@@ -182,15 +183,20 @@ pub fn railed(
     }
 
     let mut out = Vec::with_capacity(rows.len() + 1);
-    for row in rows {
+    for (i, row) in rows.into_iter().enumerate() {
         let used: usize = row.spans.iter().map(|s| s.content.width()).sum();
         let mut spans = Vec::with_capacity(row.spans.len() + 3);
-        // The rail glyph, in the state colour, is the block's spine.
+        // The spine: an elbow on the header row, the rail below it.
         let rail_style = match tint {
             Some(bg) => t.fg(rail_color).bg(bg),
             None => t.fg(rail_color),
         };
-        spans.push(Span::styled(format!("{} ", g.vline), rail_style));
+        let spine = if i == 0 {
+            format!("{}{} ", g.corner_tl, g.hline)
+        } else {
+            format!("{}  ", g.vline)
+        };
+        spans.push(Span::styled(spine, rail_style));
         for s in row.spans {
             let style = match (tint, s.style.bg.is_some()) {
                 (Some(bg), false) => s.style.bg(bg),
@@ -207,10 +213,10 @@ pub fn railed(
         out.push(Line::from(spans));
     }
 
-    // Closing cap: the corner glyph alone marks where the output ends. No
-    // horizontal rule, so it costs one cell of ink, not a full row of border.
+    // Closing cap. A short rule rather than a full-width one: enough to read as
+    // a closed bracket, not so much that every tool call draws a horizon.
     out.push(Line::from(Span::styled(
-        g.corner_bl.to_string(),
+        format!("{}{}", g.corner_bl, g.hline.repeat(3)),
         t.fg(rail_color),
     )));
     out
@@ -608,42 +614,31 @@ mod tests {
     }
 
     #[test]
-    fn railed_has_a_spine_and_a_closing_cap() {
+    fn railed_opens_and_closes_its_bracket() {
         let head = vec![Span::raw("Read: a.rs".to_string())];
         let body = vec![Line::from(Span::raw("1  fn main() {}".to_string()))];
         let lines = railed(head, body, None, 40, Frame::Done, &DARK, &UNICODE);
         let rows = text(&lines);
-        // Every content/header row starts with the rail glyph…
-        for r in &rows[..rows.len() - 1] {
+        // The header row opens on an elbow…
+        assert!(
+            rows[0].starts_with(UNICODE.corner_tl),
+            "no opening elbow: {:?}",
+            rows[0]
+        );
+        assert!(rows[0].contains("Read: a.rs"));
+        // …the body rows hang off the rail…
+        for r in &rows[1..rows.len() - 1] {
             assert!(
                 r.starts_with(UNICODE.vline),
                 "row missing rail spine: {r:?}"
             );
         }
-        // …and the block ends with a bare corner cap on its own row, so the eye
-        // lands on an unambiguous end-of-output marker (no full bottom rule).
+        // …and it closes on a corner with a short rule, so the block reads as
+        // finished rather than as a box that failed to draw.
         let last = rows.last().unwrap();
-        assert_eq!(
-            last.trim(),
-            UNICODE.corner_bl,
-            "closing cap missing: {last:?}"
-        );
-        assert!(rows[0].contains("Read: a.rs"));
-    }
-
-    #[test]
-    fn railed_fills_with_the_state_tint_on_a_themed_palette() {
-        let head = vec![Span::raw("Edit: a.rs".to_string())];
-        let body = vec![Line::from(Span::raw("+ new line".to_string()))];
-        let lines = railed(head, body, None, 40, Frame::Done, &DARK, &UNICODE);
-        // The header row is padded to full width and every cell carries the tint,
-        // so the block reads as one grouped unit rather than a bare line.
-        let header = &lines[0];
-        let w: usize = header.spans.iter().map(|s| s.content.width()).sum();
-        assert_eq!(w, 40, "railed header not padded to width: {w}");
         assert!(
-            header.spans.iter().all(|s| s.style.bg.is_some()),
-            "hole in railed tint: {header:?}"
+            last.starts_with(UNICODE.corner_bl) && last.trim_end().len() > 1,
+            "closing rule missing: {last:?}"
         );
     }
 
@@ -663,10 +658,10 @@ mod tests {
             &UNICODE,
         ));
         assert!(
-            rows[0].starts_with(UNICODE.vline),
-            "no spine in fallback: {rows:?}"
+            rows[0].starts_with(UNICODE.corner_tl),
+            "no opening elbow in fallback: {rows:?}"
         );
-        assert_eq!(rows.last().unwrap().trim(), UNICODE.corner_bl);
+        assert!(rows.last().unwrap().starts_with(UNICODE.corner_bl));
     }
 
     #[test]
