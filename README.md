@@ -207,6 +207,22 @@ contents.
 
 The full command list is in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 
+## Watching it work
+
+A long turn used to look like a hung one. Three things now say otherwise.
+
+While the model is still *writing* a tool call — a `write_file` of a few hundred
+lines streams for a long time before the call is even made — the status row
+names the file and the size climbs: `writing src/context.rs · 12.4 KB`. The row
+carries a meter for the turn as a whole, `(1m 04s · ↓ 14.8k tok)`, so a wait is
+visibly work rather than a hang. And after a few seconds a tip appears beneath
+it, rotating every so often, for the moment when there is nothing else to read:
+
+```
+ ✳ writing src/context.rs · 12.4 KB (1m 04s · ↓ 14.8k tok)      esc interrupt
+   Tip: /undo puts back every file the agent changed in the last turn
+```
+
 ## Autonomy
 
 koda has three autonomy tiers, cycled live with `/auto` (or set in `/settings`):

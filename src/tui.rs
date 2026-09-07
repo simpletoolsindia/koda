@@ -80,6 +80,63 @@ const WORKING_MSGS: &[&str] = &[
 
 /// Pick a working message from the elapsed time so it advances every ~10s and
 /// stays stable within each 10s window (no jitter between redraws).
+/// The parenthetical after the verb: how long this turn has run and roughly how
+/// much has come back so far.
+///
+/// Elapsed alone answers "is it stuck?" only if you are already suspicious. A
+/// token count that climbs answers it outright -- the model is producing, the
+/// wait is real work -- which is the whole reason it is here.
+fn turn_meter(elapsed: Duration, received_bytes: usize) -> String {
+    // The same ~4 chars per token the history budget uses, and the same `Tokens`
+    // display as the bottom bar, so the two numbers are read in one vocabulary.
+    let tokens = received_bytes / 4;
+    if tokens == 0 {
+        return format!("({})", anim::short_elapsed(elapsed));
+    }
+    format!("({} · ↓ {})", anim::short_elapsed(elapsed), Tokens(tokens))
+}
+
+/// Things koda can do that a user is unlikely to find on their own. Shown one
+/// at a time under the status row while a turn is running, because that is the
+/// moment there is nothing else to read and nothing else to do.
+///
+/// Every one of these has to be true and useful — a tip that is merely filler
+/// trains people to stop reading the row that also says what koda is doing.
+const TIPS: &[&str] = &[
+    "press ctrl+p to switch mode — plan reads and thinks, execute changes files",
+    "type @ to attach a file by name; @image1 attaches a pasted screenshot",
+    "press ctrl+r to expand the last tool output, ctrl+t for the last reasoning",
+    "/undo puts back every file the agent changed in the last turn",
+    "/compact summarizes the conversation when the context fills up",
+    "/resume reopens an earlier conversation; /fork branches one",
+    "/search finds a past conversation by what was said in it",
+    "/watch picks up `AI!` comments you leave in your code and acts on them",
+    "/auto cycles autonomy: ask each time → auto-write → full-auto",
+    "/reason sets thinking effort: off, low, medium, high",
+    "/logs shows every request, tool call and timing from this session",
+    "/orc splits a task across role agents that review each other",
+    "/skills lists what koda has taught itself; it writes its own procedures",
+    "/keys lists every shortcut; /tools lists every tool the model can call",
+    "esc interrupts the turn without losing the conversation",
+];
+
+/// How long a turn must run before a tip appears, and how long each is shown.
+/// Long enough that a quick answer never flashes one.
+const TIP_AFTER: Duration = Duration::from_secs(6);
+const TIP_EVERY: Duration = Duration::from_secs(14);
+
+/// The tip to show for a turn that has run this long, or none yet.
+///
+/// `seed` varies the starting point per session so a user who mostly runs short
+/// turns does not see the same first tip every time.
+fn tip_for(elapsed: Duration, seed: usize) -> Option<&'static str> {
+    if elapsed < TIP_AFTER {
+        return None;
+    }
+    let slot = ((elapsed - TIP_AFTER).as_secs() / TIP_EVERY.as_secs()) as usize;
+    Some(TIPS[(slot + seed) % TIPS.len()])
+}
+
 fn working_message(elapsed: Duration) -> &'static str {
     let slot = (elapsed.as_secs() / 10) as usize;
     WORKING_MSGS[slot % WORKING_MSGS.len()]
@@ -253,6 +310,16 @@ pub struct App {
     /// tests"), from the latest tool start — shown in the working status so the
     /// user sees live activity, not a generic spinner.
     activity: Option<String>,
+    /// Where this session starts in the tip rotation, so a user who mostly runs
+    /// short turns is not shown the same first tip every time.
+    tip_seed: usize,
+    /// Bytes streamed from the model this turn -- prose, reasoning and tool-call
+    /// arguments alike -- shown as an approximate token count. A number that
+    /// climbs is the difference between a slow model and a hung one.
+    received: usize,
+    /// The last cumulative argument length reported for the call being drafted,
+    /// so its growth can be added to `received` without double counting.
+    draft_seen: usize,
     /// How much motion the environment and config allow.
     motion: anim::Motion,
     /// User preference for the streaming text reveal specifically. Gated by
@@ -500,11 +567,7 @@ impl App {
         let n = self.images.len();
         self.editor.insert(&format!("@image{n} "));
         // "0 KB" for a small screenshot reads like something went wrong.
-        let size = if bytes < 1024 {
-            format!("{bytes} B")
-        } else {
-            format!("{} KB", bytes / 1024)
-        };
+        let size = human_bytes(bytes as usize);
         self.note(format!(
             "pasted image ({size}) as @image{n} — it attaches when you send"
         ));
@@ -617,6 +680,8 @@ impl App {
                 self.busy = true;
                 self.cancelling = false;
                 self.activity = None;
+                self.received = 0;
+                self.draft_seen = 0;
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
             }
@@ -624,12 +689,14 @@ impl App {
                 // The model is producing the reply — say so, so the status row
                 // isn't stuck on a stale tool label or a generic quip.
                 self.activity = Some("writing the reply".into());
+                self.received += chunk.len();
                 self.transcript.assistant_delta(&chunk);
             }
             Event::Reasoning(chunk) => {
                 // Reasoning can run for many seconds before any visible output;
                 // surface it so a thinking model never reads as a frozen app.
                 self.activity = Some("thinking".into());
+                self.received += chunk.len();
                 self.transcript.reasoning_delta(&chunk);
             }
             Event::ToolStart {
@@ -645,6 +712,8 @@ impl App {
                 // Surface what the agent is doing right now in the status row.
                 // Inside a delegated subagent (depth>0) say so, so the user can
                 // see the child is working — e.g. "↳ subagent: reading cart.py".
+                // A new call: its arguments are counted from zero again.
+                self.draft_seen = 0;
                 let phrase = activity_label(&name, &label);
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
@@ -657,6 +726,31 @@ impl App {
                     self.transcript.tool_start(id, name, label, depth);
                 }
                 self.follow = true;
+            }
+            Event::ToolDraft {
+                name,
+                target,
+                bytes,
+                depth,
+            } => {
+                // The call has not been made yet, so there is no card to update
+                // -- this is the status row's job. Reads as "writing
+                // src/context.rs · 12.4 KB", climbing, which is the difference
+                // between a slow write and a hung one.
+                // `bytes` is cumulative for this call, so only its growth is new.
+                self.received += bytes.saturating_sub(self.draft_seen);
+                self.draft_seen = bytes;
+                let phrase = activity_label(&name, &target);
+                let phrase = if bytes >= 1024 {
+                    format!("{phrase} · {}", human_bytes(bytes))
+                } else {
+                    phrase
+                };
+                self.activity = Some(if depth > 0 {
+                    format!("↳ subagent: {phrase}")
+                } else {
+                    phrase
+                });
             }
             Event::ToolProgress { id, done, total } => {
                 self.transcript.tool_progress(&id, done, total);
@@ -3047,17 +3141,29 @@ fn draw(f: &mut Frame, app: &mut App) {
             .unwrap_or(0)
     };
 
+    // A tip only earns a row on a screen with room, during a wait long enough
+    // to read one. It never displaces the status row or the input.
+    let tip = if m.tiny || app.compacting.is_some() {
+        None
+    } else {
+        app.turn_started
+            .filter(|_| app.busy && !app.cancelling)
+            .and_then(|started| tip_for(started.elapsed(), app.tip_seed))
+    };
+
     let chunks = Layout::vertical([
-        Constraint::Min(1),          // transcript
-        Constraint::Length(plan_h),  // sticky plan (0 when none)
-        Constraint::Length(1),       // hint / state row (status + keys)
-        Constraint::Length(spacer),  // breathing room above the input
-        Constraint::Length(input_h), // input
-        Constraint::Length(1),       // powerline status bar (mode + model)
+        Constraint::Min(1),                       // transcript
+        Constraint::Length(plan_h),               // sticky plan (0 when none)
+        Constraint::Length(1),                    // hint / state row (status + keys)
+        Constraint::Length(tip.is_some() as u16), // a tip while a turn runs
+        Constraint::Length(spacer),               // breathing room above the input
+        Constraint::Length(input_h),              // input
+        Constraint::Length(1),                    // powerline status bar (mode + model)
     ])
     .split(area);
-    let (body, plan_area, rule, input, status) =
-        (chunks[0], chunks[1], chunks[2], chunks[4], chunks[5]);
+    let (body, plan_area, rule, tip_area, input, status) = (
+        chunks[0], chunks[1], chunks[2], chunks[3], chunks[5], chunks[6],
+    );
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
     // Decide scrollability from the total at the ACTUAL text width, not a stale
@@ -3142,6 +3248,17 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
     }
     f.render_widget(Paragraph::new(hint_row(app, area.width, m)), rule);
+    if let Some(text) = tip {
+        // Dim and quiet: it is there for the eye that has run out of things to
+        // look at, not competing with the status row above it.
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("   Tip: ".to_string(), t.fg(t.muted)),
+                Span::styled(text.to_string(), t.dim()),
+            ])),
+            tip_area,
+        );
+    }
 
     // Input.
     let prompt_style = if app.busy {
@@ -3433,7 +3550,7 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                     .as_deref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| working_message(started.elapsed()).to_string());
-                let label = format!("{verb}  {}", anim::short_elapsed(started.elapsed()));
+                let label = format!("{verb} {}", turn_meter(started.elapsed(), app.received));
                 if app.motion.animates() {
                     // A highlight sweeping the label reads as ongoing activity
                     // without moving any text around.
@@ -3528,6 +3645,21 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
 /// A short present-tense phrase for what a tool is doing, shown live in the
 /// working status. `label` is the tool's own summary (e.g. a path or command);
 /// we pair it with a verb so the user sees "reading cart.py", "running tests".
+/// A size a person can read at a glance. Bytes below a kilobyte, then one
+/// decimal place, which is enough to see a number climbing without it jittering.
+fn human_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let n = bytes as f64;
+    if n < KB {
+        format!("{bytes} B")
+    } else if n < MB {
+        format!("{:.1} KB", n / KB)
+    } else {
+        format!("{:.1} MB", n / MB)
+    }
+}
+
 fn activity_label(name: &str, label: &str) -> String {
     let target: String = label.trim().chars().take(48).collect();
     let verb = match name {
@@ -4548,6 +4680,13 @@ pub async fn run(
         cancelling: false,
         compacting: None,
         activity: None,
+        // The clock is seed enough: this only has to differ between sessions.
+        tip_seed: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0),
+        received: 0,
+        draft_seen: 0,
         motion: anim::Motion::Full,
         reveal_pref: cfg.reveal,
         turn_started: None,
@@ -4919,6 +5058,54 @@ fn handle_term_event(app: &mut App, ev: event::Event) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The row a user stares at during a long turn: elapsed, and a number that
+    /// climbs so the wait is visibly work rather than a hang.
+    #[test]
+    fn the_turn_meter_says_how_long_and_how_much() {
+        // Nothing back yet: no count to show, just the clock.
+        assert_eq!(turn_meter(Duration::from_secs(3), 0), "(3s)");
+        let m = turn_meter(Duration::from_secs(257), 59_200);
+        assert!(m.contains("↓ 14.8k tok"), "{m}");
+        assert!(m.starts_with('(') && m.ends_with(')'), "{m}");
+    }
+
+    /// A tip is for a wait with nothing to read. A quick answer must never
+    /// flash one, and a long turn must not sit on the same line for minutes.
+    #[test]
+    fn tips_appear_only_after_a_real_wait_and_then_rotate() {
+        assert_eq!(tip_for(Duration::from_secs(2), 0), None);
+        let first = tip_for(TIP_AFTER, 0).expect("a tip once the wait is real");
+        assert!(TIPS.contains(&first));
+        // Still the same one a moment later, then a different one.
+        assert_eq!(tip_for(TIP_AFTER + Duration::from_secs(3), 0), Some(first));
+        assert_ne!(tip_for(TIP_AFTER + TIP_EVERY, 0), Some(first));
+        // The seed only moves the starting point; every tip is still reachable.
+        let seen: std::collections::HashSet<_> = (0..TIPS.len())
+            .filter_map(|i| tip_for(TIP_AFTER + TIP_EVERY * i as u32, 7))
+            .collect();
+        assert_eq!(seen.len(), TIPS.len(), "the rotation must cover them all");
+    }
+
+    #[test]
+    fn sizes_read_at_a_glance() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(999), "999 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(12_698), "12.4 KB");
+        assert_eq!(human_bytes(3_000_000), "2.9 MB");
+    }
+
+    /// A half-written call has no card yet, so the status row is the only place
+    /// the user can see a long write happening.
+    #[test]
+    fn a_draft_names_the_file_being_written() {
+        assert_eq!(
+            activity_label("write_file", "src/context.rs"),
+            "writing src/context.rs"
+        );
+        assert_eq!(activity_label("write_file", ""), "writing");
+    }
     use super::*;
 
     #[test]

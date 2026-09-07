@@ -57,6 +57,19 @@ pub enum Event {
         /// 0 = this agent, 1 = inside a delegated subagent.
         depth: u8,
     },
+    /// The model is still writing a tool call's arguments -- it has not been
+    /// made yet, so there is no tool to start and nothing in the transcript.
+    /// A `write_file` of a few hundred lines streams for a long time on a local
+    /// model, and without this the status row sits on the last thing that
+    /// happened while the agent is doing its most visible work: writing a file.
+    /// `bytes` is the arguments so far, which is roughly the file taking shape.
+    ToolDraft {
+        name: String,
+        target: String,
+        bytes: usize,
+        /// 0 = this agent, 1 = inside a delegated subagent.
+        depth: u8,
+    },
     /// A running tool has read or written this many tokens so far, out of the
     /// total when it is known. Only the file tools report this, and only for
     /// content big enough that the wait would otherwise be a bare spinner.
@@ -247,6 +260,9 @@ struct StepAcc {
     partials: BTreeMap<usize, (Option<String>, String, String)>,
     /// Completed `<tool_call>` payloads from the text protocol.
     text_calls: Vec<String>,
+    /// index -> arguments length at the last draft report, so a status update
+    /// costs one event per few hundred bytes rather than one per token.
+    drafted: BTreeMap<usize, usize>,
 }
 
 struct StreamResult {
@@ -1538,7 +1554,7 @@ impl Agent {
                     break;
                 }
                 Some(ev) = srx.recv() => {
-                    absorb(ev, &mut acc, tx, self.quiet);
+                    absorb(ev, &mut acc, tx, self.quiet, self.depth);
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                     // Catches a cancel that arrived while we were not awaiting `notified()`.
@@ -1552,7 +1568,7 @@ impl Agent {
 
         // Drain anything the stream buffered before finishing.
         while let Ok(ev) = srx.try_recv() {
-            absorb(ev, &mut acc, tx, self.quiet);
+            absorb(ev, &mut acc, tx, self.quiet, self.depth);
         }
 
         let StepAcc {
@@ -1563,6 +1579,7 @@ impl Agent {
             finish_reason,
             partials,
             text_calls,
+            drafted: _,
         } = acc;
 
         if let Some(e) = stream_err {
@@ -4064,6 +4081,54 @@ const DECLARATION_KEYWORDS: &[&str] = &[
     "package",
 ];
 
+/// Report a draft at most once per this many bytes of arguments.
+const DRAFT_STEP: usize = 512;
+
+/// What a half-written tool call is about, from JSON that is still arriving.
+///
+/// The interesting key comes first in practice (`{"path":"src/x.rs","content":
+/// "…`), so the file being written is known long before the content that makes
+/// the wait worth reporting. Anything not yet arrived is simply absent.
+fn draft_target(partial: &str) -> Option<String> {
+    for key in ["path", "command", "pattern", "glob", "query", "name", "url"] {
+        let needle = format!("\"{key}\"");
+        let Some(at) = partial.find(&needle) else {
+            continue;
+        };
+        let rest = partial[at + needle.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        // Up to the closing quote, or as far as the stream has got.
+        let mut out = String::new();
+        let mut escaped = false;
+        for c in rest.chars() {
+            if escaped {
+                // A JSON escape in a path is nearly always a Windows separator.
+                out.push(if c == 'n' || c == 't' { ' ' } else { c });
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                break;
+            } else {
+                out.push(c);
+            }
+            if out.len() >= 64 {
+                break;
+            }
+        }
+        let out = out.trim().to_string();
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
+    None
+}
+
 fn required_params_hint(name: &str) -> String {
     let Some(spec) = tools::spec(name) else {
         return format!("`{name}` is not a known tool.");
@@ -4223,7 +4288,13 @@ pub fn label_for(name: &str, args: &Value) -> String {
 
 /// Fold one stream event into the accumulator. A subagent runs `quiet`: its
 /// tokens build its own context but never reach the user's transcript.
-fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>, quiet: bool) {
+fn absorb(
+    ev: StreamEvent,
+    acc: &mut StepAcc,
+    tx: &mpsc::UnboundedSender<Event>,
+    quiet: bool,
+    depth: u8,
+) {
     match ev {
         StreamEvent::Text(chunk) => {
             let (display, blocks) = acc.scan.push(&chunk);
@@ -4266,6 +4337,19 @@ fn absorb(ev: StreamEvent, acc: &mut StepAcc, tx: &mpsc::UnboundedSender<Event>,
                 slot.1 = n;
             }
             slot.2.push_str(&args);
+            // Tell the UI something is being written. Throttled by size: the
+            // point is a number that visibly moves, not one that is exact.
+            let seen = acc.drafted.entry(index).or_default();
+            let grown = slot.2.len().saturating_sub(*seen);
+            if !slot.1.is_empty() && (*seen == 0 || grown >= DRAFT_STEP) {
+                *seen = slot.2.len();
+                let _ = tx.send(Event::ToolDraft {
+                    name: slot.1.clone(),
+                    target: draft_target(&slot.2).unwrap_or_default(),
+                    bytes: slot.2.len(),
+                    depth,
+                });
+            }
         }
         StreamEvent::Finish(reason) => {
             acc.finish_reason = reason.clone();
@@ -4892,6 +4976,98 @@ mod tests {
 
     /// The malformed-argument hint names the tool and its required parameters
     /// so a small model can re-issue the call instead of hitting a hard error.
+    /// The path is known long before the content that makes the wait worth
+    /// reporting, because it comes first in the arguments.
+    #[test]
+    fn a_target_is_read_out_of_arguments_still_arriving() {
+        assert_eq!(
+            draft_target(r#"{"path":"src/context.rs","content":"//! Cont"#).as_deref(),
+            Some("src/context.rs")
+        );
+        // Mid-path: show what has arrived rather than nothing.
+        assert_eq!(
+            draft_target(r#"{"path":"src/con"#).as_deref(),
+            Some("src/con")
+        );
+        // A Windows separator is an escape in JSON.
+        assert_eq!(
+            draft_target(r#"{"path":"src\\view.rs","#).as_deref(),
+            Some(r"src\view.rs")
+        );
+        assert_eq!(
+            draft_target(r#"{"command":"cargo test --all"}"#).as_deref(),
+            Some("cargo test --all")
+        );
+        // Nothing usable yet, and nothing that names a target at all.
+        assert_eq!(draft_target(r#"{"pat"#), None);
+        assert_eq!(draft_target(r#"{"depth":2}"#), None);
+    }
+
+    /// The whole point: a long write must move a number on screen. It must not
+    /// send one event per token doing it.
+    #[test]
+    fn a_streaming_write_reports_progress_without_flooding() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StepAcc::default();
+        absorb(
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("c1".into()),
+                name: Some("write_file".into()),
+                args: r#"{"path":"src/big.rs","content":""#.into(),
+            },
+            &mut acc,
+            &tx,
+            false,
+            0,
+        );
+        // 200 chunks of 64 bytes: 12.8 KB of file, arriving a token at a time.
+        for _ in 0..200 {
+            absorb(
+                StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: None,
+                    name: None,
+                    args: "x".repeat(64),
+                },
+                &mut acc,
+                &tx,
+                false,
+                0,
+            );
+        }
+        let mut drafts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::ToolDraft {
+                name,
+                target,
+                bytes,
+                ..
+            } = ev
+            {
+                assert_eq!(name, "write_file");
+                assert_eq!(
+                    target, "src/big.rs",
+                    "the file is named from the first chunk"
+                );
+                drafts.push(bytes);
+            }
+        }
+        assert!(
+            drafts.len() > 5,
+            "the number has to visibly move: {drafts:?}"
+        );
+        assert!(
+            drafts.len() < 60,
+            "one event per few hundred bytes, not per token: {drafts:?}"
+        );
+        assert!(
+            drafts.windows(2).all(|w| w[1] > w[0]),
+            "it only ever climbs: {drafts:?}"
+        );
+        assert!(*drafts.last().expect("some") > 12_000);
+    }
+
     #[test]
     fn a_search_for_a_name_is_recognised_whatever_the_pattern_looks_like() {
         let sym = |p: &str| symbol_being_searched("search", &serde_json::json!({ "pattern": p }));
