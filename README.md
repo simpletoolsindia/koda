@@ -330,6 +330,16 @@ users, `file` lists what a file defines and who depends on it. Regex-based rathe
 than a full parser: accurate enough to point at the right file, which the model
 then reads properly.
 
+Two things push the model to actually use it, because a graph nothing consults
+is dead weight. The base rules no longer name a locating tool at all — a rule
+saying "use search to locate code" is the rule a small model follows, whatever
+the section further down asks for — so the codegraph block is the only answer to
+"how do I find this". And when a `search` is really a name lookup, the result
+comes back with the `codegraph` call to make instead, spelled out. That fires on
+the patterns models actually write (`fn build\(`, `impl Theme`, `\bTodoStatus\b`),
+not just on a bare identifier; prose like `error: connection reset` is left
+alone, because prose is what search is for.
+
 ## Memory
 
 With `memory = true`, koda keeps `<project>/.koda/memory.md`: facts it recorded

@@ -2058,23 +2058,21 @@ impl Agent {
                 None => tools::run(&name, args, &self.streaming_ctx(&call.id, tx)).await,
             },
         };
-        if self.depth == 0
-            && self.cfg.codegraph
-            && !self.used_codegraph_this_turn
-            && !self.codegraph_hint_sent
-            && looks_like_symbol_search(&name, &args_for_memory)
-        {
-            let symbol = args_for_memory
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            outcome.content.push_str(&format!(
-                "\n\nCODEGRAPH HINT: `{symbol}` looks like a symbol lookup. Call `codegraph` \
-                 with query=`symbol` before more search/read calls; it returns the definition \
-                 and cross-file users in one result."
-            ));
-            self.codegraph_hint_sent = true;
+        if self.depth == 0 && self.cfg.codegraph && !self.used_codegraph_this_turn {
+            if let Some(symbol) = symbol_being_searched(&name, &args_for_memory) {
+                if !self.codegraph_hint_sent {
+                    // Spelled as the call to make, because a small model that is
+                    // told to "use codegraph" without the shape reaches for grep
+                    // again on the next step.
+                    outcome.content.push_str(&format!(
+                        "\n\nCODEGRAPH HINT: `{symbol}` is a name, not free text. Call \
+                         `codegraph` with query=symbol, name={symbol} — one call returns \
+                         where it is defined and every file that uses it, which this \
+                         search cannot tell you. Do that before more search/read calls."
+                    ));
+                    self.codegraph_hint_sent = true;
+                }
+            }
         }
         // Command outcomes are the one thing worth learning without being asked:
         // next session should know which test runner actually works here.
@@ -3985,20 +3983,86 @@ fn balanced_json_objects(text: &str) -> Vec<&str> {
 /// A bare identifier (including a qualified `Type::method`) is almost always a
 /// symbol lookup rather than a free-text search. Regexes, phrases and literals
 /// stay on the normal search path.
-fn looks_like_symbol_search(tool: &str, args: &Value) -> bool {
+/// The symbol a `search` call is really looking for, if it is looking for one.
+///
+/// The nudge only ever fired on a bare identifier, so the patterns models
+/// actually write -- `fn build\(`, `impl Theme`, `struct Config \{` -- never
+/// tripped it, which is most of why the graph went unused. The name is picked
+/// out of the pattern instead: regex punctuation is scaffolding around it, and
+/// a language keyword is not the thing being looked for.
+///
+/// One candidate means a name. Several means prose ("error: connection reset"),
+/// and prose is what `search` is for.
+fn symbol_being_searched(tool: &str, args: &Value) -> Option<String> {
     if tool != "search" {
-        return false;
+        return None;
     }
-    let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()).map(str::trim) else {
-        return false;
-    };
-    !pattern.is_empty()
-        && pattern.len() <= 120
-        && pattern.chars().any(|c| c.is_ascii_alphabetic())
-        && pattern
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':'))
+    let pattern = args
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .map(str::trim)?;
+    if pattern.is_empty() || pattern.len() > 120 {
+        return None;
+    }
+    let mut cleaned = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // A regex escape: `\b`, `\w`, `\s` are anchors, not part of the
+            // name, so the letter after the backslash goes with it.
+            if chars.peek().is_some_and(char::is_ascii_alphabetic) {
+                chars.next();
+            }
+            cleaned.push(' ');
+        } else if c.is_ascii_alphanumeric() || c == '_' || c == ':' {
+            cleaned.push(c);
+        } else {
+            cleaned.push(' ');
+        }
+    }
+    let mut names = cleaned
+        .split_whitespace()
+        .filter(|t| t.len() >= 3)
+        .filter(|t| t.starts_with(|c: char| c.is_ascii_alphabetic()))
+        .filter(|t| !DECLARATION_KEYWORDS.contains(&t.to_ascii_lowercase().as_str()));
+    let name = names.next()?;
+    if names.next().is_some() {
+        return None;
+    }
+    Some(name.trim_matches(':').to_string())
 }
+
+/// Words that introduce a definition rather than name one. A model searching
+/// `fn compact` wants `compact`.
+const DECLARATION_KEYWORDS: &[&str] = &[
+    "fn",
+    "impl",
+    "struct",
+    "enum",
+    "trait",
+    "type",
+    "const",
+    "static",
+    "let",
+    "pub",
+    "use",
+    "mod",
+    "class",
+    "def",
+    "function",
+    "var",
+    "interface",
+    "export",
+    "import",
+    "return",
+    "async",
+    "await",
+    "public",
+    "private",
+    "extends",
+    "implements",
+    "package",
+];
 
 fn required_params_hint(name: &str) -> String {
     let Some(spec) = tools::spec(name) else {
@@ -4829,27 +4893,24 @@ mod tests {
     /// The malformed-argument hint names the tool and its required parameters
     /// so a small model can re-issue the call instead of hitting a hard error.
     #[test]
-    fn bare_identifier_search_is_recognised_as_symbol_lookup() {
-        assert!(looks_like_symbol_search(
-            "search",
-            &serde_json::json!({"pattern": "Agent::execute"})
-        ));
-        assert!(looks_like_symbol_search(
-            "search",
-            &serde_json::json!({"pattern": "compact"})
-        ));
-        assert!(!looks_like_symbol_search(
-            "search",
-            &serde_json::json!({"pattern": "error: connection reset"})
-        ));
-        assert!(!looks_like_symbol_search(
-            "search",
-            &serde_json::json!({"pattern": "foo.*bar"})
-        ));
-        assert!(!looks_like_symbol_search(
-            "read_file",
-            &serde_json::json!({"pattern": "compact"})
-        ));
+    fn a_search_for_a_name_is_recognised_whatever_the_pattern_looks_like() {
+        let sym = |p: &str| symbol_being_searched("search", &serde_json::json!({ "pattern": p }));
+        assert_eq!(sym("Agent::execute").as_deref(), Some("Agent::execute"));
+        assert_eq!(sym("compact").as_deref(), Some("compact"));
+        // The shapes a model actually writes, which the old check all missed.
+        assert_eq!(sym(r"fn build\(").as_deref(), Some("build"));
+        assert_eq!(sym("impl Theme").as_deref(), Some("Theme"));
+        assert_eq!(sym(r"struct Config \{").as_deref(), Some("Config"));
+        assert_eq!(sym(r"\bTodoStatus\b").as_deref(), Some("TodoStatus"));
+        // Prose is what search is for; two names is not a lookup.
+        assert_eq!(sym("error: connection reset"), None);
+        assert_eq!(sym("foo.*bar"), None);
+        assert_eq!(sym(""), None);
+        // Only search gets the nudge.
+        assert_eq!(
+            symbol_being_searched("read_file", &serde_json::json!({"pattern": "compact"})),
+            None
+        );
     }
 
     /// A skill is how the agent keeps a procedure it worked out. The tool has to

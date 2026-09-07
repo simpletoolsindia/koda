@@ -77,7 +77,9 @@ pub fn curate(history: &[Message], budget: usize) -> (Vec<Message>, Report) {
         after: before,
         ..Report::default()
     };
-    if before <= budget || history.len() <= KEEP_RECENT {
+    // Size is the only reason to curate. A short history can still be far too
+    // big -- two file reads is two messages and can be the whole window.
+    if before <= budget {
         return (history.to_vec(), report);
     }
 
@@ -123,25 +125,28 @@ pub fn curate(history: &[Message], budget: usize) -> (Vec<Message>, Report) {
             room = room.saturating_mul(2);
         }
         for m in b.msgs.iter_mut() {
-            // The user's own words are the task; they get far more room than a
-            // tool result, and the opening request keeps all of it.
-            let room = match m.role {
-                Role::User => room.saturating_mul(4),
-                Role::Assistant => room.saturating_mul(2),
-                _ => room,
-            };
-            let room = room.max(FLOOR);
             let Some(text) = m.content.as_deref() else {
                 continue;
             };
-            if i == 0 && m.role == Role::User {
-                continue;
+            let room = if i == 0 && m.role == Role::User {
+                // The opening request is the task and is kept whole -- unless
+                // it is itself a pasted log big enough to be the problem, in
+                // which case it may still have half the window, head and tail.
+                (budget * 2).max(FLOOR)
+            } else {
+                // The user's own words are worth more room than a tool result,
+                // and an assistant's reasoning more than a build log.
+                match m.role {
+                    Role::User => room.saturating_mul(4),
+                    Role::Assistant => room.saturating_mul(2),
+                    _ => room,
+                }
+                .max(FLOOR)
+            };
+            if let Some(clipped) = clip(text, room) {
+                m.content = Some(clipped);
+                report.squeezed += 1;
             }
-            if text.len() <= room {
-                continue;
-            }
-            m.content = Some(clip(text, room));
-            report.squeezed += 1;
         }
     }
     report.after = total_blocks(&blocks);
@@ -196,9 +201,11 @@ impl Block {
                 }
             }
             // Only the opening of a result: a term buried in line 900 of a
-            // build log is a coincidence, not relevance.
+            // build log is a coincidence, not relevance. Sliced on a character
+            // boundary -- tool results are full of UTF-8 and `&c[..400]` would
+            // panic in the middle of one.
             if let Some(c) = &m.content {
-                hay.push_str(&c[..c.len().min(400)]);
+                hay.push_str(&c[..floor_char(c, 400)]);
             }
             let hay = hay.to_ascii_lowercase();
             focus.iter().any(|t| hay.contains(t.as_str()))
@@ -262,41 +269,47 @@ fn total_blocks(blocks: &[Block]) -> usize {
 
 /// Tool calls whose results no longer describe the world, mapped to the reason.
 ///
-/// Two ways a result goes stale: the same question was asked again later, or
-/// the file it described was written since. Both are decided from the calls
-/// themselves — no model, no guessing.
+/// Two ways a result goes stale: the identical question was asked again later,
+/// or the file it described was written since. Both are decided from the calls
+/// themselves -- no model, no guessing.
 fn stale_calls(history: &[Message]) -> HashMap<String, String> {
-    // (id, tool, subject) in order.
-    let mut calls: Vec<(String, String, String)> = Vec::new();
+    // (id, tool, whole call, path it is about) in order.
+    let mut calls: Vec<(String, String, String, String)> = Vec::new();
     for m in history {
         let Some(list) = &m.tool_calls else { continue };
         for c in list {
             let args = c.args();
-            let subject = subject(&args);
-            calls.push((c.id.clone(), c.function.name.clone(), subject));
+            calls.push((
+                c.id.clone(),
+                c.function.name.clone(),
+                canon(&args),
+                path_of(&args),
+            ));
         }
     }
 
     let mut stale = HashMap::new();
-    for (i, (id, tool, subject)) in calls.iter().enumerate() {
-        if subject.is_empty() {
-            continue;
-        }
-        for (later_tool, later_subject) in calls[i + 1..].iter().map(|(_, t, s)| (t, s)) {
-            if later_subject != subject {
-                continue;
-            }
-            if later_tool == tool {
-                stale.insert(
-                    id.clone(),
-                    format!("a later `{tool}` of {subject} answered this again"),
-                );
+    for (i, (id, tool, canon, path)) in calls.iter().enumerate() {
+        for (later_tool, later_canon, later_path) in
+            calls[i + 1..].iter().map(|(_, t, c, p)| (t, c, p))
+        {
+            // The same call, made again. Its answer replaced this one --
+            // whether that is a re-read of a file or a second `cargo build`.
+            if later_tool == tool && later_canon == canon {
+                let what = if path.is_empty() {
+                    format!("a later `{tool}` asked this again")
+                } else {
+                    format!("a later `{tool}` of {path} answered this again")
+                };
+                stale.insert(id.clone(), what);
                 break;
             }
-            if is_read(tool) && is_write(later_tool) {
+            // Read before the file was written: it describes a file that no
+            // longer exists in that form.
+            if !path.is_empty() && path == later_path && is_read(tool) && is_write(later_tool) {
                 stale.insert(
                     id.clone(),
-                    format!("{subject} was changed by a later `{later_tool}`"),
+                    format!("{path} was changed by a later `{later_tool}`"),
                 );
                 break;
             }
@@ -305,11 +318,29 @@ fn stale_calls(history: &[Message]) -> HashMap<String, String> {
     stale
 }
 
-/// What a call is *about* — the path it reads, the pattern it searches, the
-/// symbol it looks up. Calls with no subject are never treated as superseded:
-/// two `run_command`s are not the same command.
-fn subject(args: &Value) -> String {
-    for k in ["path", "file", "pattern", "query", "name", "dir"] {
+/// A call's arguments, canonicalized, so "the same call again" is a string
+/// comparison. Keyed on *all* of them on purpose: two `search`es of the same
+/// directory for different patterns are different questions, and matching on
+/// the path alone would throw away an answer the model still needs.
+fn canon(args: &Value) -> String {
+    let Some(obj) = args.as_object() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = obj
+        .iter()
+        .map(|(k, v)| match v {
+            Value::String(s) => format!("{k}={s}"),
+            other => format!("{k}={other}"),
+        })
+        .collect();
+    parts.sort();
+    let joined = parts.join("\u{1}");
+    joined.chars().take(400).collect()
+}
+
+/// The file a call is about, when it names one.
+fn path_of(args: &Value) -> String {
+    for k in ["path", "file"] {
         if let Some(v) = args.get(k).and_then(Value::as_str) {
             let v = v.trim();
             if !v.is_empty() {
@@ -352,18 +383,25 @@ fn focus_terms(history: &[Message]) -> HashSet<String> {
 /// Keep the head and the tail, say how much went. A tool result's head names
 /// what it is and its tail is usually the answer (the error, the last lines of
 /// a build); the middle is what can go.
-fn clip(text: &str, room: usize) -> String {
+fn clip(text: &str, room: usize) -> Option<String> {
+    if text.len() <= room {
+        return None;
+    }
     let head_end = floor_char(text, room * 3 / 5);
     let tail_start = ceil_char(text, text.len().saturating_sub(room - room * 3 / 5));
     if tail_start <= head_end {
-        return text.to_string();
+        return None;
     }
     let elided = text[head_end..tail_start].lines().count();
-    format!(
+    let out = format!(
         "{}\n… {elided} lines elided to fit the context window …\n{}",
         &text[..head_end],
         &text[tail_start..]
-    )
+    );
+    // The marker has a size of its own. Clipping the last few characters off a
+    // message costs more than it saves, and a "saving" that grows the request
+    // is the one thing this layer must never do.
+    (out.len() < text.len()).then_some(out)
 }
 
 /// Largest char boundary at or below `n`, so slicing never splits a character.
@@ -517,10 +555,10 @@ mod tests {
         assert_well_formed(&out);
     }
 
-    /// Two `run_command`s are not the same command, and a result the agent is
-    /// reading right now is not old news.
+    /// A command run twice makes its first log old news -- that is the single
+    /// biggest win here, a build log being the largest thing in most windows.
     #[test]
-    fn unrelated_results_and_the_working_set_survive() {
+    fn a_repeated_command_supersedes_its_earlier_log() {
         let mut history = vec![Message::user("build it")];
         for i in 0..6 {
             let id = format!("r{i}");
@@ -535,8 +573,9 @@ mod tests {
             history.push(Message::tool(&id, "run_command", big("log")));
         }
         let (out, report) = curate(&history, 2_000);
-        assert_eq!(report.superseded, 0, "no subject, no supersession");
-        // The last exchange is the working set and must be intact.
+        assert!(report.superseded >= 4, "{report:?}");
+        // The last exchange is the working set: the log the model is reading
+        // right now is intact.
         let last = out.last().expect("non-empty");
         assert!(last
             .content
@@ -544,6 +583,49 @@ mod tests {
             .unwrap_or("")
             .starts_with("log\nxxx"));
         assert!(report.after < report.before, "{report:?}");
+        assert_well_formed(&out);
+    }
+
+    /// Different questions to the same tool are not each other's answers. Two
+    /// searches of the same directory differ only in their pattern, so keying
+    /// supersession on the path would throw away a live result.
+    #[test]
+    fn different_searches_of_one_directory_are_not_conflated() {
+        let mut history = vec![Message::user("audit the error paths")];
+        for (i, pattern) in ["unwrap", "expect", "panic!"].iter().enumerate() {
+            let id = format!("s{i}");
+            history.push(Message::assistant_calls(
+                None,
+                vec![ToolCall::new(
+                    id.clone(),
+                    "search".into(),
+                    format!("{{\"pattern\":\"{pattern}\",\"path\":\"src\"}}"),
+                )],
+            ));
+            history.push(Message::tool(&id, "search", big(pattern)));
+        }
+        history.push(Message::user("well?"));
+        let (_, report) = curate(&history, 3_000);
+        assert_eq!(
+            report.superseded, 0,
+            "distinct patterns are distinct questions: {report:?}"
+        );
+    }
+
+    /// Tool results are full of UTF-8. Relevance scoring reads the head of one,
+    /// and a byte-index slice would panic in the middle of a character.
+    #[test]
+    fn scoring_a_result_full_of_utf8_does_not_panic() {
+        let mut history = vec![Message::user("check src/théme.rs")];
+        history.extend(read(
+            "a",
+            "src/théme.rs",
+            &"héllo — wörld ✓\n".repeat(2_000),
+        ));
+        history.extend(read("b", "src/other.rs", &"→".repeat(9_000)));
+        history.push(Message::user("continue"));
+        let (out, report) = curate(&history, 1_200);
+        assert!(report.changed(), "{report:?}");
         assert_well_formed(&out);
     }
 
@@ -571,11 +653,96 @@ mod tests {
     #[test]
     fn clipping_never_splits_a_character() {
         let text = "é".repeat(4_000);
-        let out = clip(&text, 500);
+        let out = clip(&text, 500).expect("a 4k message clips to 500");
         assert!(out.contains("elided"));
         assert!(out.len() < text.len());
         // Round-tripping through str proves every boundary was legal.
         assert!(out.chars().all(|c| c == 'é' || c.is_ascii() || c == '…'));
+        // Clipping to nearly the original length is not worth the marker.
+        assert_eq!(clip(&text, text.len() - 4), None);
+    }
+
+    /// A pasted log as the opening message is the task *and* the problem. It
+    /// keeps its head and tail rather than being sent whole or thrown away.
+    #[test]
+    fn a_huge_opening_request_keeps_its_head_and_tail() {
+        let history = vec![
+            Message::user(format!("summarise this log\n{}", "LINE\n".repeat(4_000))),
+            Message::assistant("reading"),
+            Message::user("well?"),
+        ];
+        let (out, report) = curate(&history, 1_000);
+        assert_eq!(report.squeezed, 1, "{report:?}");
+        let first = out[0].content.as_deref().unwrap_or("");
+        assert!(first.starts_with("summarise this log"), "{first:.60}");
+        assert!(first.contains("elided to fit the context window"));
+        assert!(
+            first.len() < 4_000,
+            "clipped to the window: {}",
+            first.len()
+        );
+        assert_eq!(out.len(), history.len(), "nothing was dropped");
+    }
+
+    /// Every request the model gets goes through here, so the invariants have
+    /// to hold for shapes no hand-written test thought of: legal conversation
+    /// out, never bigger than what went in, and no panic on any of it.
+    #[test]
+    fn any_history_curates_to_something_legal_and_smaller() {
+        // A tiny LCG: deterministic, reproducible, no dependency.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..300 {
+            let len = (next() % 14) as usize + 1;
+            let mut history: Vec<Message> = Vec::new();
+            let mut id = 0;
+            for _ in 0..len {
+                // Bodies of wildly different sizes, some multi-byte.
+                let body = match next() % 4 {
+                    0 => "ok".to_string(),
+                    1 => "é→✓ ".repeat((next() % 900) as usize + 1),
+                    2 => "x".repeat((next() % 9_000) as usize + 1),
+                    _ => format!("line {}\n", next()).repeat((next() % 200) as usize + 1),
+                };
+                match next() % 5 {
+                    0 => history.push(Message::user(body)),
+                    1 => history.push(Message::assistant(body)),
+                    _ => {
+                        id += 1;
+                        let cid = format!("c{id}");
+                        let tool = ["read_file", "search", "run_command", "edit_file"]
+                            [(next() % 4) as usize];
+                        let path = format!("src/f{}.rs", next() % 3);
+                        history.push(Message::assistant_calls(
+                            None,
+                            vec![ToolCall::new(
+                                cid.clone(),
+                                tool.into(),
+                                format!("{{\"path\":\"{path}\"}}"),
+                            )],
+                        ));
+                        history.push(Message::tool(&cid, tool, body));
+                    }
+                }
+            }
+            let budget = [0usize, 1, 64, 800, 4_000, 100_000][(next() % 6) as usize];
+            let (out, report) = curate(&history, budget);
+            assert_well_formed(&out);
+            assert!(out.len() <= history.len(), "case {case}: grew a message");
+            assert!(
+                report.after <= report.before,
+                "case {case}: grew: {report:?}"
+            );
+            // Whatever else goes, the job description stays.
+            if history[0].role == Role::User {
+                assert_eq!(out[0].role, Role::User, "case {case}: lost the request");
+            }
+        }
     }
 
     #[test]

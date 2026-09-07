@@ -10,7 +10,7 @@ const BASE: &str = "\
 You are koda, an autonomous coding agent. You work directly in the user's terminal to inspect and modify their codebase.
 
 Rules:
-- Read files before editing. Do not guess file contents. Use search and find_files to locate code.
+- Read files before editing. Do not guess file contents.
 - `edit_file` requires an exact substring match. Copy the target text verbatim from `read_file` results.
 - Prefer `edit_file` over `write_file` for existing files.
 - Verify changes by running builds, tests, or linters via `run_command`.
@@ -46,13 +46,29 @@ GATHERING CONTEXT: when several read-only lookups are independent — reading th
 /// Keep this outside `BASE`: a custom system prompt replaces the base, but must
 /// not accidentally remove the code-analysis workflow that makes koda precise.
 const CODEGRAPH_GUIDANCE: &str = "\n\n\
-CODE ANALYSIS — use `codegraph` FIRST, before search/read, whenever the question is about code structure:
-- Where is X defined, and what would break if I change it? -> codegraph query=symbol name=X
-- What does this file define, import, and who depends on it? -> codegraph query=file path=...
+CODE ANALYSIS — `codegraph` is how you look at code you did not write.
+
+Your FIRST call on any task that touches existing code is `codegraph`. It reads a \
+symbol graph of the project and answers in one call what search-and-read takes five \
+calls to guess at:
+- Where is X defined, and what breaks if I change it? -> codegraph query=symbol name=X
+- What does this file define and import, and who depends on it? -> codegraph query=file path=...
 - Unfamiliar project, or \"where does this live\"? -> codegraph query=overview
-Do this before editing an existing symbol: the graph names every file that uses it, which is what makes a change complete instead of local.
-The graph is kept current automatically, including files changed outside koda.
-`search`/`find_files` are for free text (a message, a TODO, a config value) or when the graph has no answer.";
+
+Always:
+- Before you edit an existing symbol, call codegraph query=symbol on it. The graph names \
+every file that uses it — that is the difference between a complete change and a local one.
+- Do not grep for a name you could look up. `search`/`find_files` are for free text (a \
+message, a TODO, a config value) or for when the graph has no answer.
+- The graph is current, including files changed outside koda. It never needs rebuilding.";
+
+/// The same job when there is no graph to ask. Kept parallel to
+/// `CODEGRAPH_GUIDANCE` so the base rules never have to name either tool: a
+/// rule in `BASE` telling the model to grep is a rule it follows, and it
+/// outranks anything further down the prompt.
+const FIND_GUIDANCE: &str = "\n\n\
+FINDING CODE: `search` for text inside files (regex), `find_files` for paths by glob, \
+`list_dir` to see what is there. Locate before you read; do not guess at paths.";
 
 const TEXT_PROTOCOL: &str = "\
 Tool calls use this exact JSON format, one per message, at the very end of your reply:
@@ -166,6 +182,8 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     }
     if cfg.codegraph {
         p.push_str(CODEGRAPH_GUIDANCE);
+    } else {
+        p.push_str(FIND_GUIDANCE);
     }
     if !(use_text_protocol || cfg.tool_protocol == ToolProtocol::Text) {
         p.push_str(PARALLEL_READS);
@@ -417,7 +435,7 @@ mod tests {
         );
         assert!(prompt.starts_with("Custom concise reviewer."));
         assert!(prompt.contains("CODE ANALYSIS"), "{prompt}");
-        assert!(prompt.contains("use `codegraph` FIRST"), "{prompt}");
+        assert!(prompt.contains("FIRST call"), "{prompt}");
         // The workflow has to name the calls, not just the tool: a local model
         // that is told "use codegraph" without a shape reaches for grep.
         assert!(prompt.contains("query=symbol"), "{prompt}");
@@ -444,6 +462,23 @@ mod tests {
             !text.contains("in ONE step"),
             "the text protocol carries one call per message: {text}"
         );
+    }
+
+    /// The base rules are what a small model actually follows. If they say
+    /// "use search to locate code", it greps -- whatever the codegraph section
+    /// further down asks for. So the rules must not name a locating tool at
+    /// all; that job belongs to whichever guidance block is in force.
+    #[test]
+    fn base_rules_do_not_pick_a_locating_tool() {
+        assert!(!base_prompt().contains("find_files"), "{}", base_prompt());
+        assert!(!base_prompt().contains("locate code"), "{}", base_prompt());
+        let cfg = Config {
+            codegraph: true,
+            ..Config::default()
+        };
+        let with = build(&cfg, Path::new("/tmp"), false, Mode::Execute);
+        assert!(with.contains("CODE ANALYSIS"));
+        assert!(!with.contains("FINDING CODE"), "one rule, not two: {with}");
     }
 
     #[test]
@@ -490,5 +525,7 @@ mod tests {
         );
         assert!(!prompt.contains("CODE ANALYSIS WORKFLOW"), "{prompt}");
         assert!(!prompt.contains("`codegraph`"), "{prompt}");
+        // With no graph, the model still has to be told how to find code.
+        assert!(prompt.contains("FINDING CODE"), "{prompt}");
     }
 }
