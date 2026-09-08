@@ -205,13 +205,27 @@ pub fn render_from(
                 Some("[x] ") | Some("[X] ") => ("☑ ".to_string(), &rest[4..], t.success),
                 _ => (marker.clone(), rest, t.heading),
             };
-            let mut spans = vec![
-                Span::raw(" ".repeat(lead)),
-                Span::styled(marker.clone(), Style::default().fg(marker_colour)),
-            ];
+            // The indent is applied *after* wrapping, not carried into it.
+            // `wrap_spans` drops a whitespace token that lands at the start of a
+            // line — which is right for a wrapped sentence and wrong for a
+            // nested list, whose indent is exactly that: leading whitespace on
+            // the first line. Carried in, it vanished, and every nested bullet
+            // rendered flush against the margin as though it were top level.
+            let mut spans = vec![Span::styled(
+                marker.clone(),
+                Style::default().fg(marker_colour),
+            )];
             spans.extend(inline(rest, Style::default(), t));
-            let hang = lead + marker.width();
-            out.extend(wrap_spans(spans, width, hang));
+            let body_width = width.saturating_sub(lead).max(8);
+            let wrapped = wrap_spans(spans, body_width, marker.width());
+            out.extend(wrapped.into_iter().map(|l| {
+                if lead == 0 {
+                    return l;
+                }
+                let mut row = vec![Span::raw(" ".repeat(lead))];
+                row.extend(l.spans);
+                Line::from(row)
+            }));
             continue;
         }
 
@@ -1252,5 +1266,83 @@ mod tests {
         let sign_colour = |l: &Line| l.spans.get(1).and_then(|s| s.style.fg);
         assert_eq!(sign_colour(&lines[1]), Some(th().diff_del));
         assert_eq!(sign_colour(&lines[2]), Some(th().diff_add));
+    }
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+
+    /// A nested bullet is nested because of its leading whitespace, and
+    /// `wrap_spans` drops leading whitespace — correctly, for a wrapped
+    /// sentence. Carried into the wrap, a list's indent vanished and every
+    /// sub-bullet rendered flush against the margin, at the same level as the
+    /// numbered item it belonged under.
+    #[test]
+    fn a_nested_list_keeps_its_indent() {
+        let t = crate::theme::resolve("auto");
+        let flat = |src: &str, w: usize| -> Vec<String> {
+            render(src, w, &t)
+                .iter()
+                .map(|l| l.spans.iter().map(|x| x.content.as_ref()).collect())
+                .collect()
+        };
+
+        let out = flat("1. one\n  - nested\n    - deeper\n", 40);
+        assert_eq!(out[0], "1. one");
+        assert!(out[1].starts_with("  ▪ "), "{:?}", out[1]);
+        assert!(out[2].starts_with("    ▪ "), "depth is kept: {:?}", out[2]);
+
+        // A top-level bullet still has no indent to lose.
+        let top = flat("- plain\n", 40);
+        assert!(top[0].starts_with("▪ "), "{:?}", top[0]);
+
+        // And a nested item that wraps keeps the indent on every line, while
+        // staying inside the width it was given.
+        let long = flat(&format!("1. x\n  - {}\n", "word ".repeat(30)), 40);
+        for l in &long[1..] {
+            if l.trim().is_empty() {
+                continue;
+            }
+            assert!(l.starts_with("  "), "wrapped line lost the indent: {l:?}");
+            assert!(
+                unicode_width::UnicodeWidthStr::width(l.as_str()) <= 40,
+                "{} wide: {l:?}",
+                unicode_width::UnicodeWidthStr::width(l.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn tamil_and_nested_lists_render_within_width() {
+        let src = "**தற்போதைய முதல்வர்:** சி. ஜோசப் விஜய் (தலபதி)\n\n\
+                   1. அரசு உருவாக்கம் (மே 2026): விஜயின் TVK கட்சி 108 இடங்களைப் பெற்றது.\n\
+                   \x20  - பெண்களை வலுப்படுத்துதல்\n\
+                   \x20  - நிர்வாகத்தை மேம்படுத்துதல்\n\
+                   2. பட்ஜெட் 2026-27\n";
+        let t = crate::theme::resolve("auto");
+        for width in [40usize, 72, 100] {
+            let lines = render(src, width, &t);
+            for l in &lines {
+                let w: usize = l
+                    .spans
+                    .iter()
+                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                assert!(w <= width, "at width {width}, a line is {w} wide: {l:?}");
+            }
+            let text: Vec<String> = lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect();
+            eprintln!("--- width {width} ---");
+            for l in &text {
+                eprintln!(
+                    "[{}] {}",
+                    unicode_width::UnicodeWidthStr::width(l.as_str()),
+                    l
+                );
+            }
+        }
     }
 }
