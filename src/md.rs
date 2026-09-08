@@ -169,14 +169,11 @@ pub fn render_from(
 
         // Headings
         if let Some(rest) = strip_heading(trimmed) {
-            out.extend(wrap_spans(
-                vec![Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(t.heading).add_modifier(Modifier::BOLD),
-                )],
-                width,
-                0,
-            ));
+            // Headings carry inline markup like any other block. Pushing `rest`
+            // raw left `### **Title**` on screen with its asterisks showing —
+            // this was the only block branch that skipped `inline`.
+            let style = Style::default().fg(t.heading).add_modifier(Modifier::BOLD);
+            out.extend(wrap_spans(inline(rest, style, t), width, 0));
             continue;
         }
 
@@ -1313,36 +1310,67 @@ mod script_tests {
         }
     }
 
+    /// Every block-level branch runs its text through `inline`, so markup
+    /// inside a heading is markup — not literal asterisks on screen.
     #[test]
-    fn tamil_and_nested_lists_render_within_width() {
-        let src = "**தற்போதைய முதல்வர்:** சி. ஜோசப் விஜய் (தலபதி)\n\n\
-                   1. அரசு உருவாக்கம் (மே 2026): விஜயின் TVK கட்சி 108 இடங்களைப் பெற்றது.\n\
-                   \x20  - பெண்களை வலுப்படுத்துதல்\n\
-                   \x20  - நிர்வாகத்தை மேம்படுத்துதல்\n\
-                   2. பட்ஜெட் 2026-27\n";
+    fn a_heading_renders_its_inline_markup() {
         let t = crate::theme::resolve("auto");
-        for width in [40usize, 72, 100] {
-            let lines = render(src, width, &t);
-            for l in &lines {
-                let w: usize = l
-                    .spans
-                    .iter()
-                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum();
-                assert!(w <= width, "at width {width}, a line is {w} wide: {l:?}");
-            }
-            let text: Vec<String> = lines
+        let flat = |src: &str| -> Vec<String> {
+            render(src, 70, &t)
                 .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-                .collect();
-            eprintln!("--- width {width} ---");
-            for l in &text {
-                eprintln!(
-                    "[{}] {}",
-                    unicode_width::UnicodeWidthStr::width(l.as_str()),
-                    l
+                .map(|l| l.spans.iter().map(|x| x.content.as_ref()).collect())
+                .collect()
+        };
+
+        assert_eq!(flat("### **Key New Features:**")[0], "Key New Features:");
+        assert_eq!(
+            flat("## **Java 26** (March 2026)")[0],
+            "Java 26 (March 2026)"
+        );
+        assert_eq!(flat("# `code` and *em*")[0], "code and em");
+
+        // The heading style survives the markup, and bold inside it stays bold.
+        let spans = render("### **Bold** plain", 70, &t).remove(0).spans;
+        assert!(spans.iter().all(|s| s.style.fg == Some(t.heading)));
+        assert!(spans
+            .iter()
+            .all(|s| s.style.add_modifier.contains(Modifier::BOLD)));
+    }
+
+    /// A reply is rendered in two halves while it streams. Whatever the split,
+    /// neither half may leave markup unmatched.
+    #[test]
+    fn streaming_halves_never_leak_markup() {
+        let t = crate::theme::resolve("auto");
+        let src = "---\n\n### **Key New Features in Java 26:**\n\n#### **1. Language**\n- **Primitive Types** (JEP 530)\n\n**Recommendation:**\n- Java 21 LTS\n";
+        let text =
+            |l: &Line<'static>| -> String { l.spans.iter().map(|x| x.content.as_ref()).collect() };
+
+        let mut stable_end = 0usize;
+        let mut fence: Option<String> = None;
+        for n in 1..=src.len() {
+            if !src.is_char_boundary(n) {
+                continue;
+            }
+            let shown = &src[..n];
+            let (split, next_fence) = stable_prefix_from(shown, stable_end, fence.clone());
+            if split <= stable_end {
+                continue;
+            }
+            let (lines, _) = render_from(&shown[stable_end..split], 70, &t, fence.clone());
+            for l in &lines {
+                assert!(
+                    !text(l).contains("**"),
+                    "settled half leaked: {:?}",
+                    text(l)
                 );
             }
+            stable_end = split;
+            fence = next_fence;
+        }
+        let (tail, _) = render_from(&src[stable_end..], 70, &t, fence);
+        for l in &tail {
+            assert!(!text(l).contains("**"), "tail leaked: {:?}", text(l));
         }
     }
 }

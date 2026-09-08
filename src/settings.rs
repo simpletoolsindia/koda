@@ -524,7 +524,12 @@ impl Settings {
             Row::Debug => on(self.cfg.debug),
             Row::WebUi => {
                 if self.cfg.web_ui {
-                    format!("on :{}", self.cfg.web_ui_port)
+                    // Report the port in use, not the one asked for: `bind_near`
+                    // walks forward when another session already holds it.
+                    let port = crate::webui::address()
+                        .map(|a| a.port())
+                        .unwrap_or(self.cfg.web_ui_port);
+                    format!("on :{port}")
                 } else {
                     "off".to_string()
                 }

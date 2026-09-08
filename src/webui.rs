@@ -301,6 +301,14 @@ async fn bind_near(addr: SocketAddr) -> std::io::Result<TcpListener> {
 /// conversation never appeared in it.
 const PORT_SEARCH: u16 = 8;
 
+/// The address the web UI actually listens on, once it is up.
+static BOUND: OnceLock<SocketAddr> = OnceLock::new();
+
+/// Where the web UI is serving, or `None` when it is off or failed to bind.
+pub fn address() -> Option<SocketAddr> {
+    BOUND.get().copied()
+}
+
 pub async fn start(root: PathBuf, port: u16, detail: String) -> Result<SocketAddr, String> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = match bind_near(addr).await {
@@ -328,6 +336,10 @@ pub async fn start(root: PathBuf, port: u16, detail: String) -> Result<SocketAdd
         .local_addr()
         .map_err(|e| format!("web UI off: {e}"))?;
     crate::tel_info!("webui", "web UI listening", "addr" => bound);
+    // The bound port is not necessarily the configured one — `bind_near` walks
+    // forward when the port is taken. The TUI shows whatever we actually got,
+    // so record it here rather than letting the UI advertise a guess.
+    let _ = BOUND.set(bound);
     let ctx = Arc::new(Ctx { root, detail });
     tokio::spawn(async move {
         loop {

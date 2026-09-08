@@ -1316,6 +1316,21 @@ impl App {
                 Span::styled(format!(" {desc}"), t.dim()),
             ]));
         }
+        // The web UI binds before the TUI takes the screen, so the address it
+        // printed to stderr is gone by the time anyone could read it. Show it
+        // here, and only when a socket actually came up — the port it settled
+        // on is not always the configured one.
+        if let Some(addr) = crate::webui::address() {
+            lines.push(Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(format!("{} ", g.bullet), t.dim()),
+                Span::styled(
+                    format!("{:<12}", "web ui"),
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" http://{addr}"), t.dim()),
+            ]));
+        }
         lines.push(Line::default());
 
         self.transcript.raw(lines);
@@ -4044,6 +4059,11 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     right.push(Segment::new(app.mode.label().to_string(), mode_colour).bold());
     if app.web {
         right.push(Segment::new("web", t.info));
+    }
+    // Which port the web UI landed on, so it stays answerable without scrolling
+    // back to the banner — several sessions at once each get a different one.
+    if let Some(addr) = crate::webui::address() {
+        right.push(Segment::new(format!("ui :{}", addr.port()), t.muted));
     }
     if app.auto_tier != AutoTier::Ask {
         // Full-auto is the loud one (red): it means no human in the loop.
