@@ -203,7 +203,16 @@ pub struct Config {
     pub model: String,
     pub temperature: f64,
     pub top_p: f64,
-    /// 0 = let the server decide.
+    /// Ceiling on one reply. **0 (the default) sends no ceiling at all**: the
+    /// context window is the real limit, and every provider knows its own
+    /// output cap better than koda does — a cloud model with a 200k window may
+    /// still refuse anything over 8k of output, so inventing a number here
+    /// breaks the models that already work.
+    ///
+    /// The one exception is earned at runtime: if a server's own default turns
+    /// out so small that a reasoning model spends all of it thinking and never
+    /// answers, koda asks for the room the window has left, for that session
+    /// only. Set this yourself only to hold a runaway model back.
     pub max_tokens: u32,
     /// Soft budget used to trim history before each request.
     pub context_tokens: usize,
@@ -889,7 +898,8 @@ model = ""
 
 temperature = 0.2
 top_p = 0.95
-max_tokens = 0          # 0 = server default
+max_tokens = 0          # 0 = no ceiling; the provider's own output limit
+                        # applies. Set a number only to cap a runaway model.
 context_tokens = 16000  # soft budget; requests are curated to fit
 
 # auto   = native tool calls + text-block fallback (best for local models)

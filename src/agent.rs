@@ -260,6 +260,9 @@ struct StepAcc {
     partials: BTreeMap<usize, (Option<String>, String, String)>,
     /// Completed `<tool_call>` payloads from the text protocol.
     text_calls: Vec<String>,
+    /// The model spent the whole server-chosen budget thinking and produced no
+    /// answer, so koda should name a budget from here on.
+    starved: bool,
     /// index -> arguments length at the last draft report, so a status update
     /// costs one event per few hundred bytes rather than one per token.
     drafted: BTreeMap<usize, usize>,
@@ -350,6 +353,10 @@ pub struct Agent {
     /// Set once a server has said this model cannot think, so the hint is not
     /// sent again for the rest of the session.
     no_reasoning: bool,
+    /// Set once a turn has ended with nothing to show because the model spent
+    /// the server's default output budget thinking. Only then does koda start
+    /// naming a budget of its own.
+    starved_of_output: bool,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
     /// Outcomes for read-only tools pre-computed concurrently for the current
@@ -500,6 +507,7 @@ impl Agent {
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
             no_reasoning: false,
+            starved_of_output: false,
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
@@ -585,6 +593,7 @@ impl Agent {
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
             no_reasoning: false,
+            starved_of_output: false,
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
@@ -595,6 +604,35 @@ impl Agent {
             trace_turn: None,
             last_approval: None,
         }
+    }
+
+    /// How many tokens the model may spend on this reply.
+    ///
+    /// Normally: whatever the user configured, and `0` means send no ceiling at
+    /// all — which is right, because the context window is the real limit and
+    /// every provider knows its own output cap better than koda does. Deriving
+    /// a big number here and sending it unconditionally would break the models
+    /// that work today: a cloud model with a 200k context and an 8k output cap
+    /// rejects `max_tokens: 32768` outright.
+    ///
+    /// The exception is earned, not assumed. A server whose own default is a
+    /// few hundred tokens leaves a reasoning model no room to answer after it
+    /// has finished thinking, and the turn produces nothing at all. When that
+    /// has actually happened, koda asks for the rest of the window instead —
+    /// once, for the rest of the session, and only for the server that did it.
+    fn reply_budget(&self) -> u32 {
+        if self.cfg.max_tokens > 0 {
+            return self.cfg.max_tokens;
+        }
+        if !self.starved_of_output {
+            return 0; // no ceiling: the provider's own limit applies
+        }
+        let prompt = self.history_tokens() + self.system.len() / 4;
+        let left = self
+            .cfg
+            .context_tokens
+            .saturating_sub(prompt + prompt / 8 + 512);
+        left.clamp(2048, 16_384) as u32
     }
 
     /// Tokens a single request may spend on history: the window, less the
@@ -1558,7 +1596,7 @@ impl Agent {
             messages,
             temperature: self.cfg.temperature,
             top_p: self.cfg.top_p,
-            max_tokens: self.cfg.max_tokens,
+            max_tokens: self.reply_budget(),
             tools: if self.text_mode {
                 None
             } else {
@@ -1639,8 +1677,12 @@ impl Agent {
             finish_reason,
             partials,
             text_calls,
+            starved,
             drafted: _,
         } = acc;
+        if starved {
+            self.starved_of_output = true;
+        }
 
         if let Some(e) = stream_err {
             if text.trim().is_empty() {
@@ -4828,7 +4870,14 @@ fn absorb(
                 // truncation — the turn simply never produces a word. Say what
                 // actually happened, because "raise max_tokens" is advice that
                 // only makes sense once you know where the tokens went.
+                let starved = acc.text.trim().is_empty() && acc.reasoning_len > 0;
                 let _ = tx.send(Event::Notice(out_of_budget(&acc.text, acc.reasoning_len)));
+                if starved {
+                    // Tell the agent, so the next request names a budget rather
+                    // than trusting a server default that has just proved too
+                    // small. Nothing changes for a provider that never does it.
+                    acc.starved = true;
+                }
             }
         }
     }
@@ -5480,6 +5529,40 @@ mod tests {
         ] {
             assert!(!looks_like_embedder(no), "{no} is not an embedder");
         }
+    }
+
+    /// koda runs against big cloud models as well as small local ones, and a
+    /// ceiling it invented would break the former: a model with a 200k context
+    /// and an 8k output cap rejects a large `max_tokens` outright. So by
+    /// default koda sends none at all, and only names one after a server has
+    /// actually starved a turn of output.
+    #[test]
+    fn no_ceiling_is_sent_until_a_server_has_earned_one() {
+        let mut agent = agent_with(crate::config::Config {
+            context_tokens: 32_000,
+            max_tokens: 0,
+            ..crate::config::Config::default()
+        });
+        agent.system = "s".repeat(4_000);
+        assert_eq!(
+            agent.reply_budget(),
+            0,
+            "the provider's own output limit must apply until proven too small"
+        );
+
+        // After a turn that thought its whole budget away, ask for the room the
+        // window has left — bounded, so it cannot exceed a cloud output cap by
+        // an absurd margin.
+        agent.starved_of_output = true;
+        let earned = agent.reply_budget();
+        assert!((2048..=16_384).contains(&earned), "got {earned}");
+
+        // A configured value always wins, in either state.
+        let explicit = agent_with(crate::config::Config {
+            max_tokens: 700,
+            ..crate::config::Config::default()
+        });
+        assert_eq!(explicit.reply_budget(), 700);
     }
 
     /// Running out of budget mid-sentence and running out of budget while still
