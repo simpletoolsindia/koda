@@ -450,6 +450,11 @@ pub struct App {
     /// tests"), from the latest tool start — shown in the working status so the
     /// user sees live activity, not a generic spinner.
     activity: Option<String>,
+    /// When the stream last produced anything. Some servers buffer a whole
+    /// tool call and flush it in one delta, so there are genuinely no bytes
+    /// to count during a long write — elapsed time is then the only honest
+    /// sign that the connection is alive rather than hung.
+    last_delta: Option<Instant>,
     /// Turns this session, which is the costume's die.
     turn_count: u64,
     /// A turn wrote or edited a file, which is one of the two ways a turn
@@ -852,10 +857,12 @@ impl App {
                 self.draft_seen = 0;
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
+                self.last_delta = Some(Instant::now());
             }
             Event::Text(chunk) => {
                 // The model is producing the reply — say so, so the status row
                 // isn't stuck on a stale tool label or a generic quip.
+                self.last_delta = Some(Instant::now());
                 self.activity = Some("writing the reply".into());
                 self.received += chunk.len();
                 self.transcript.assistant_delta(&chunk);
@@ -863,6 +870,7 @@ impl App {
             Event::Reasoning(chunk) => {
                 // Reasoning can run for many seconds before any visible output;
                 // surface it so a thinking model never reads as a frozen app.
+                self.last_delta = Some(Instant::now());
                 self.activity = Some("thinking".into());
                 self.received += chunk.len();
                 self.transcript.reasoning_delta(&chunk);
@@ -886,6 +894,7 @@ impl App {
                     self.dance_call = Some(id.clone());
                 }
                 let phrase = activity_label(&name, &label);
+                self.last_delta = Some(Instant::now());
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
                 } else {
@@ -912,11 +921,19 @@ impl App {
                 self.received += bytes.saturating_sub(self.draft_seen);
                 self.draft_seen = bytes;
                 let phrase = activity_label(&name, &target);
-                let phrase = if bytes >= 1024 {
-                    format!("{phrase} · {}", crate::tools::human_size(bytes as u64))
+                // Tokens, not bytes: it is the unit the wait is actually
+                // measured in, and it starts moving from the first delta
+                // rather than only once a kilobyte has landed — a counter
+                // that sits at nothing for a second reads as a hang.
+                let phrase = if bytes >= 32 {
+                    format!(
+                        "{phrase} · {}",
+                        crate::tools::human_tokens(crate::tools::approx_tokens(bytes))
+                    )
                 } else {
                     phrase
                 };
+                self.last_delta = Some(Instant::now());
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
                 } else {
@@ -943,6 +960,7 @@ impl App {
                 // Done with this tool — the model now decides the next step,
                 // which can take a few seconds. Say so rather than dropping to a
                 // generic quip that reads as idle.
+                self.last_delta = Some(Instant::now());
                 self.activity = Some("thinking about the next step".into());
                 // A write may have created a file, so `@` completion is stale.
                 if summary.starts_with("created") || summary.starts_with("wrote") {
@@ -3988,6 +4006,11 @@ fn activity_label(name: &str, label: &str) -> String {
 
 /// The bottom bar: model, project, branch, context. Chevron-separated segments,
 /// each in its own colour, so the fields are distinguishable at a glance.
+/// How long the stream must be silent before the status row starts counting.
+/// Short enough to answer "is it stuck?", long enough that a normally chatty
+/// stream never shows a timer at all.
+const QUIET_AFTER_SECS: u64 = 3;
+
 fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     use panel::Segment;
     let t = &app.theme;
@@ -4018,6 +4041,17 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
             let text: String = act.chars().take(cap).collect();
             let text = if act.chars().count() > cap {
                 format!("{text}…")
+            } else {
+                text
+            };
+            // Past a few seconds of silence, say how long. A label that never
+            // changes reads as a hang even while the spinner turns.
+            let quiet = app
+                .last_delta
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or_default();
+            let text = if quiet >= QUIET_AFTER_SECS && !m.tiny {
+                format!("{text} · {quiet}s")
             } else {
                 text
             };
@@ -5297,6 +5331,7 @@ pub async fn run(
         cancelling: false,
         compacting: None,
         activity: None,
+        last_delta: None,
         turn_count: 0,
         wrote_this_turn: false,
         visitor_at: None,

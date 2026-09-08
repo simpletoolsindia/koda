@@ -4549,7 +4549,12 @@ const DECLARATION_KEYWORDS: &[&str] = &[
 ];
 
 /// Report a draft at most once per this many bytes of arguments.
-const DRAFT_STEP: usize = 512;
+///
+/// 512 was too coarse: a local model emitting ~30 tokens/s took four seconds to
+/// move the counter, which is long enough to read as a hang — the exact thing
+/// this reports away. 128 bytes is about a second at that rate, and the event
+/// is a channel send of two short strings.
+const DRAFT_STEP: usize = 128;
 
 /// What a half-written tool call is about, from JSON that is still arriving.
 ///
@@ -5914,9 +5919,14 @@ mod tests {
             drafts.len() > 5,
             "the number has to visibly move: {drafts:?}"
         );
+        // 12.8 KB at one event per DRAFT_STEP bytes. The bound is what keeps
+        // this a throttle rather than a per-token firehose; it moved with the
+        // step when the step got finer, and still rules out one-per-token
+        // (which would be ~3,200 here).
         assert!(
-            drafts.len() < 60,
-            "one event per few hundred bytes, not per token: {drafts:?}"
+            drafts.len() < 150,
+            "one event per hundred-odd bytes, not per token: {}",
+            drafts.len()
         );
         assert!(
             drafts.windows(2).all(|w| w[1] > w[0]),
