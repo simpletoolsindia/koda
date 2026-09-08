@@ -4669,6 +4669,26 @@ pub fn user_message(e: &anyhow::Error) -> String {
     }
 }
 
+/// What to say when the model stopped because it ran out of output budget.
+///
+/// Two different failures wear the same `finish_reason`. A truncated reply is
+/// obvious — there is a reply, and it stops mid-sentence. A thinking model that
+/// spends the entire budget thinking produces *nothing at all*, which reads as
+/// a hang rather than a truncation: the turn simply never says a word. Measured
+/// against a 9B on a local server, the same request returned 2,064 characters
+/// of reasoning and zero content at one budget, and 2,876 of reasoning plus
+/// 7,644 of answer at a larger one — so the fix is real and worth naming.
+fn out_of_budget(text: &str, reasoning_len: usize) -> String {
+    if text.trim().is_empty() && reasoning_len > 0 {
+        "the model used its whole output budget thinking and never reached an answer — \
+         raise max_tokens (0 means the server decides, which is often too little for a \
+         reasoning model), or turn thinking off"
+            .into()
+    } else {
+        "the model hit its output limit; raise max_tokens if replies look cut off".into()
+    }
+}
+
 /// Whether the server refused the request because the model cannot think.
 ///
 /// Ollama answers `"gemma3:4b" does not support thinking` **[measured]**;
@@ -4803,10 +4823,12 @@ fn absorb(
         StreamEvent::Finish(reason) => {
             acc.finish_reason = reason.clone();
             if reason.as_deref() == Some("length") && !quiet {
-                let _ = tx.send(Event::Notice(
-                    "the model hit its output limit; raise max_tokens if replies look cut off"
-                        .into(),
-                ));
+                // A thinking model that spends the whole budget thinking sends
+                // back nothing at all, which reads as a hang rather than as a
+                // truncation — the turn simply never produces a word. Say what
+                // actually happened, because "raise max_tokens" is advice that
+                // only makes sense once you know where the tokens went.
+                let _ = tx.send(Event::Notice(out_of_budget(&acc.text, acc.reasoning_len)));
             }
         }
     }
@@ -5458,6 +5480,28 @@ mod tests {
         ] {
             assert!(!looks_like_embedder(no), "{no} is not an embedder");
         }
+    }
+
+    /// Running out of budget mid-sentence and running out of budget while still
+    /// thinking are the same `finish_reason` and completely different problems.
+    /// The second produces no reply at all, so it reads as a hang, and the
+    /// advice that fixes it is only actionable once you know where the tokens
+    /// went.
+    #[test]
+    fn an_empty_reply_after_thinking_is_explained_as_such() {
+        let thought_it_all_away = out_of_budget("", 2064);
+        assert!(
+            thought_it_all_away.contains("thinking"),
+            "{thought_it_all_away}"
+        );
+        assert!(thought_it_all_away.contains("max_tokens"));
+
+        // A reply that exists but stops short is the ordinary truncation.
+        let cut_off = out_of_budget("I'll create a petshop website. Let me", 0);
+        assert!(cut_off.contains("cut off"), "{cut_off}");
+        // …and so is one that thought *and* answered before running out.
+        let both = out_of_budget("I'll create a petshop website. Let me", 900);
+        assert!(both.contains("cut off"), "{both}");
     }
 
     /// A model that cannot think is not a model koda cannot use. Ollama refuses
