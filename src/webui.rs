@@ -267,16 +267,30 @@ struct Ctx {
 /// Start the web UI server if enabled. Returns the bound address on success.
 /// Failures are logged and swallowed — the UI is optional and must never stop
 /// koda from running.
-pub async fn start(root: PathBuf, port: u16, detail: String) -> Option<SocketAddr> {
+pub async fn start(root: PathBuf, port: u16, detail: String) -> Result<SocketAddr, String> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
             crate::tel_warn!("webui", format!("could not bind {addr}: {e}"));
-            return None;
+            // The commonest cause by far is a second koda in another terminal,
+            // including one suspended with ctrl+z — which still holds the port
+            // while answering nothing. Say that, rather than leaving the user
+            // to wonder why a documented feature is silently absent.
+            return Err(if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!(
+                    "web UI off: port {} is already taken, most likely by another koda \
+                     (a session suspended with ctrl+z still holds it — `fg` it, or close it)",
+                    addr.port()
+                )
+            } else {
+                format!("web UI off: could not listen on {addr} ({e})")
+            });
         }
     };
-    let bound = listener.local_addr().ok()?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| format!("web UI off: {e}"))?;
     crate::tel_info!("webui", "web UI listening", "addr" => bound);
     let ctx = Arc::new(Ctx { root, detail });
     tokio::spawn(async move {
@@ -297,7 +311,7 @@ pub async fn start(root: PathBuf, port: u16, detail: String) -> Option<SocketAdd
             }
         }
     });
-    Some(bound)
+    Ok(bound)
 }
 
 /// Largest request we will read. Generous enough for a pasted system prompt,
@@ -1975,6 +1989,28 @@ mod tests {
         // An empty query is a clean error, not a full scan dump.
         assert!(symbol_json(&root, "  ").contains("name is required"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A port already taken is the commonest reason the web UI is missing, and
+    /// it used to be reported only to the log — where someone wondering why the
+    /// UI is absent will not look. The message has to name the cause.
+    #[tokio::test]
+    async fn a_taken_port_explains_itself() {
+        let dir = std::env::temp_dir().join(format!("koda-webui-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp");
+        // Hold a port, then ask koda's server for the same one.
+        let held = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = held.local_addr().expect("addr").port();
+        let err = start(dir.clone(), port, "medium".into())
+            .await
+            .expect_err("the port is taken");
+        assert!(err.contains("already taken"), "{err}");
+        assert!(err.contains(&port.to_string()), "{err}");
+        // And it names the way out, since a suspended koda still holds a port.
+        assert!(err.contains("ctrl+z") && err.contains("fg"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

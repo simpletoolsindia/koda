@@ -246,9 +246,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     if cfg.web_ui && !cli.print {
         // The trace ring only pays for itself when something can display it.
         trace::set_enabled(true);
-        if let Some(addr) = webui::start(root.clone(), cfg.web_ui_port, cfg.ui_detail.clone()).await
-        {
-            eprintln!("koda: web UI at http://{addr}");
+        match webui::start(root.clone(), cfg.web_ui_port, cfg.ui_detail.clone()).await {
+            Ok(addr) => eprintln!("koda: web UI at http://{addr}"),
+            // Not fatal — koda runs fine without it — but not silent either.
+            Err(why) => eprintln!("koda: {why}"),
         }
     }
     tel_info!(
