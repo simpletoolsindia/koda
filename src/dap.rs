@@ -441,6 +441,23 @@ impl Client {
         }
     }
 
+    /// Wait for captured output to contain `needle`, then return everything.
+    ///
+    /// Output arrives on a reader thread, so a caller that has just seen a
+    /// response has no guarantee the matching output has been drained yet.
+    /// Used by tests; production code reads [`output`] and takes what is there.
+    #[cfg(test)]
+    pub fn await_output(&self, needle: &str, wait: Duration) -> String {
+        let deadline = Instant::now() + wait;
+        loop {
+            let got = self.output();
+            if got.contains(needle) || Instant::now() >= deadline {
+                return got;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Captured program output, oldest first.
     pub fn output(&self) -> String {
         let s = self.state.0.lock().expect("lock");
@@ -1582,8 +1599,12 @@ while True:
         let body = s.sync_breakpoints("/app/main.py").expect("setBreakpoints");
         assert_eq!(body["breakpoints"].as_array().map(Vec::len), Some(2));
 
-        // What actually went over the wire, echoed back by the adapter.
-        let sent = s.client.output();
+        // What actually went over the wire, echoed back by the adapter on its
+        // stderr — which a separate thread drains, so it has not necessarily
+        // arrived by the time the *response* has. Wait for it rather than
+        // assuming the two race in our favour: asserting immediately made this
+        // test fail about one run in twenty.
+        let sent = s.client.await_output("logMessage", Duration::from_secs(5));
         assert!(sent.contains("\"condition\": \"total > 40\""), "{sent}");
         assert!(sent.contains("\"hitCondition\": \">5\""), "{sent}");
         assert!(sent.contains("\"logMessage\""), "{sent}");
