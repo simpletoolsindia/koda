@@ -1539,11 +1539,15 @@ impl Agent {
         // result is attached when the step closes.
         let step =
             crate::trace::open_step(self.trace_turn, crate::trace::StepKind::Model, &self.model);
-        let request_json = if step.is_some() {
-            serde_json::to_string_pretty(&req.to_json()).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // Attach the request to the step now rather than when the call closes:
+        // a trace watching a slow call should show what was asked while it is
+        // still being answered.
+        if step.is_some() {
+            crate::trace::set_request(
+                step,
+                serde_json::to_string_pretty(&req.to_json()).unwrap_or_default(),
+            );
+        }
         let prompt_tokens = self.history_tokens();
 
         let (stx, mut srx) = mpsc::unbounded_channel::<StreamEvent>();
@@ -1602,7 +1606,6 @@ impl Agent {
                 crate::trace::finish_model(
                     step,
                     crate::trace::ModelCall {
-                        request: request_json,
                         reasoning,
                         finish_reason,
                         prompt_tokens,
@@ -1649,7 +1652,6 @@ impl Agent {
         crate::trace::finish_model(
             step,
             crate::trace::ModelCall {
-                request: request_json,
                 reasoning,
                 text: text.clone(),
                 finish_reason,

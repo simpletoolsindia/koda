@@ -301,10 +301,13 @@ pub fn finish_model(step: Option<StepRef>, mut call: ModelCall) {
     cap(&mut call.reasoning, CAP_FIELD);
     cap(&mut call.text, CAP_FIELD);
     with_step(step, move |s| {
-        // The raw SSE and the retry count were streamed in while the call was
-        // open; the closing payload must not wipe them.
+        // The request, the raw SSE and the retry count were all recorded while
+        // the call was open; the closing payload must not wipe them.
         if let Some(open) = s.model.take() {
             call.response = open.response;
+            if call.request.is_empty() {
+                call.request = open.request;
+            }
             if call.retries == 0 {
                 call.retries = open.retries;
             }
@@ -337,6 +340,22 @@ pub fn finish_compaction(step: Option<StepRef>, before: usize, after: usize) {
         s.note = Some(format!("{before} → {after} tokens"));
         s.running = false;
         s.ms = ((now() - s.started).max(0.0) * 1000.0) as u64;
+    });
+}
+
+/// Record the request body on a step that has just opened.
+///
+/// Called before the call goes out, not after it comes back: the request is
+/// known in full the moment it is built, and a trace viewer watching a slow
+/// call wants to read what was *asked* while it waits. It used to be attached
+/// only by `finish_model`, so an in-flight call showed a growing response
+/// above an empty request -- the pane was blank for exactly as long as it was
+/// interesting.
+pub fn set_request(step: Option<StepRef>, mut request: String) {
+    let Some(step) = step else { return };
+    cap(&mut request, CAP_REQUEST);
+    with_step(step, move |s| {
+        s.model.get_or_insert_with(ModelCall::default).request = request;
     });
 }
 
@@ -485,6 +504,38 @@ mod tests {
         finish_model(step, ModelCall::default());
         end_turn(None, Status::Ok, "x", 0);
         assert!(summaries().is_empty());
+    }
+
+    /// The request is the half of a call you want to read *while* it is slow.
+    /// It used to be attached only when the call closed, so a live trace showed
+    /// a growing response above an empty request pane.
+    #[test]
+    fn an_in_flight_call_already_shows_what_was_asked() {
+        let _g = guard();
+        fresh();
+        let t = begin_turn("execute", "granite", "http://x/v1", "fix the bug");
+        let step = open_step(t, StepKind::Model, "granite");
+        set_request(step, "{\"messages\":[{\"role\":\"user\"}]}".into());
+        append_sse(step, b"data: {\"choices\":[]}\n");
+
+        let open_turn = live().expect("a turn is open");
+        let m = open_turn.steps[0].model.as_ref().expect("model recorded");
+        assert!(open_turn.steps[0].running, "the call is still open");
+        assert!(m.request.contains("messages"), "{:?}", m.request);
+        assert!(!m.response.is_empty(), "and the response is streaming in");
+
+        // Closing the call must not wipe what was recorded while it was open.
+        finish_model(
+            step,
+            ModelCall {
+                text: "done".into(),
+                ..Default::default()
+            },
+        );
+        let done = live().expect("still open");
+        let m = done.steps[0].model.as_ref().expect("model");
+        assert!(m.request.contains("messages"), "request survived the close");
+        assert_eq!(m.text, "done");
     }
 
     #[test]
