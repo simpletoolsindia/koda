@@ -267,9 +267,43 @@ struct Ctx {
 /// Start the web UI server if enabled. Returns the bound address on success.
 /// Failures are logged and swallowed — the UI is optional and must never stop
 /// koda from running.
+/// Bind the wanted port, or the next free one after it.
+///
+/// Port 0 means "any", which the tests use and which must not be walked.
+async fn bind_near(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let first = TcpListener::bind(addr).await;
+    if addr.port() == 0 || first.is_ok() {
+        return first;
+    }
+    let Err(e) = first else { unreachable!() };
+    if e.kind() != std::io::ErrorKind::AddrInUse {
+        return Err(e);
+    }
+    for step in 1..=PORT_SEARCH {
+        let mut next = addr;
+        let Some(p) = addr.port().checked_add(step) else {
+            break;
+        };
+        next.set_port(p);
+        if let Ok(l) = TcpListener::bind(next).await {
+            return Ok(l);
+        }
+    }
+    Err(e)
+}
+
+/// How many ports past the configured one to try before giving up.
+///
+/// A second koda in another terminal is the normal case, not an error: people
+/// keep one open per project. Taking the next free port gives each session its
+/// own UI, where refusing left the later session with none — and, worse, left
+/// the user looking at the *first* session's trace wondering why their new
+/// conversation never appeared in it.
+const PORT_SEARCH: u16 = 8;
+
 pub async fn start(root: PathBuf, port: u16, detail: String) -> Result<SocketAddr, String> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let listener = match TcpListener::bind(addr).await {
+    let listener = match bind_near(addr).await {
         Ok(l) => l,
         Err(e) => {
             crate::tel_warn!("webui", format!("could not bind {addr}: {e}"));
@@ -279,9 +313,11 @@ pub async fn start(root: PathBuf, port: u16, detail: String) -> Result<SocketAdd
             // to wonder why a documented feature is silently absent.
             return Err(if e.kind() == std::io::ErrorKind::AddrInUse {
                 format!(
-                    "web UI off: port {} is already taken, most likely by another koda \
-                     (a session suspended with ctrl+z still holds it — `fg` it, or close it)",
-                    addr.port()
+                    "web UI off: ports {}-{} are all taken, most likely by other koda \
+                     sessions (one suspended with ctrl+z still holds its port — `fg` it, \
+                     or close it)",
+                    addr.port(),
+                    addr.port().saturating_add(PORT_SEARCH)
                 )
             } else {
                 format!("web UI off: could not listen on {addr} ({e})")
@@ -1991,6 +2027,40 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A second koda in another terminal is the normal case. It used to get no
+    /// web UI at all, which left the user watching the *first* session's trace
+    /// and wondering why their new conversation never showed up in it.
+    #[tokio::test]
+    async fn a_second_session_gets_the_next_port() {
+        let dir = std::env::temp_dir().join(format!("koda-webui-next-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp");
+        // Take a port, then ask for the same one.
+        let held = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let taken = held.local_addr().expect("addr").port();
+        let got = start(dir.clone(), taken, "medium".into())
+            .await
+            .expect("a nearby port");
+        assert_ne!(got.port(), taken, "it cannot have taken the busy one");
+        assert!(
+            got.port() > taken && got.port() <= taken + PORT_SEARCH,
+            "expected a port just after {taken}, got {}",
+            got.port()
+        );
+        // And it really is serving, not merely bound — a socket that listens
+        // and never answers is the failure mode that started all this.
+        let mut c = tokio::net::TcpStream::connect(got).await.expect("connect");
+        c.write_all(b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write");
+        let mut buf = Vec::new();
+        c.read_to_end(&mut buf).await.expect("read");
+        let body = String::from_utf8_lossy(&buf);
+        assert!(body.contains("200 OK") && body.contains("busy"), "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A port already taken is the commonest reason the web UI is missing, and
     /// it used to be reported only to the log — where someone wondering why the
     /// UI is absent will not look. The message has to name the cause.
@@ -1999,15 +2069,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("koda-webui-busy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp");
         // Hold a port, then ask koda's server for the same one.
-        let held = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        // Block the whole search window, so there is nowhere to fall back to.
+        let mut held = Vec::new();
+        let base = {
+            let l = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind");
+            let p = l.local_addr().expect("addr").port();
+            held.push(l);
+            p
+        };
+        for step in 1..=PORT_SEARCH {
+            if let Ok(l) = tokio::net::TcpListener::bind(("127.0.0.1", base + step)).await {
+                held.push(l);
+            }
+        }
+        let err = start(dir.clone(), base, "medium".into())
             .await
-            .expect("bind");
-        let port = held.local_addr().expect("addr").port();
-        let err = start(dir.clone(), port, "medium".into())
-            .await
-            .expect_err("the port is taken");
-        assert!(err.contains("already taken"), "{err}");
-        assert!(err.contains(&port.to_string()), "{err}");
+            .expect_err("every port in the window is taken");
+        assert!(err.contains("all taken"), "{err}");
+        assert!(err.contains(&base.to_string()), "{err}");
         // And it names the way out, since a suspended koda still holds a port.
         assert!(err.contains("ctrl+z") && err.contains("fg"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
