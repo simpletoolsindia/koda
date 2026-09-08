@@ -916,16 +916,6 @@ fn is_running(item: &Item) -> bool {
     matches!(item, Item::Tool { ok: None, .. })
 }
 
-/// A step's status as a number, so the render cache can see it change. Spread
-/// far apart so two steps swapping statuses cannot sum to the same total.
-fn status_rank(s: TodoStatus) -> usize {
-    match s {
-        TodoStatus::Pending => 0,
-        TodoStatus::Active => 977,
-        TodoStatus::Done => 4_099,
-    }
-}
-
 fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
     let (len, flags) = match item {
         Item::User(s) | Item::Assistant(s) | Item::Notice(s) | Item::Error(s) => (s.len(), 0u8),
@@ -933,18 +923,20 @@ fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
         // key has to describe the content or one will render as the other.
         Item::Raw(lines) => (raw_hash(lines), 64),
         Item::Todos(items) => (
-            // Statuses are part of what is drawn, so they belong in the key:
+            // Statuses are part of what is drawn, so they belong in the key --
             // keyed on the done count alone, a step going from pending to
-            // in_progress changed nothing the cache could see.
-            items
-                .iter()
-                .map(|i| i.text.len() + 1 + status_rank(i.status))
-                .sum::<usize>(),
-            32 | items
-                .iter()
-                .filter(|i| i.status == TodoStatus::Done)
-                .count()
-                .min(31) as u8,
+            // in_progress changed nothing the cache could see. Folded in
+            // order rather than summed: a sum is commutative, so two steps
+            // trading statuses would leave it unchanged.
+            {
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for i in items {
+                    h ^= i.text.len() as u64 ^ ((i.status as u64) << 32);
+                    h = h.wrapping_mul(0x100_0000_01b3);
+                }
+                (h >> 16) as usize
+            },
+            32,
         ),
         Item::Reasoning {
             text,

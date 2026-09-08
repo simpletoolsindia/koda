@@ -333,7 +333,8 @@ fn now_line() -> String {
 
     let days = local.div_euclid(86_400);
     let sod = local.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
+    // The calendar arithmetic already exists, for dating learned rules.
+    let date = crate::learning::ymd(days.max(0) as u32);
     // 1970-01-01 was a Thursday.
     const DAY: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     let weekday = DAY[(days + 3).rem_euclid(7) as usize];
@@ -344,28 +345,13 @@ fn now_line() -> String {
         ('+', offset)
     };
     format!(
-        "Current date and time: {weekday} {y:04}-{m:02}-{d:02} {:02}:{:02} UTC{sign}{:02}:{:02} \
+        "Current date and time: {weekday} {date} {:02}:{:02} UTC{sign}{:02}:{:02} \
          (taken when this session's prompt was built; the clock has moved on since).",
         sod / 3600,
         (sod % 3600) / 60,
         off / 3600,
         (off % 3600) / 60,
     )
-}
-
-/// Days since the Unix epoch to a civil (year, month, day). Hinnant's
-/// `civil_from_days`, which is exact for every date std can hand us.
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// The machine's UTC offset in seconds, probed once per process.
@@ -490,15 +476,6 @@ mod tests {
         assert_eq!(parse_offset("+0000"), Some(0));
         assert_eq!(parse_offset(""), None);
         assert_eq!(parse_offset("UTC"), None);
-    }
-
-    #[test]
-    fn civil_dates_round_trip_known_days() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(-1), (1969, 12, 31));
-        // A leap day, and the century rule that trips naive conversions.
-        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
-        assert_eq!(civil_from_days(20_000), (2024, 10, 4));
     }
 
     /// The whole point of the line: a model that asks "what year is it" must

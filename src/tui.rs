@@ -111,7 +111,7 @@ const TIPS: &[&str] = &[
     "/resume reopens an earlier conversation; /fork branches one",
     "/search finds a past conversation by what was said in it",
     "/watch picks up `AI!` comments you leave in your code and acts on them",
-    "/auto cycles autonomy: ask each time → auto-write → full-auto",
+    "/auto cycles how much koda does without asking",
     "/reason sets thinking effort: off, low, medium, high",
     "/logs shows every request, tool call and timing from this session",
     "/orc splits a task across role agents that review each other",
@@ -666,7 +666,7 @@ impl App {
         let n = self.images.len();
         self.editor.insert(&format!("@image{n} "));
         // "0 KB" for a small screenshot reads like something went wrong.
-        let size = human_bytes(bytes as usize);
+        let size = crate::tools::human_size(bytes);
         self.note(format!(
             "pasted image ({size}) as @image{n} — it attaches when you send"
         ));
@@ -841,7 +841,7 @@ impl App {
                 self.draft_seen = bytes;
                 let phrase = activity_label(&name, &target);
                 let phrase = if bytes >= 1024 {
-                    format!("{phrase} · {}", human_bytes(bytes))
+                    format!("{phrase} · {}", crate::tools::human_size(bytes as u64))
                 } else {
                     phrase
                 };
@@ -3188,11 +3188,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     };
     // Two rows go to the frame, except on a screen too short to spare them.
     let border_h: u16 = if m.tiny { 0 } else { 2 };
-    let input_h = rows
-        .len()
-        .saturating_add(1)
-        .clamp(min_input, max_input)
-        .saturating_add(border_h as usize) as u16;
+    // The field itself, and the field plus its frame.
+    let text_h = rows.len().saturating_add(1).clamp(min_input, max_input) as u16;
+    let input_h = text_h + border_h;
 
     // A one-row gap between the transcript/hint area and the input keeps the
     // last line of tool output (a long command, a diff) from colliding with the
@@ -3361,7 +3359,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             Span::styled(label, style),
         ])]
     } else {
-        let shown = input_h.saturating_sub(border_h) as usize;
+        let shown = text_h as usize;
         rows.iter()
             .skip(rows.len().saturating_sub(shown))
             .enumerate()
@@ -3383,7 +3381,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Pad up to the full box height so the whole taller field is one solid
     // tinted surface, not a single lit line with dead space beneath it.
     let mut input_lines = input_lines;
-    while input_lines.len() < input_h.saturating_sub(border_h) as usize {
+    while input_lines.len() < text_h as usize {
         input_lines.push(Line::from(vec![Span::raw("  ".to_string())]));
     }
     if border_h == 0 {
@@ -3424,9 +3422,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Caret, offset by the frame when there is one.
     let inset = border_h / 2; // 1 with a frame, 0 without
-    let first_shown = rows
-        .len()
-        .saturating_sub(input_h.saturating_sub(border_h) as usize);
+    let first_shown = rows.len().saturating_sub(text_h as usize);
     if crow >= first_shown {
         let y = input.y + inset + (crow - first_shown) as u16;
         let x = input.x + inset + 3 + ccol as u16;
@@ -3754,21 +3750,6 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
 /// A short present-tense phrase for what a tool is doing, shown live in the
 /// working status. `label` is the tool's own summary (e.g. a path or command);
 /// we pair it with a verb so the user sees "reading cart.py", "running tests".
-/// A size a person can read at a glance. Bytes below a kilobyte, then one
-/// decimal place, which is enough to see a number climbing without it jittering.
-fn human_bytes(bytes: usize) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    let n = bytes as f64;
-    if n < KB {
-        format!("{bytes} B")
-    } else if n < MB {
-        format!("{:.1} KB", n / KB)
-    } else {
-        format!("{:.1} MB", n / MB)
-    }
-}
-
 fn activity_label(name: &str, label: &str) -> String {
     let target: String = label.trim().chars().take(48).collect();
     let verb = match name {
@@ -3993,12 +3974,25 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
         t.accent
     };
     let mut lines: Vec<Line<'static>> = Vec::new();
+    // The bracket is drawn here rather than through `panel::railed`, which owns
+    // it for transcript blocks. Deliberate, and the reasons are all about this
+    // panel being docked rather than scrolled: it is height-capped by the
+    // layout so it cannot afford `railed`'s closing rule, it windows its rows
+    // around the active step, and its edge colour tracks plan progress, which
+    // is not one of `Frame`'s states. If a fourth reason to diverge shows up,
+    // widen `railed` instead.
     // Header row: the bracket opens on it, like a tool card.
     lines.push(Line::from(vec![
         Span::styled(format!("{}{} ", g.corner_tl, g.hline), t.fg(edge)),
         Span::styled("Plan".to_string(), t.emphasis(t.heading)),
         Span::styled(format!("  {done}/{total} done"), t.dim()),
-        Span::styled(format!("  {}", gauge(done, total, 10, g)), t.fg(edge)),
+        Span::styled(
+            format!(
+                "  {}",
+                panel::gauge(done as f64 / total.max(1) as f64, 10, g)
+            ),
+            t.fg(edge),
+        ),
     ]));
 
     // Show the tasks; if there are more than fit, keep the active one in view by
@@ -4037,21 +4031,6 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     }
 
     f.render_widget(Paragraph::new(lines), rect);
-}
-
-/// A tiny progress gauge: `▰▰▰▱▱▱`. Enough to read the shape of a plan at a
-/// glance without reading the steps.
-fn gauge(done: usize, total: usize, width: usize, g: &Glyphs) -> String {
-    if total == 0 {
-        return String::new();
-    }
-    let filled = (done * width).div_ceil(total).min(width);
-    let (on, off) = if g.fine_blocks {
-        ("▰", "▱")
-    } else {
-        ("#", "-")
-    };
-    format!("{}{}", on.repeat(filled), off.repeat(width - filled))
 }
 
 /// The `#` action palette, drawn above the input like the other popups.
@@ -5334,15 +5313,6 @@ mod tests {
         let mut empty = ask(&["Postgres"]);
         empty.on_key(key(KeyCode::Esc));
         assert!(answered(empty.on_key(key(KeyCode::Enter))).is_none());
-    }
-
-    #[test]
-    fn sizes_read_at_a_glance() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(999), "999 B");
-        assert_eq!(human_bytes(1024), "1.0 KB");
-        assert_eq!(human_bytes(12_698), "12.4 KB");
-        assert_eq!(human_bytes(3_000_000), "2.9 MB");
     }
 
     /// A half-written call has no card yet, so the status row is the only place

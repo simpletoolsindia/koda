@@ -1917,7 +1917,7 @@ fn ripgrep_path() -> Option<std::path::PathBuf> {
 }
 
 /// Minimal `which`: find an executable by name on PATH. Avoids a dependency.
-fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
+pub fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);

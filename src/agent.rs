@@ -572,6 +572,16 @@ impl Agent {
         }
     }
 
+    /// Tokens a single request may spend on history: the window, less the
+    /// system prompt and room for the reply. Both the curator and the trimmer
+    /// measure against this, so it is stated once rather than derived twice.
+    fn send_budget(&self) -> usize {
+        self.cfg
+            .context_tokens
+            .saturating_sub(self.system.len() / 4 + 1024)
+            .max(1024)
+    }
+
     pub fn history_tokens(&self) -> usize {
         self.system.len() / 4
             + self
@@ -1490,12 +1500,7 @@ impl Agent {
         // stubbed and old ones squeezed before anything is dropped, so a short
         // context costs detail rather than the task. `self.history` keeps the
         // full record either way.
-        let budget = self
-            .cfg
-            .context_tokens
-            .saturating_sub(self.system.len() / 4 + 1024)
-            .max(1024);
-        let (curated, report) = crate::context::curate(&self.history, budget);
+        let (curated, report) = crate::context::curate(&self.history, self.send_budget());
         if report.changed() {
             crate::tel_info!(
                 "context",
@@ -3830,6 +3835,11 @@ impl Agent {
         // interruptible with esc like any other long call.
         self.cancel.store(false, Ordering::Relaxed);
 
+        // Curated like any other request. This is the one call whose whole job is
+        // to rescue a context that no longer fits, so sending it uncurated --
+        // the full history, which `trim` allows to run to several windows --
+        // made it the request most likely to be rejected for being too big.
+        let (curated, _) = crate::context::curate(&self.history, self.send_budget());
         let mut messages = vec![Message::system(
             "You are compacting a coding session's history because the context is nearly full. \
              Write a dense hand-off note to YOUR FUTURE SELF so you can continue without \
@@ -3844,7 +3854,7 @@ impl Agent {
              - FACTS: build/test commands, conventions, and anything you had to discover.\n\
              Be factual and specific. No fluff. Under 500 words.",
         )];
-        messages.extend(self.history.iter().cloned());
+        messages.extend(curated);
         messages.push(Message::user(
             "Write the hand-off note now, so you can seamlessly continue the task.",
         ));
@@ -3962,18 +3972,12 @@ impl Agent {
     /// *front*, so it has to be told — see `Session::forget`.
     fn trim(&mut self) -> usize {
         let before = self.history.len();
-        let reserve = self.system.len() / 4 + 1024;
         // Curation fits each request on its own (see `context`), so this is no
         // longer what makes the model's window work -- it only stops a very
         // long session from growing without bound in memory. Hence the slack:
         // dropping here is permanent, and curation can still make good use of
         // history that does not fit verbatim.
-        let budget = self
-            .cfg
-            .context_tokens
-            .saturating_sub(reserve)
-            .max(1024)
-            .saturating_mul(4);
+        let budget = self.send_budget() * RETAINED_WINDOWS;
         loop {
             let total: usize = self.history.iter().map(|m| m.approx_tokens()).sum();
             if total <= budget || self.history.len() <= 3 {
@@ -4191,6 +4195,11 @@ fn plan_reminder(plan: &[tools::Todo], steps_since: usize) -> Option<String> {
         step.text
     ))
 }
+
+/// How many request-budgets of history to keep in memory. Curation reads all of
+/// it and sends what fits, so the only cost of keeping more is memory, and the
+/// only cost of keeping less is detail curation could have used.
+const RETAINED_WINDOWS: usize = 4;
 
 /// Tool calls a plan may go without moving before the model is reminded.
 /// Low enough to catch a stalled list, high enough that a step which genuinely

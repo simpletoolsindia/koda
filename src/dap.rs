@@ -116,17 +116,17 @@ fn installed(a: &Adapter) -> bool {
     which(a.command).is_some()
 }
 
+/// Where an adapter binary is, if anywhere.
+///
+/// A bare name goes through the shared PATH lookup, which also checks the
+/// executable bit -- an adapter that is merely a readable file is not one koda
+/// can start. A path with a separator in it is taken as given.
 fn which(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
         let p = PathBuf::from(bin);
         return p.is_file().then_some(p);
     }
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).find_map(|dir| {
-            let cand = dir.join(bin);
-            cand.is_file().then_some(cand)
-        })
-    })
+    crate::tools::which_in_path(bin)
 }
 
 /// Choose an adapter for a program: the caller's pick if it named one,
@@ -626,8 +626,6 @@ pub struct Session {
     /// Break on entry to these functions, by name. Kept for the same reason as
     /// the source set: DAP replaces the whole list on every call.
     function_breakpoints: Vec<String>,
-    /// True once `configurationDone` has been sent.
-    configured: bool,
 }
 
 /// The one session. A debugger is singular to a user, and two programs stopped
@@ -732,14 +730,13 @@ impl Session {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let mut s = Session {
+        let s = Session {
             client,
             adapter: adapter.name.to_string(),
             program: program.to_string(),
             root: cwd.to_path_buf(),
             breakpoints: BTreeMap::new(),
             function_breakpoints: Vec::new(),
-            configured: false,
         };
         // Note the stop generation first: with `stopOnEntry` the stop can
         // arrive before the response does.
@@ -749,7 +746,6 @@ impl Session {
         if wants_configuration_done {
             let _ = s.client.request("configurationDone", json!({}));
         }
-        s.configured = true;
         s.client.await_pending(pending, REQUEST_TIMEOUT)?;
         s.client.wait_for_stop(gen, STOP_TIMEOUT);
         Ok(s)
@@ -809,7 +805,8 @@ impl Session {
         }
     }
 
-    fn top_frame(&self) -> Option<(String, String, i64)> {
+    /// The innermost frame, as the adapter describes it.
+    fn top_frame_value(&self) -> Option<Value> {
         let body = self
             .client
             .request(
@@ -817,18 +814,15 @@ impl Session {
                 json!({ "threadId": self.thread_id(), "startFrame": 0, "levels": 1 }),
             )
             .ok()?;
-        let f = body.get("stackFrames")?.as_array()?.first()?;
+        arr(&body, "stackFrames").into_iter().next()
+    }
+
+    fn top_frame(&self) -> Option<(String, String, i64)> {
+        let f = self.top_frame_value()?;
         Some((
-            f.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string(),
-            f.get("source")
-                .and_then(|s| s.get("path"))
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string(),
-            f.get("line").and_then(Value::as_i64).unwrap_or(0),
+            text_at(&f, "name").to_string(),
+            source_path(&f).to_string(),
+            int_at(&f, "line"),
         ))
     }
 }
@@ -852,6 +846,42 @@ pub const READONLY_ACTIONS: &[&str] = &[
 /// Whether this `debug` call needs the loud approval.
 pub fn action_is_mutating(action: &str) -> bool {
     !READONLY_ACTIONS.contains(&action)
+}
+
+/// How many of the breakpoints in a `setBreakpoints` response the adapter could
+/// actually bind. The difference between "set" and "will ever hit".
+fn verified_count(body: &Value) -> usize {
+    arr(body, "breakpoints")
+        .iter()
+        .filter(|b| b.get("verified").and_then(Value::as_bool) == Some(true))
+        .count()
+}
+
+/// The DAP response shapes, read the same way everywhere. Spelled out inline
+/// they drifted -- three defaults of `"?"`, two of `""` -- for fields that mean
+/// the same thing in every message.
+/// A stack frame's file, which DAP nests one level down.
+fn source_path(frame: &Value) -> &str {
+    frame
+        .get("source")
+        .and_then(|s| s.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+}
+
+fn text_at<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn int_at(v: &Value, key: &str) -> i64 {
+    v.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn arr(v: &Value, key: &str) -> Vec<Value> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn need(args: &Value, key: &str) -> Result<String> {
@@ -990,15 +1020,7 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
             let body = session.sync_breakpoints(&file)?;
             // The adapter says whether it could bind each one; an unverified
             // breakpoint is the difference between "set" and "will ever hit".
-            let verified = body
-                .get("breakpoints")
-                .and_then(Value::as_array)
-                .map(|bs| {
-                    bs.iter()
-                        .filter(|b| b.get("verified").and_then(Value::as_bool) == Some(true))
-                        .count()
-                })
-                .unwrap_or(0);
+            let verified = verified_count(&body);
             Ok(format!(
                 "{} at {}:{line}. {} of {} breakpoints in this file are verified.",
                 if logpoint { "Logpoint" } else { "Breakpoint" },
@@ -1034,15 +1056,7 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
                 session.function_breakpoints.push(name.clone());
             }
             let body = session.sync_function_breakpoints()?;
-            let verified = body
-                .get("breakpoints")
-                .and_then(Value::as_array)
-                .map(|bs| {
-                    bs.iter()
-                        .filter(|b| b.get("verified").and_then(Value::as_bool) == Some(true))
-                        .count()
-                })
-                .unwrap_or(0);
+            let verified = verified_count(&body);
             Ok(format!(
                 "Breaking on entry to `{name}`. {verified} of {} function breakpoints verified.",
                 session.function_breakpoints.len()
@@ -1086,14 +1100,14 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
             // Note where the stop counter is *before* asking, so a stop that
             // lands while the request is in flight still counts.
             let gen = session.client.stop_generation();
-            let (cmd, body) = match action.as_str() {
-                "continue" => ("continue", json!({ "threadId": tid })),
-                "step_over" => ("next", json!({ "threadId": tid })),
-                "step_in" => ("stepIn", json!({ "threadId": tid })),
-                "step_out" => ("stepOut", json!({ "threadId": tid })),
-                _ => ("pause", json!({ "threadId": tid })),
+            // Only the command differs; every one of these asks about a thread.
+            let cmd = match action.as_str() {
+                "step_over" => "next",
+                "step_in" => "stepIn",
+                "step_out" => "stepOut",
+                other => other, // continue, pause
             };
-            session.client.request(cmd, body)?;
+            session.client.request(cmd, json!({ "threadId": tid }))?;
             session.client.wait_for_stop(gen, STOP_TIMEOUT);
             let out = session.client.output();
             let mut msg = format!("{}: it is {}.", action, session.where_now());
@@ -1113,18 +1127,10 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
         )),
         "threads" => {
             let body = session.client.request("threads", json!({}))?;
-            let list = body
-                .get("threads")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            let list = arr(&body, "threads");
             let mut out = format!("{} thread(s):\n", list.len());
             for t in list {
-                out.push_str(&format!(
-                    "- {} {}\n",
-                    t.get("id").and_then(Value::as_i64).unwrap_or(0),
-                    t.get("name").and_then(Value::as_str).unwrap_or("")
-                ));
+                out.push_str(&format!("- {} {}\n", int_at(&t, "id"), text_at(&t, "name")));
             }
             Ok(out)
         }
@@ -1134,25 +1140,14 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
                 "stackTrace",
                 json!({ "threadId": session.thread_id(), "startFrame": 0, "levels": levels }),
             )?;
-            let frames = body
-                .get("stackFrames")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
             let mut out = String::from("Stack (innermost first):\n");
-            for f in &frames {
+            for f in arr(&body, "stackFrames") {
                 out.push_str(&format!(
                     "- #{} {} at {}:{}\n",
-                    f.get("id").and_then(Value::as_i64).unwrap_or(0),
-                    f.get("name").and_then(Value::as_str).unwrap_or("?"),
-                    rel(
-                        &session.root,
-                        f.get("source")
-                            .and_then(|s| s.get("path"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("?")
-                    ),
-                    f.get("line").and_then(Value::as_i64).unwrap_or(0),
+                    int_at(&f, "id"),
+                    text_at(&f, "name"),
+                    rel(&session.root, source_path(&f)),
+                    int_at(&f, "line"),
                 ));
             }
             out.push_str("\nUse the frame id with action=scopes.");
@@ -1255,15 +1250,9 @@ fn frame_id(session: &Session, args: &Value) -> Result<i64> {
     if let Some(f) = args.get("frame_id").and_then(Value::as_i64) {
         return Ok(f);
     }
-    let body = session.client.request(
-        "stackTrace",
-        json!({ "threadId": session.thread_id(), "startFrame": 0, "levels": 1 }),
-    )?;
-    body.get("stackFrames")
-        .and_then(Value::as_array)
-        .and_then(|f| f.first())
-        .and_then(|f| f.get("id"))
-        .and_then(Value::as_i64)
+    session
+        .top_frame_value()
+        .map(|f| int_at(&f, "id"))
         .ok_or_else(|| anyhow!("no stack frame — the program is not stopped"))
 }
 
@@ -1479,7 +1468,6 @@ while True:
             root: dir.to_path_buf(),
             breakpoints: BTreeMap::new(),
             function_breakpoints: Vec::new(),
-            configured: true,
         }
     }
 

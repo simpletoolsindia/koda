@@ -157,23 +157,19 @@ pub fn curate(history: &[Message], budget: usize) -> (Vec<Message>, Report) {
     // Pass 3: remove whole exchanges, oldest first, keeping the opening
     // request. Whole exchanges, because a tool result without the call that
     // asked for it is a protocol error, not a saving.
-    let mut keep: Vec<bool> = vec![true; blocks.len()];
+    // Always a contiguous run from index 1: the loop stops at the first block
+    // it keeps, so a per-block keep flag would only imply a freedom this pass
+    // does not have.
+    let mut end = 1;
     let mut running = report.after;
-    for i in 1..tail_start {
-        if running <= budget {
-            break;
-        }
-        running = running.saturating_sub(blocks[i].tokens());
-        keep[i] = false;
-        report.dropped += 1;
+    while end < tail_start && running > budget {
+        running = running.saturating_sub(blocks[end].tokens());
+        end += 1;
     }
-    let kept: Vec<Block> = blocks
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(b, k)| k.then_some(b))
-        .collect();
-    report.after = total_blocks(&kept);
-    (flatten(kept), report)
+    report.dropped = end - 1;
+    blocks.drain(1..end);
+    report.after = total_blocks(&blocks);
+    (flatten(blocks), report)
 }
 
 /// One exchange: a user turn, or an assistant turn with the tool results that
@@ -359,7 +355,7 @@ fn is_read(tool: &str) -> bool {
 }
 
 fn is_write(tool: &str) -> bool {
-    matches!(tool, "edit_file" | "write_file" | "apply_patch")
+    matches!(tool, "edit_file" | "write_file")
 }
 
 /// The words worth keeping context for: identifiers and paths from the request
