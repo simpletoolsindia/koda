@@ -3,6 +3,8 @@ title: Prompt & context
 description: What goes into the system prompt, and what koda does when a request will not fit the window.
 ---
 
+import Curation from '../../components/diagrams/Curation.astro';
+
 ## The system prompt
 
 The built-in prompt is deliberately short. Local models have small context windows and
@@ -42,6 +44,8 @@ naming what you just asked about keeps twice as much as anything that does not.
 
 **3. Drop.** Only now are whole exchanges removed, oldest first — and never the opening
 request.
+
+<Curation />
 
 This runs on a **copy at send time**. Your history, the session file and `/compact` are
 untouched, so nothing is lost for good. Raise `context_tokens` and the next request

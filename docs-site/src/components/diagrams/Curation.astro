@@ -1,0 +1,105 @@
+---
+/**
+ * The three curation passes, each applied to the same conversation.
+ * The claim is spatial: each pass frees room a different way, koda stops at
+ * the first one that fits, and the opening request survives all three.
+ */
+const BUDGET = 690; // x of the context_tokens line
+---
+
+<figure class="koda-fig">
+  <svg
+    viewBox="0 0 880 372"
+    role="img"
+    aria-label="Four rows showing the same conversation under escalating curation passes. As it stands, the messages overrun the context budget. Supersede replaces a stale file read with a one-line note, which is still over budget. Squeeze then truncates what survives on a ladder — oldest keeps only its head and tail, the step in flight is kept whole — and this fits, so koda stops. Drop, the last resort, removes whole exchanges oldest first but never the opening request."
+  >
+    <defs>
+      <marker id="cu-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="currentColor" />
+      </marker>
+    </defs>
+
+    <!-- budget line -->
+    <line x1={BUDGET} y1="18" x2={BUDGET} y2="330" stroke="var(--k-error)" stroke-opacity=".65" stroke-dasharray="4 4" />
+    <text x={BUDGET + 8} y="26" font-size="11.5" fill="var(--k-error)">context_tokens</text>
+
+    <!-- ============ row 0 · as it stands ============ -->
+    <text x="16" y="60" font-size="12.5" fill="currentColor" fill-opacity=".88">as it stands</text>
+
+    <rect x="150" y="44" width="56" height="26" rx="3" fill="var(--k-fill-accent)" stroke="var(--k-accent)" stroke-opacity=".75" />
+    <text x="178" y="62" font-size="11.5" text-anchor="middle" fill="var(--k-accent)">#1</text>
+    <rect x="210" y="44" width="140" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <text x="280" y="62" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">read cart.py</text>
+    <rect x="354" y="44" width="86" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <text x="397" y="62" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">listing</text>
+    <rect x="444" y="44" width="146" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <text x="517" y="62" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">build log</text>
+    <rect x="594" y="44" width="146" height="26" rx="3" fill="var(--k-fill-alt)" stroke="var(--k-accent-alt)" stroke-opacity=".6" />
+    <text x="667" y="62" font-size="11.5" text-anchor="middle" fill="var(--k-accent-alt)">step in flight</text>
+    <text x="760" y="62" font-size="11.5" fill="var(--k-error)">over</text>
+
+    <line x1="90" y1="78" x2="90" y2="102" stroke="currentColor" stroke-opacity=".4" marker-end="url(#cu-a)" />
+
+    <!-- ============ row 1 · supersede ============ -->
+    <text x="16" y="126" font-size="12.5" fill="currentColor" fill-opacity=".88">1 · supersede</text>
+    <text x="16" y="142" font-size="11" fill="currentColor" fill-opacity=".7">answered again,</text>
+    <text x="16" y="156" font-size="11" fill="currentColor" fill-opacity=".7">or edited since</text>
+
+    <rect x="150" y="110" width="56" height="26" rx="3" fill="var(--k-fill-accent)" stroke="var(--k-accent)" stroke-opacity=".75" />
+    <text x="178" y="128" font-size="11.5" text-anchor="middle" fill="var(--k-accent)">#1</text>
+    <rect x="210" y="110" width="60" height="26" rx="3" fill="none" stroke="var(--k-accent-alt)" stroke-opacity=".7" stroke-dasharray="3 2" />
+    <rect x="274" y="110" width="86" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <text x="317" y="128" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">listing</text>
+    <rect x="364" y="110" width="146" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <text x="437" y="128" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">build log</text>
+    <rect x="514" y="110" width="146" height="26" rx="3" fill="var(--k-fill-alt)" stroke="var(--k-accent-alt)" stroke-opacity=".6" />
+    <text x="587" y="128" font-size="11.5" text-anchor="middle" fill="var(--k-accent-alt)">step in flight</text>
+    <text x="700" y="128" font-size="11.5" fill="var(--k-error)">still over</text>
+    <text x="210" y="152" font-size="11" fill="var(--k-accent-alt)">the stale read is now one line naming what replaced it</text>
+
+    <line x1="90" y1="164" x2="90" y2="188" stroke="currentColor" stroke-opacity=".4" marker-end="url(#cu-a)" />
+
+    <!-- ============ row 2 · squeeze ============ -->
+    <text x="16" y="212" font-size="12.5" fill="currentColor" fill-opacity=".88">2 · squeeze</text>
+    <text x="16" y="228" font-size="11" fill="currentColor" fill-opacity=".7">truncate on a</text>
+    <text x="16" y="242" font-size="11" fill="currentColor" fill-opacity=".7">ladder, by age</text>
+
+    <rect x="150" y="196" width="56" height="26" rx="3" fill="var(--k-fill-accent)" stroke="var(--k-accent)" stroke-opacity=".75" />
+    <text x="178" y="214" font-size="11.5" text-anchor="middle" fill="var(--k-accent)">#1</text>
+    <rect x="210" y="196" width="34" height="26" rx="3" fill="none" stroke="var(--k-accent-alt)" stroke-opacity=".55" stroke-dasharray="3 2" />
+    <rect x="248" y="196" width="48" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <rect x="300" y="196" width="92" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <rect x="396" y="196" width="146" height="26" rx="3" fill="var(--k-fill-alt)" stroke="var(--k-accent-alt)" stroke-opacity=".6" />
+    <text x="469" y="214" font-size="11.5" text-anchor="middle" fill="var(--k-accent-alt)">kept whole</text>
+    <text x="556" y="214" font-size="11.5" fill="var(--k-success)">fits — koda stops here</text>
+
+    <text x="210" y="250" font-size="11" fill="currentColor" fill-opacity=".72">oldest: head + tail</text>
+    <line x1="330" y1="246" x2="466" y2="246" stroke="currentColor" stroke-opacity=".4" marker-end="url(#cu-a)" />
+    <text x="476" y="250" font-size="11" fill="currentColor" fill-opacity=".72">newest: kept whole</text>
+
+    <line x1="90" y1="262" x2="90" y2="286" stroke="currentColor" stroke-opacity=".4" marker-end="url(#cu-a)" />
+
+    <!-- ============ row 3 · drop ============ -->
+    <text x="16" y="310" font-size="12.5" fill="currentColor" fill-opacity=".88">3 · drop</text>
+    <text x="16" y="326" font-size="11" fill="currentColor" fill-opacity=".7">only if squeeze</text>
+    <text x="16" y="340" font-size="11" fill="currentColor" fill-opacity=".7">was not enough</text>
+
+    <rect x="150" y="294" width="56" height="26" rx="3" fill="var(--k-fill-accent)" stroke="var(--k-accent)" stroke-width="1.6" />
+    <text x="178" y="312" font-size="11.5" text-anchor="middle" fill="var(--k-accent)">#1</text>
+    <rect x="210" y="294" width="34" height="26" rx="3" fill="none" stroke="var(--k-error)" stroke-opacity=".45" stroke-dasharray="3 3" />
+    <line x1="214" y1="316" x2="240" y2="298" stroke="var(--k-error)" stroke-opacity=".6" />
+    <rect x="248" y="294" width="48" height="26" rx="3" fill="none" stroke="var(--k-error)" stroke-opacity=".45" stroke-dasharray="3 3" />
+    <line x1="252" y1="316" x2="292" y2="298" stroke="var(--k-error)" stroke-opacity=".6" />
+    <rect x="300" y="294" width="92" height="26" rx="3" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".4" />
+    <rect x="396" y="294" width="146" height="26" rx="3" fill="var(--k-fill-alt)" stroke="var(--k-accent-alt)" stroke-opacity=".6" />
+    <text x="556" y="312" font-size="11.5" fill="currentColor" fill-opacity=".75">whole exchanges, oldest first</text>
+
+    <line x1="178" y1="322" x2="178" y2="332" stroke="var(--k-accent)" stroke-opacity=".7" />
+    <text x="150" y="346" font-size="11" fill="var(--k-accent)">never dropped</text>
+  </svg>
+  <figcaption>
+    The opening request is the description of the job, so it is the one message no pass will
+    remove. All three run on a copy at send time — the conversation on disk is untouched, and
+    under budget none of them run at all.
+  </figcaption>
+</figure>

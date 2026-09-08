@@ -493,3 +493,36 @@ site-search button[data-open-modal] {
 
 [data-has-hero] .content-panel:first-of-type { border-bottom: 0; padding-bottom: 0; }
 [data-has-hero] .hero { padding-block: 0; }
+
+/* --- Figures --------------------------------------------------------------
+   A diagram is content, not decoration: it sits in the text column at the
+   text's own rhythm, and scrolls rather than shrinking past legibility. */
+
+.koda-fig {
+  margin: 1.75rem 0;
+  padding: 0;
+}
+.koda-fig svg {
+  display: block;
+  width: 100%;
+  min-width: 34rem;
+  height: auto;
+  color: var(--sl-color-gray-1);
+  font-family: var(--koda-mono);
+}
+.koda-fig > svg { min-width: 0; }
+.koda-fig figcaption {
+  margin-top: 0.85rem;
+  padding-inline-start: 0.9rem;
+  border-inline-start: 2px solid color-mix(in srgb, var(--k-accent) 45%, transparent);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--sl-color-gray-3);
+}
+
+/* Narrow screens: let the drawing keep its size and scroll sideways rather
+   than compress 11px labels into nothing. */
+@media (max-width: 44rem) {
+  .koda-fig { overflow-x: auto; }
+  .koda-fig svg { width: 40rem; min-width: 40rem; }
+}

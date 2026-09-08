@@ -3,6 +3,8 @@ title: Architecture
 description: One Rust binary, every layer in-process — the modules koda is made of and why there is no sidecar.
 ---
 
+import ProcessBoundary from '../../components/diagrams/ProcessBoundary.astro';
+
 koda is a single Rust binary of roughly 42,000 lines. Every layer is in-process: no sidecar
 services, no per-tool subprocess, no runtime to install. The TUI, the agent loop, the
 tools, the code graph and the HTTP client are compiled into the same executable and talk
@@ -36,32 +38,10 @@ Plus `session.rs`, `memory.rs`, `skills.rs`, `web.rs`, `watch.rs`, `engine.rs`,
 
 ## The shape
 
-```
-        your keystrokes
-              │
-        ┌─────▼──────┐
-        │   tui.rs   │  input, overlays, approval prompts, status bar
-        └─────┬──────┘
-              │  a user message
-        ┌─────▼──────┐
-        │  agent.rs  │  the loop: complete → tools → complete → …
-        └──┬──────┬──┘
-           │      │
-   ┌───────▼──┐  ┌▼─────────┐
-   │ prompt   │  │ tools.rs │  read, edit, run, codegraph, debug,
-   │ context  │  └────┬─────┘  delegate, web, skills, memory
-   └───────┬──┘       │
-           │          ├── graph.rs   symbol lookup, in-process
-   ┌───────▼──┐       ├── dap.rs     a real debugger over stdio
-   │  llm.rs  │       ├── web.rs     search / fetch / browse
-   └───────┬──┘       └── memory.rs  durable facts
-           │
-    your model's endpoint
-```
+<ProcessBoundary />
 
-Everything to the left of the endpoint runs in your process. The only thing that leaves
-the machine is the request to the model — and, if you turned them on, a web search or a
-fetch.
+Everything to the left of the boundary runs in your process. The only thing that leaves the
+machine is the request to the model — and, if you turned them on, a web search or a fetch.
 
 ## Three decisions worth knowing
 

@@ -3,11 +3,15 @@ title: Data flow
 description: What happens between pressing enter and seeing an answer, step by step.
 ---
 
+import TurnLoop from '../../components/diagrams/TurnLoop.astro';
+
 One user message becomes one **turn**. A turn is a loop: build a request, stream a
 completion, run whatever tools the model asked for, and go round again until the model
 stops asking.
 
 ## A turn, in order
+
+<TurnLoop />
 
 ```
 1  you press enter

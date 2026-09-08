@@ -1,0 +1,100 @@
+---
+/**
+ * What is inside the binary and what leaves the machine.
+ * The dashed boundary is the claim; the two magenta arrows crossing it are
+ * the only things that ever go out.
+ */
+---
+
+<figure class="koda-fig">
+  <svg
+    viewBox="0 0 760 486"
+    role="img"
+    aria-label="Every koda module runs inside one process: the TUI passes a user message to the agent loop, which builds a request through prompt and context and runs tools. The code graph, debug adapter and memory stay in-process. Only two arrows cross the process boundary — the LLM client's HTTPS request to your model endpoint, and the opt-in web tools."
+  >
+    <defs>
+      <marker id="pb-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="currentColor" />
+      </marker>
+      <marker id="pb-out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="var(--k-accent-alt)" />
+      </marker>
+    </defs>
+
+    <!-- the process boundary -->
+    <rect x="14" y="46" width="500" height="330" rx="10" fill="none"
+          stroke="currentColor" stroke-opacity=".45" stroke-width="1.5" stroke-dasharray="6 5" />
+    <text x="30" y="36" font-size="12.5" fill="currentColor" fill-opacity=".85">
+      one process · one binary · no sidecars
+    </text>
+
+    <!-- input -->
+    <text x="30" y="82" font-size="12.5" fill="currentColor" fill-opacity=".75">your keystrokes</text>
+    <line x1="140" y1="78" x2="168" y2="78" stroke="currentColor" stroke-opacity=".55" marker-end="url(#pb-a)" />
+
+    <!-- tui -->
+    <rect x="176" y="62" width="150" height="34" rx="4" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".45" />
+    <text x="251" y="84" font-size="13" text-anchor="middle" fill="currentColor">tui.rs</text>
+
+    <line x1="251" y1="96" x2="251" y2="128" stroke="currentColor" stroke-opacity=".55" marker-end="url(#pb-a)" />
+    <text x="261" y="116" font-size="11.5" fill="currentColor" fill-opacity=".78">a user message</text>
+
+    <!-- agent loop: the hub -->
+    <rect x="120" y="130" width="262" height="42" rx="4" fill="var(--k-fill-accent)" stroke="var(--k-accent)" stroke-opacity=".7" />
+    <text x="251" y="150" font-size="13" text-anchor="middle" fill="var(--k-accent)">agent.rs</text>
+    <text x="251" y="165" font-size="11" text-anchor="middle" fill="currentColor" fill-opacity=".8">the turn loop</text>
+
+    <!-- two children -->
+    <path d="M190 172 L190 196" fill="none" stroke="currentColor" stroke-opacity=".55" marker-end="url(#pb-a)" />
+    <path d="M320 172 L320 196" fill="none" stroke="currentColor" stroke-opacity=".55" marker-end="url(#pb-a)" />
+
+    <rect x="112" y="200" width="156" height="38" rx="4" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".45" />
+    <text x="190" y="216" font-size="12.5" text-anchor="middle" fill="currentColor">prompt.rs</text>
+    <text x="190" y="230" font-size="12.5" text-anchor="middle" fill="currentColor">context.rs</text>
+
+    <rect x="272" y="200" width="132" height="38" rx="4" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".45" />
+    <text x="338" y="224" font-size="12.5" text-anchor="middle" fill="currentColor">tools.rs</text>
+
+    <!-- request path down to the client -->
+    <path d="M190 238 L190 276" fill="none" stroke="currentColor" stroke-opacity=".55" marker-end="url(#pb-a)" />
+    <text x="126" y="262" font-size="11.5" fill="currentColor" fill-opacity=".78">the request</text>
+
+    <rect x="112" y="280" width="156" height="36" rx="4" fill="var(--k-fill-quiet)" stroke="currentColor" stroke-opacity=".45" />
+    <text x="190" y="303" font-size="12.5" text-anchor="middle" fill="currentColor">llm.rs</text>
+
+    <!-- in-process tool backends -->
+    <path d="M338 238 L338 262" fill="none" stroke="currentColor" stroke-opacity=".55" />
+    <text x="412" y="252" font-size="11" fill="currentColor" fill-opacity=".78">all in-process</text>
+
+    <rect x="272" y="266" width="132" height="24" rx="3" fill="none" stroke="currentColor" stroke-opacity=".4" />
+    <text x="338" y="282" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">graph.rs</text>
+    <rect x="272" y="294" width="132" height="24" rx="3" fill="none" stroke="currentColor" stroke-opacity=".4" />
+    <text x="338" y="310" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">dap.rs</text>
+    <rect x="272" y="322" width="132" height="24" rx="3" fill="none" stroke="currentColor" stroke-opacity=".4" />
+    <text x="338" y="338" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">memory.rs</text>
+    <rect x="272" y="350" width="132" height="24" rx="3" fill="none" stroke="var(--k-accent-alt)" stroke-opacity=".55" />
+    <text x="338" y="366" font-size="11.5" text-anchor="middle" fill="currentColor" fill-opacity=".9">web.rs</text>
+
+    <!-- the two crossings -->
+    <path d="M190 316 L190 416 L556 416" fill="none" stroke="var(--k-accent-alt)" stroke-width="1.6" marker-end="url(#pb-out)" />
+    <text x="200" y="410" font-size="11.5" fill="var(--k-accent-alt)">HTTPS · SSE stream</text>
+
+    <path d="M404 362 L556 362" fill="none" stroke="var(--k-accent-alt)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#pb-out)" />
+    <text x="414" y="356" font-size="11.5" fill="var(--k-accent-alt)">opt-in</text>
+
+    <!-- outside -->
+    <rect x="564" y="344" width="184" height="38" rx="4" fill="none" stroke="currentColor" stroke-opacity=".45" />
+    <text x="656" y="368" font-size="12.5" text-anchor="middle" fill="currentColor">the web</text>
+
+    <rect x="564" y="398" width="184" height="38" rx="4" fill="none" stroke="var(--k-accent-alt)" stroke-opacity=".6" />
+    <text x="656" y="422" font-size="12.5" text-anchor="middle" fill="currentColor">your model endpoint</text>
+
+    <text x="564" y="466" font-size="11.5" fill="currentColor" fill-opacity=".75">everything right of the</text>
+    <text x="564" y="480" font-size="11.5" fill="currentColor" fill-opacity=".75">boundary leaves the machine</text>
+  </svg>
+  <figcaption>
+    Two arrows cross the process boundary, and only one of them is on by default. Everything
+    else — the symbol graph, the debug adapter, the file tools, memory — is a function call
+    inside the same binary.
+  </figcaption>
+</figure>
