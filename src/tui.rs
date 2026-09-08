@@ -455,6 +455,10 @@ pub struct App {
     /// to count during a long write — elapsed time is then the only honest
     /// sign that the connection is alive rather than hung.
     last_delta: Option<Instant>,
+    /// True while the next thing to arrive would come from the model, false
+    /// while a tool is running. A silent model and a slow tool look identical
+    /// from the status row, and they need different words.
+    awaiting_model: bool,
     /// Turns this session, which is the costume's die.
     turn_count: u64,
     /// A turn wrote or edited a file, which is one of the two ways a turn
@@ -857,12 +861,14 @@ impl App {
                 self.draft_seen = 0;
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
+                self.awaiting_model = true;
                 self.last_delta = Some(Instant::now());
             }
             Event::Text(chunk) => {
                 // The model is producing the reply — say so, so the status row
                 // isn't stuck on a stale tool label or a generic quip.
                 self.last_delta = Some(Instant::now());
+                self.awaiting_model = true;
                 self.activity = Some("writing the reply".into());
                 self.received += chunk.len();
                 self.transcript.assistant_delta(&chunk);
@@ -871,6 +877,7 @@ impl App {
                 // Reasoning can run for many seconds before any visible output;
                 // surface it so a thinking model never reads as a frozen app.
                 self.last_delta = Some(Instant::now());
+                self.awaiting_model = true;
                 self.activity = Some("thinking".into());
                 self.received += chunk.len();
                 self.transcript.reasoning_delta(&chunk);
@@ -895,6 +902,8 @@ impl App {
                 }
                 let phrase = activity_label(&name, &label);
                 self.last_delta = Some(Instant::now());
+                // A tool is running now; the model is not the one being waited on.
+                self.awaiting_model = false;
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
                 } else {
@@ -926,14 +935,12 @@ impl App {
                 // rather than only once a kilobyte has landed — a counter
                 // that sits at nothing for a second reads as a hang.
                 let phrase = if bytes >= 32 {
-                    format!(
-                        "{phrase} · {}",
-                        crate::tools::human_tokens(crate::tools::approx_tokens(bytes))
-                    )
+                    format!("{phrase} · {}", Tokens(crate::tools::approx_tokens(bytes)))
                 } else {
                     phrase
                 };
                 self.last_delta = Some(Instant::now());
+                self.awaiting_model = true;
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
                 } else {
@@ -961,6 +968,7 @@ impl App {
                 // which can take a few seconds. Say so rather than dropping to a
                 // generic quip that reads as idle.
                 self.last_delta = Some(Instant::now());
+                self.awaiting_model = true;
                 self.activity = Some("thinking about the next step".into());
                 // A write may have created a file, so `@` completion is stale.
                 if summary.starts_with("created") || summary.starts_with("wrote") {
@@ -1314,15 +1322,22 @@ impl App {
         lines.push(Line::default());
         // Quick-start tips: the few things a new user most needs, one per line,
         // key highlighted in the accent, description dimmed.
-        let tips: [(&str, &str); 4] = [
+        let mut tips: Vec<(&str, String)> = vec![
             (
                 "type a task",
-                "and press enter — e.g. \"fix the failing test\"",
+                "and press enter — e.g. \"fix the failing test\"".into(),
             ),
-            ("@", "attach a file to your message"),
-            ("/help", "see all commands"),
-            ("ctrl+p", "switch mode (plan · execute · vibe)"),
+            ("@", "attach a file to your message".into()),
+            ("/help", "see all commands".into()),
+            ("ctrl+p", "switch mode (plan · execute · vibe)".into()),
         ];
+        // The web UI binds before the TUI takes the screen, so the address it
+        // printed to stderr is gone by the time anyone could read it. Show it
+        // as one more row, and only when a socket actually came up — the port
+        // it settled on is not always the configured one.
+        if let Some(addr) = crate::webui::address() {
+            tips.push(("web ui", format!("http://{addr}")));
+        }
         for (key, desc) in tips {
             lines.push(Line::from(vec![
                 Span::raw(indent.clone()),
@@ -1332,21 +1347,6 @@ impl App {
                     Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!(" {desc}"), t.dim()),
-            ]));
-        }
-        // The web UI binds before the TUI takes the screen, so the address it
-        // printed to stderr is gone by the time anyone could read it. Show it
-        // here, and only when a socket actually came up — the port it settled
-        // on is not always the configured one.
-        if let Some(addr) = crate::webui::address() {
-            lines.push(Line::from(vec![
-                Span::raw(indent.clone()),
-                Span::styled(format!("{} ", g.bullet), t.dim()),
-                Span::styled(
-                    format!("{:<12}", "web ui"),
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" http://{addr}"), t.dim()),
             ]));
         }
         lines.push(Line::default());
@@ -4046,12 +4046,21 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
             };
             // Past a few seconds of silence, say how long. A label that never
             // changes reads as a hang even while the spinner turns.
-            let quiet = app
-                .last_delta
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or_default();
-            let text = if quiet >= QUIET_AFTER_SECS && !m.tiny {
-                format!("{text} · {quiet}s")
+            //
+            // And stop claiming "thinking": once the stream has gone quiet the
+            // model is producing something koda cannot see — some servers
+            // buffer a whole tool call and flush it in one delta, so a 90s
+            // write looks exactly like a stall. "generating" is what is
+            // actually known. A running tool is not relabelled: it is the tool
+            // taking the time, not the model.
+            let quiet = app.last_delta.map(|t| t.elapsed()).unwrap_or_default();
+            let text = if quiet.as_secs() >= QUIET_AFTER_SECS && !m.tiny {
+                let verb = if app.awaiting_model {
+                    "generating"
+                } else {
+                    &text
+                };
+                format!("{verb} · {}", anim::short_elapsed(quiet))
             } else {
                 text
             };
@@ -5332,6 +5341,7 @@ pub async fn run(
         compacting: None,
         activity: None,
         last_delta: None,
+        awaiting_model: false,
         turn_count: 0,
         wrote_this_turn: false,
         visitor_at: None,
