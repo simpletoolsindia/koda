@@ -257,6 +257,21 @@ any other command, unless autonomy is turned up.
 
 [dap]: https://microsoft.github.io/debug-adapter-protocol/
 
+## Nudges
+
+Three things koda wants the model to do differently, all learned from reading
+real sessions in this repo: consult the code graph instead of grepping for a
+name, keep the task list moving, and hand a wide search to a subagent instead
+of running it in the main context. Each is in the system prompt, and each also
+has a nudge appended to a tool result at the moment it would help — because a
+model reads the result it just got far more carefully than a prompt it saw
+twenty steps ago.
+
+They share one mechanism, with one rule the three copies could not have
+enforced between them: **at most one nudge per tool result, and one of each per
+turn**. Two directives stapled to the same output compete with each other, and
+a nudge repeated is a nudge ignored.
+
 ## Keeping the plan honest
 
 The `todo` tool draws the plan you see above the input. Left to itself a model

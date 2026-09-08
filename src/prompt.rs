@@ -72,6 +72,31 @@ const FIND_GUIDANCE: &str = "\n\n\
 FINDING CODE: `search` for text inside files (regex), `find_files` for paths by glob, \
 `list_dir` to see what is there. Locate before you read; do not guess at paths.";
 
+/// Delegation, stated as a working rule rather than a footnote.
+///
+/// It used to be one sentence appended after the tool schema, and sessions
+/// show the result: `delegate` was called zero times, ever. A capability the
+/// model never reaches for is the same as one that does not exist, so this
+/// says what to send, what comes back, and what not to send.
+const DELEGATION: &str = "\n\n\
+DELEGATION — `delegate` is a second agent with its own context window.
+
+Send it any investigation whose intermediate reading you do not need:
+- \"which files touch X, and how?\"
+- \"how does Y flow through this repo?\"
+- \"does this project already have something that does Z?\"
+- anything that means opening more than a handful of files to answer one question
+
+You get back a written report; the files it opened never enter your context. \
+That is the whole point — your context window is the scarce thing, and a wide \
+search you run yourself spends it on files you will never look at again.
+
+Always:
+- Ask one self-contained question. The subagent cannot see this conversation, \
+so give it the whole question in one go.
+- It is read-only. Do the edits yourself, from what it reports.
+- Do not delegate a single file you could just read, or something you already know.";
+
 const TEXT_PROTOCOL: &str = "\
 Tool calls use this exact JSON format, one per message, at the very end of your reply:
 
@@ -187,6 +212,9 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     } else {
         p.push_str(FIND_GUIDANCE);
     }
+    if cfg.subagents {
+        p.push_str(DELEGATION);
+    }
     if !(use_text_protocol || cfg.tool_protocol == ToolProtocol::Text) {
         p.push_str(PARALLEL_READS);
     }
@@ -220,15 +248,6 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
         p.push_str("\n\n");
         p.push_str(TEXT_PROTOCOL);
         p.push_str(&tools::text_protocol_help_for(allow));
-    }
-
-    if cfg.subagents {
-        p.push_str(
-            "\n\nDelegation: for a wide search whose intermediate reading you do not need \
-             (\"which files touch X?\", \"how does Y flow through this repo?\"), call \
-             `delegate` instead of reading dozens of files yourself. You get back a report \
-             and your context stays clean. Do the actual edits yourself.",
-        );
     }
 
     if !cfg.instructions.trim().is_empty() {
@@ -456,6 +475,33 @@ mod tests {
     /// "use search to locate code", it greps -- whatever the codegraph section
     /// further down asks for. So the rules must not name a locating tool at
     /// all; that job belongs to whichever guidance block is in force.
+    /// Sessions show `delegate` called zero times, ever. A capability the
+    /// model never reaches for is the same as one that does not exist, so the
+    /// prompt has to say what to send it and what comes back — not mention it.
+    #[test]
+    fn delegation_is_a_working_rule_not_a_footnote() {
+        let cfg = Config {
+            subagents: true,
+            ..Config::default()
+        };
+        let with = build(&cfg, Path::new("/tmp"), false, Mode::Execute);
+        assert!(with.contains("DELEGATION"), "{with}");
+        assert!(with.contains("its own context window"));
+        // The shape of the ask matters: a subagent cannot see this conversation.
+        assert!(with.contains("self-contained question"), "{with}");
+        // It sits with the other working rules, not after the tool schema.
+        let delegation = with.find("DELEGATION").expect("present");
+        let workspace = with.find("Workspace:").expect("present");
+        assert!(delegation < workspace, "delegation belongs with the rules");
+
+        let off = Config {
+            subagents: false,
+            ..Config::default()
+        };
+        let without = build(&off, Path::new("/tmp"), false, Mode::Execute);
+        assert!(!without.contains("DELEGATION"), "{without}");
+    }
+
     #[test]
     fn base_rules_do_not_pick_a_locating_tool() {
         assert!(!base_prompt().contains("find_files"), "{}", base_prompt());

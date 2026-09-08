@@ -327,14 +327,17 @@ pub struct Agent {
     plan: Vec<tools::Todo>,
     /// Whether codegraph has already been called in this turn. Used to give a
     /// single corrective hint when a model greps for a bare symbol first.
-    /// Tool calls since the task list last moved, and whether this turn has
-    /// already said something about it. A plan the model forgets is the most
-    /// visible way a long turn goes quiet.
+    /// Tool calls since the task list last moved. A plan the model forgets is
+    /// the most visible way a long turn goes quiet.
     steps_since_plan: usize,
-    plan_nudge_sent: bool,
+    /// Read-only calls made this turn, which is what says a wide search is
+    /// being run in the main context instead of handed to a subagent.
+    reads_this_turn: usize,
+    /// Which hints have already fired this turn. One set rather than a flag
+    /// each: they are one mechanism, and only one of them may speak per result.
+    hinted: std::collections::HashSet<&'static str>,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
-    codegraph_hint_sent: bool,
     /// Outcomes for read-only tools pre-computed concurrently for the current
     /// step, keyed by call id, so `execute` can reuse them instead of re-running
     /// the work serially. Drained as the step's calls are processed.
@@ -477,9 +480,9 @@ impl Agent {
             empty_replies: 0,
             plan: Vec::new(),
             steps_since_plan: 0,
-            plan_nudge_sent: false,
+            reads_this_turn: 0,
+            hinted: std::collections::HashSet::new(),
             used_codegraph_this_turn: false,
-            codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
             last_approval: None,
@@ -558,9 +561,9 @@ impl Agent {
             empty_replies: 0,
             plan: Vec::new(),
             steps_since_plan: 0,
-            plan_nudge_sent: false,
+            reads_this_turn: 0,
+            hinted: std::collections::HashSet::new(),
             used_codegraph_this_turn: false,
-            codegraph_hint_sent: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
@@ -916,8 +919,8 @@ impl Agent {
                 self.plan.clear();
             }
             self.used_codegraph_this_turn = false;
-            self.codegraph_hint_sent = false;
-            self.plan_nudge_sent = false;
+            self.reads_this_turn = 0;
+            self.hinted.clear();
             self.trace_turn = crate::trace::begin_turn(
                 &self.mode.to_string(),
                 &self.model,
@@ -2112,34 +2115,17 @@ impl Agent {
                 None => tools::run(&name, args, &self.streaming_ctx(&call.id, tx)).await,
             },
         };
-        // A plan that has not moved in several steps is the failure the user
-        // sees: the list on screen still says "in_progress" for something
-        // finished long ago. Nudge once per turn, and never on `todo` itself.
-        if self.depth == 0 && name != "todo" {
-            self.steps_since_plan += 1;
-            if !self.plan_nudge_sent {
-                if let Some(nudge) = plan_reminder(&self.plan, self.steps_since_plan) {
-                    outcome.content.push_str(&nudge);
-                    self.plan_nudge_sent = true;
-                }
+        if self.depth == 0 {
+            if name == "todo" {
+                self.steps_since_plan = 0;
+            } else {
+                self.steps_since_plan += 1;
             }
-        } else if name == "todo" {
-            self.steps_since_plan = 0;
-        }
-        if self.depth == 0 && self.cfg.codegraph && !self.used_codegraph_this_turn {
-            if let Some(symbol) = symbol_being_searched(&name, &args_for_memory) {
-                if !self.codegraph_hint_sent {
-                    // Spelled as the call to make, because a small model that is
-                    // told to "use codegraph" without the shape reaches for grep
-                    // again on the next step.
-                    outcome.content.push_str(&format!(
-                        "\n\nCODEGRAPH HINT: `{symbol}` is a name, not free text. Call \
-                         `codegraph` with query=symbol, name={symbol} — one call returns \
-                         where it is defined and every file that uses it, which this \
-                         search cannot tell you. Do that before more search/read calls."
-                    ));
-                    self.codegraph_hint_sent = true;
-                }
+            if READ_TOOLS.contains(&name.as_str()) {
+                self.reads_this_turn += 1;
+            }
+            if let Some(hint) = self.hint_for(&name, &args_for_memory) {
+                outcome.content.push_str(&hint);
             }
         }
         // Command outcomes are the one thing worth learning without being asked:
@@ -2327,6 +2313,56 @@ impl Agent {
                 view: tools::ToolView::Plain,
             },
         }
+    }
+
+    /// The one nudge to append to this tool result, if any.
+    ///
+    /// koda has three things it wants the model to do differently, and they
+    /// were three copies of the same shape: a per-turn flag, a condition, a
+    /// string appended to a tool result. One mechanism instead, with one rule
+    /// that the copies could not enforce between them — **at most one hint per
+    /// result, and one of each per turn**. Two directives stapled to the same
+    /// tool output compete, and a nudge repeated is a nudge ignored.
+    ///
+    /// Ordered by how much the user is hurt by the thing going unsaid.
+    fn hint_for(&mut self, tool: &str, args: &Value) -> Option<String> {
+        // A stale checklist is the one the user is looking at.
+        if !self.hinted.contains("plan") && tool != "todo" {
+            if let Some(text) = plan_reminder(&self.plan, self.steps_since_plan) {
+                self.hinted.insert("plan");
+                return Some(text);
+            }
+        }
+        // Grepping for a name the graph could have answered exactly.
+        if self.cfg.codegraph
+            && !self.used_codegraph_this_turn
+            && !self.hinted.contains("codegraph")
+        {
+            if let Some(symbol) = symbol_being_searched(tool, args) {
+                self.hinted.insert("codegraph");
+                return Some(format!(
+                    "\n\nCODEGRAPH HINT: `{symbol}` is a name, not free text. Call \
+                     `codegraph` with query=symbol, name={symbol} — one call returns \
+                     where it is defined and every file that uses it, which this \
+                     search cannot tell you. Do that before more search/read calls."
+                ));
+            }
+        }
+        // A wide search being run in the main context, a file at a time.
+        if self.cfg.subagents
+            && self.reads_this_turn >= WIDE_SEARCH_READS
+            && !self.hinted.contains("delegate")
+        {
+            self.hinted.insert("delegate");
+            return Some(format!(
+                "\n\nDELEGATION HINT: that is {} read-only calls this turn, and every \
+                 result stays in your context whether or not you need it again. If you \
+                 are still answering one question, hand the rest of it to `delegate` \
+                 as a single self-contained question and work from the report.",
+                self.reads_this_turn
+            ));
+        }
+        None
     }
 
     /// A tool context whose progress reports land on this call's card.
@@ -4203,6 +4239,14 @@ fn plan_reminder(plan: &[tools::Todo], steps_since: usize) -> Option<String> {
 /// only cost of keeping less is detail curation could have used.
 const RETAINED_WINDOWS: usize = 4;
 
+/// The read-only calls that make a context grow without being asked to.
+const READ_TOOLS: &[&str] = &["read_file", "search", "find_files", "list_dir", "codegraph"];
+
+/// Read-only calls in one turn before koda suggests delegating the rest. High
+/// enough that ordinary work — read a file, check its caller, run the tests —
+/// is never nagged; low enough to catch a repo-wide sweep early.
+const WIDE_SEARCH_READS: usize = 8;
+
 /// Tool calls a plan may go without moving before the model is reminded.
 /// Low enough to catch a stalled list, high enough that a step which genuinely
 /// takes five calls is not nagged mid-way.
@@ -5057,6 +5101,45 @@ mod tests {
     /// so a small model can re-issue the call instead of hitting a hard error.
     /// The path is known long before the content that makes the wait worth
     /// reporting, because it comes first in the arguments.
+    /// Three nudges share one mechanism, and the rule the three copies could
+    /// not enforce between them is that only one may speak per tool result.
+    #[test]
+    fn at_most_one_hint_per_result_and_one_of_each_per_turn() {
+        // Both hint-bearing features on, so all three can compete.
+        let mut agent = agent_with(crate::config::Config {
+            codegraph: true,
+            subagents: true,
+            ..crate::config::Config::default()
+        });
+        agent.plan = vec![
+            tools::Todo {
+                text: "read the parser".into(),
+                status: tools::TodoStatus::Active,
+            },
+            tools::Todo {
+                text: "add the token".into(),
+                status: tools::TodoStatus::Pending,
+            },
+        ];
+        agent.steps_since_plan = PLAN_STALE_AFTER;
+        agent.reads_this_turn = WIDE_SEARCH_READS;
+        let search = serde_json::json!({ "pattern": "compact" });
+
+        // All three conditions hold at once. Each result yields at most one
+        // hint, each hint fires at most once, and the order is by how much the
+        // user is hurt by the thing going unsaid.
+        let mut seen = Vec::new();
+        while let Some(h) = agent.hint_for("search", &search) {
+            assert!(seen.len() < 4, "hints must not repeat: {seen:?}");
+            seen.push(h);
+        }
+        assert_eq!(seen.len(), 3, "one of each, then silence: {seen:?}");
+        assert!(seen[0].contains("PLAN REMINDER"), "{:?}", seen[0]);
+        assert!(seen[1].contains("CODEGRAPH"), "{:?}", seen[1]);
+        assert!(seen[2].contains("DELEGATION"), "{:?}", seen[2]);
+        assert!(seen[2].contains("8 read-only calls"), "{:?}", seen[2]);
+    }
+
     /// The list on screen is the user's view of where the agent is. Sessions
     /// show the real failure: the model writes a plan once and never touches
     /// it, so the first step reads "in progress" until the work is finished.
