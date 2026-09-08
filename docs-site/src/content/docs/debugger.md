@@ -37,9 +37,55 @@ add to the file, and nothing to remember to remove afterwards.
 skip happens in the debugger, not in a thousand round trips. Getting to the thousandth
 iteration costs one stop rather than a thousand.
 
-## What a session looks like
+## A worked example
 
-Verbatim from a run against `debugpy`:
+A bug that reading the code will not reliably catch — the value is right at every
+individual line, and wrong across the loop.
+
+```python
+# orders.py — prints 80, should print 164
+def total_points(orders):
+    earned = 0
+    for o in orders:
+        earned = points_for(o)      # note the missing +
+    return earned
+```
+
+Ask for the debugger, and say what you want to watch:
+
+```
+orders.py prints 80 but should print 164. Use the debug tool: launch it,
+set a breakpoint on the loop in total_points, continue, and evaluate
+'earned' each time round so we can see what happens to it.
+```
+
+What comes back, verbatim from a run against `debugpy`:
+
+```
+Launched orders.py under debugpy. It is stopped (entry) at orders.py:1 in <module>.
+Set breakpoints with action=set_breakpoint, then continue.
+
+Breakpoint at orders.py:13. 1 of 1 breakpoints in this file are verified.
+
+continue: it is stopped (breakpoint) at orders.py:13 in total_points.
+
+earned = 0
+points_for(ORDERS[0]) = 75
+earned = 75
+earned = 9
+```
+
+`earned` goes **0 → 75 → 9**. It does not accumulate — it is reassigned, so only the last
+order survives. One value, watched across three iterations, and the bug names itself.
+
+Two things in that transcript are worth pointing at:
+
+- `points_for(ORDERS[0]) = 75` is `evaluate`. It ran a call that the program had not
+  reached yet, inside the stopped frame, against the live values. No edit, no re-run.
+- Nothing was printed to find this. The program was never modified, so there is no
+  `print` to remember to remove afterwards.
+
+## What a short session looks like
 
 ```
 Launched buggy.py under debugpy. It is stopped (entry) at buggy.py:1 in <module>.
@@ -66,6 +112,20 @@ All of them over stdio. That is why `codelldb` is absent despite covering the sa
 languages as `lldb-dap`: it is a TCP adapter, and an entry that starts fine and then never
 answers is worse than no entry at all.
 
+:::caution[Which python has debugpy?]
+For Python, koda asks whichever `python3` is first on your PATH. A machine with two of
+them — a system one and a Homebrew one, say — can easily have `debugpy` installed in the
+other, and then the adapter is genuinely missing however sure you are that you installed
+it. koda names the interpreter it probed, so the mismatch is visible:
+
+```
+no debug adapter for a `.py` program is installed.
+Tried: debugpy (found at /opt/homebrew/bin/python3)
+```
+
+`python3 -m pip install debugpy` — with that exact `python3` — is the fix.
+:::
+
 ## Approval
 
 Reading a stopped program does not stop to ask. `stack_trace`, `scopes`, `variables`,
@@ -88,3 +148,8 @@ break on it and tell me what total actually is
 put a logpoint inside the retry loop that prints the attempt
 number and the delay, then run it
 ```
+
+A smaller model may need the steps spelled out, as in the example above, and may keep
+pressing `continue` rather than stopping to look. If a session runs away, koda's step
+budget ends it and says so; `debug action=terminate` closes it, and the next `launch`
+starts a fresh one either way.
