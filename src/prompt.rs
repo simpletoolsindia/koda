@@ -216,6 +216,23 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     if cfg.subagents {
         p.push_str(DELEGATION);
     }
+    // Name what is not in the schema. A tool the model cannot see and is not
+    // told about is a tool that does not exist — which is the one way this
+    // could cost accuracy, so it is spelled out rather than implied.
+    let groups = crate::tools::deferred_summary(|t| match t {
+        "browse" => cfg.browser,
+        _ => true,
+    });
+    if !groups.trim().is_empty() {
+        let _ = write!(
+            p,
+            "\n\nMORE TOOLS — these exist but are not in your tool list yet, so that the \
+             list stays small:\n{groups}\
+             Call `load_tools` with the group name to bring one in. You may also just call the \
+             tool you want by name — it is loaded for you automatically, so a guess costs \
+             nothing."
+        );
+    }
     if !(use_text_protocol || cfg.tool_protocol == ToolProtocol::Text) {
         p.push_str(PARALLEL_READS);
     }

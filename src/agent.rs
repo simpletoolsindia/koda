@@ -350,6 +350,10 @@ pub struct Agent {
     /// The embedding model actually in use: the configured one, or whatever the
     /// endpoint turned out to have. Resolved once per session.
     embed_model: Arc<std::sync::RwLock<Option<String>>>,
+    /// Tool groups this session has loaded. Deferred tools are absent from the
+    /// schema until they are in here — and calling one adds it, so a model that
+    /// skips the loading step is not punished for it.
+    loaded_groups: std::collections::HashSet<String>,
     /// Set once a server has said this model cannot think, so the hint is not
     /// sent again for the rest of the session.
     no_reasoning: bool,
@@ -506,6 +510,7 @@ impl Agent {
             lexical: Arc::default(),
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
+            loaded_groups: std::collections::HashSet::new(),
             no_reasoning: false,
             starved_of_output: false,
             used_codegraph_this_turn: false,
@@ -592,6 +597,7 @@ impl Agent {
             lexical: Arc::default(),
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
+            loaded_groups: std::collections::HashSet::new(),
             no_reasoning: false,
             starved_of_output: false,
             used_codegraph_this_turn: false,
@@ -1468,6 +1474,27 @@ impl Agent {
     /// tempted by a tool that will refuse it.
     fn advertised_tools(&self) -> Vec<serde_json::Value> {
         let mut list = tools::openai_schema_for(self.effective_allow());
+        // Hold back the heavy, situational tools until this session asks. The
+        // prompt names them and `load_tools` brings them in — and calling one
+        // directly loads it too, so nothing is ever out of reach.
+        list.retain(|t| {
+            let Some(name) = t.pointer("/function/name").and_then(|n| n.as_str()) else {
+                return true;
+            };
+            match tools::deferred_group(name) {
+                Some(group) => self.loaded_groups.contains(group),
+                None => true,
+            }
+        });
+        // Nothing left to load, nothing to advertise the loader for.
+        if tools::DEFERRED
+            .iter()
+            .all(|(g, _)| self.loaded_groups.contains(*g))
+        {
+            list.retain(|t| {
+                t.pointer("/function/name").and_then(|n| n.as_str()) != Some("load_tools")
+            });
+        }
         if !self.cfg.web_search {
             list.retain(|t| {
                 t.pointer("/function/name").and_then(|n| n.as_str()) != Some("web_search")
@@ -2096,7 +2123,47 @@ impl Agent {
         if matches!(name.as_str(), "write_file" | "edit_file") {
             self.snapshot(&args, &name);
         }
+        // A deferred tool called by name is a request to use it, not a mistake.
+        // Load its group and run it: the model that guessed right gets what it
+        // asked for, and the one that read the prompt gets the same thing a
+        // turn earlier. Either way a tool call never fails for being deferred.
+        if let Some(group) = tools::deferred_group(&name) {
+            if self.loaded_groups.insert(group.to_string()) {
+                crate::tel_info!("tools", "group loaded on use", "group" => group);
+                self.rebuild_system();
+            }
+        }
         let mut outcome = match name.as_str() {
+            "load_tools" => {
+                let group = args
+                    .get("group")
+                    .and_then(|g| g.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let known: Vec<&str> = tools::DEFERRED.iter().map(|(g, _)| *g).collect();
+                if !known.contains(&group.as_str()) {
+                    tools::Outcome::err(format!(
+                        "no tool group `{group}`. Groups: {}",
+                        known.join(", ")
+                    ))
+                } else {
+                    let members: Vec<&str> = tools::DEFERRED
+                        .iter()
+                        .find(|(g, _)| *g == group)
+                        .map(|(_, m)| m.to_vec())
+                        .unwrap_or_default();
+                    self.loaded_groups.insert(group.clone());
+                    self.rebuild_system();
+                    tools::Outcome::ok(
+                        format!(
+                            "Loaded `{group}`: {}. They are available now — call one.",
+                            members.join(", ")
+                        ),
+                        format!("loaded {group}"),
+                    )
+                }
+            }
             "delegate" => self.delegate(&args, tx).await,
             "ask_user" => self.ask_user(&args, tx).await,
             "remember" => self.remember(&args),
@@ -5528,6 +5595,73 @@ mod tests {
             "bge-reranker-v2-m3",
         ] {
             assert!(!looks_like_embedder(no), "{no} is not an embedder");
+        }
+    }
+
+    /// The tool schema is the largest fixed cost in every request, and most
+    /// sessions never open a browser or a debugger. Holding those back is only
+    /// safe if they stay reachable — so the rule is that a deferred tool called
+    /// by name loads itself and runs, and a model that never reads the prompt
+    /// is no worse off than before.
+    #[test]
+    fn deferred_tools_are_hidden_but_never_out_of_reach() {
+        let mut agent = test_agent();
+
+        let visible = |a: &Agent| -> Vec<String> {
+            a.advertised_tools()
+                .iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+
+        let before = visible(&agent);
+        assert!(!before.contains(&"debug".to_string()), "{before:?}");
+        assert!(!before.contains(&"browse".to_string()), "{before:?}");
+        // …but the way in is advertised, or the model cannot ask.
+        assert!(before.contains(&"load_tools".to_string()), "{before:?}");
+        // The everyday tools are untouched.
+        for core in ["read_file", "edit_file", "run_command", "search", "todo"] {
+            assert!(
+                before.contains(&core.to_string()),
+                "{core} must stay visible"
+            );
+        }
+
+        // Loading one group brings in that group and nothing else.
+        agent.loaded_groups.insert("debugger".into());
+        let after = visible(&agent);
+        assert!(after.contains(&"debug".to_string()), "{after:?}");
+        assert!(
+            !after.contains(&"browse".to_string()),
+            "loading the debugger must not drag the browser in: {after:?}"
+        );
+        assert_eq!(after.len(), before.len() + 1);
+
+        // Every deferred tool is a real tool, and every group is reachable
+        // through `load_tools` — a typo here would hide something for ever.
+        let all: Vec<&str> = tools::specs().iter().map(|s| s.name).collect();
+        for (group, members) in tools::DEFERRED {
+            assert!(!members.is_empty(), "group {group} is empty");
+            for m in *members {
+                assert!(all.contains(m), "deferred tool {m} does not exist");
+                assert_eq!(tools::deferred_group(m), Some(*group));
+            }
+        }
+        // And nothing everyday was deferred by accident.
+        for core in [
+            "read_file",
+            "edit_file",
+            "run_command",
+            "search",
+            "todo",
+            "codegraph",
+        ] {
+            assert_eq!(
+                tools::deferred_group(core),
+                None,
+                "{core} must not be deferred"
+            );
         }
     }
 

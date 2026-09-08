@@ -158,7 +158,7 @@ pub struct MatchGroup {
 }
 
 impl Outcome {
-    fn ok(content: impl Into<String>, summary: impl Into<String>) -> Self {
+    pub fn ok(content: impl Into<String>, summary: impl Into<String>) -> Self {
         Self {
             ok: true,
             content: content.into(),
@@ -166,7 +166,7 @@ impl Outcome {
             view: ToolView::Plain,
         }
     }
-    fn err(msg: impl Into<String>) -> Self {
+    pub fn err(msg: impl Into<String>) -> Self {
         let msg = msg.into();
         Self {
             ok: false,
@@ -586,6 +586,24 @@ fn build_specs() -> Vec<Spec> {
             mutating: true,
         },
         Spec {
+            name: "load_tools",
+            desc: "Load a group of tools you do not have yet. Groups: browser (drive a real \
+                   browser), debugger (breakpoints, stepping, variables). Call this, then use \
+                   them — or just call the tool you want by name, and it is loaded for you.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "group": {
+                        "type": "string",
+                        "enum": ["browser", "debugger"],
+                        "description": "Which group to load."
+                    }
+                },
+                "required": ["group"]
+            }),
+            mutating: false,
+        },
+        Spec {
             name: "delegate",
             desc: "Hand a self-contained investigation to a subagent that has its own fresh \
                    context. Use it for wide searches so only the findings come back to you, \
@@ -663,6 +681,49 @@ const SHELLS_OUT: &[&str] = &["search", "run_command", "browse", "view_image"];
 /// stays sequential — either it mutates, needs approval, or its ordering or
 /// shared state matters.
 pub const PARALLEL_SAFE: &[&str] = &["read_file", "list_dir", "find_files", "search"];
+
+/// Tools held back from the schema until a session needs them.
+///
+/// The schema is the largest fixed cost in every request: measured on this
+/// repo, 5,203 tokens of tool definitions against 1,293 of prose, re-sent on
+/// every turn and re-prefilled by a local server that cannot cache it. `browse`
+/// and `debug` alone are 1,943 of that, and most sessions never open a browser
+/// or a debugger.
+///
+/// Held back, not removed. The prompt names each group in one line, `load_tools`
+/// brings a group in, and — the part that makes this safe — calling a deferred
+/// tool *directly* loads it and runs it rather than failing. A model that
+/// guesses `browse` without asking first is right, not broken, so the worst
+/// case is the same call it would have made anyway.
+///
+/// Only these two. `view_image` and `manage_skill` were tried here and taken
+/// back out: a test already asserts skill authoring is offered at top level,
+/// and a model that cannot see `view_image` while the user has attached an
+/// image is worse at the job, which is the one thing this must not cost. Two
+/// tools, 1,943 tokens, and both genuinely situational — most sessions open
+/// neither a browser nor a debugger.
+pub const DEFERRED: &[(&str, &[&str])] = &[("browser", &["browse"]), ("debugger", &["debug"])];
+
+/// The group a tool belongs to, if it is deferred at all.
+pub fn deferred_group(tool: &str) -> Option<&'static str> {
+    DEFERRED
+        .iter()
+        .find(|(_, members)| members.contains(&tool))
+        .map(|(group, _)| *group)
+}
+
+/// One line per group, for the prompt: what is behind each name.
+pub fn deferred_summary(enabled: impl Fn(&str) -> bool) -> String {
+    let mut out = String::new();
+    for (group, members) in DEFERRED {
+        let live: Vec<&str> = members.iter().copied().filter(|m| enabled(m)).collect();
+        if live.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "- {group}: {}", live.join(", "));
+    }
+    out
+}
 
 /// Why a shell command is irreversible, or `None` if it is ordinary.
 ///
