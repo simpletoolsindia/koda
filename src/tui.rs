@@ -1559,6 +1559,7 @@ impl App {
 
     fn setup_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let mut typed_at_toggle = false;
         // A toggle field is a choice, not a value: left/right and space step it,
         // and typing must not reach the editor behind it -- a half-typed "of"
         // would otherwise be saved and read back as "auto".
@@ -1582,11 +1583,24 @@ impl App {
                         }
                         return;
                     }
-                    KeyCode::Char(_) if !ctrl => return,
-                    KeyCode::Backspace => return,
+                    // Swallowed, because a half-typed "of" would be saved and
+                    // read back as the default. But swallowed silently is what
+                    // makes a working toggle look broken, so say so.
+                    KeyCode::Char(_) | KeyCode::Backspace if !ctrl => {
+                        typed_at_toggle = true;
+                    }
                     _ => {}
                 }
             }
+        }
+        if typed_at_toggle {
+            // The setup page's own status line, not the transcript: that is
+            // behind the overlay, where a message about the overlay cannot be
+            // read.
+            if let Some(s) = self.setup.as_mut() {
+                s.status = Some("this one is a choice — press ← or → to change it".into());
+            }
+            return;
         }
         match key.code {
             KeyCode::Esc => {

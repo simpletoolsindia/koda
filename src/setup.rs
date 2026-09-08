@@ -49,6 +49,17 @@ impl Field {
         matches!(self, Field::Vision | Field::Insecure)
     }
 
+    /// Every state a toggle can be in, in cycle order. Drawn beside the value
+    /// so the field reads as a choice rather than as text that will not accept
+    /// typing.
+    pub fn options(&self) -> &'static [&'static str] {
+        match self {
+            Field::Vision => &["auto", "on", "off"],
+            Field::Insecure => &["off", "on"],
+            _ => &[],
+        }
+    }
+
     fn label(&self) -> &'static str {
         match self {
             Field::Name => "name",
@@ -453,6 +464,41 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
             caret_screen = Some((x, y));
         }
 
+        // A toggle has to look like one. Its hint was only ever shown for an
+        // *empty, unfocused* field, and a toggle is never empty — so the line
+        // that says "← →" was unreachable, typing into the field did nothing,
+        // and nothing said why. The alternatives are drawn beside the value
+        // instead: the choice, and how to make it, both visible at rest.
+        if field.is_toggle() {
+            // Radio marks, not colour alone: which option is current has to
+            // survive a terminal that renders no colour at all, and these are
+            // the same marks the ask dialog uses for the same job.
+            let (on, off) = if g.fine_blocks {
+                ("●", "○")
+            } else {
+                ("*", "o")
+            };
+            let mut row = vec![Span::raw("   ".to_string())];
+            for (i, option) in field.options().iter().enumerate() {
+                if i > 0 {
+                    row.push(Span::styled("   ".to_string(), t.dim()));
+                }
+                let picked = option.eq_ignore_ascii_case(text.trim());
+                row.push(Span::styled(
+                    format!("{} {option}", if picked { on } else { off }),
+                    if picked {
+                        t.emphasis(t.accent)
+                    } else {
+                        t.dim()
+                    },
+                ));
+            }
+            if focused {
+                row.push(Span::styled("    ← → to change".to_string(), t.dim()));
+            }
+            lines.push(Line::from(row));
+            continue;
+        }
         lines.push(Line::from(vec![
             Span::raw("   ".to_string()),
             Span::styled(text, value_style),
@@ -651,6 +697,68 @@ mod tests {
     /// Vision belongs beside the model because it is a fact about the model.
     /// The people who need it are exactly those whose model name cannot be
     /// guessed from -- and they meet the setup page, not the config file.
+    /// The toggles worked and looked like they did not: their hint was shown
+    /// only for an *empty, unfocused* field, and a toggle is never empty, so
+    /// the line saying "← →" could not be reached. Every state has to be on
+    /// screen, and which one is current has to survive a colourless terminal.
+    #[test]
+    fn a_toggle_shows_every_state_it_can_be_in() {
+        assert_eq!(Field::Insecure.options(), &["off", "on"]);
+        assert_eq!(Field::Vision.options(), &["auto", "on", "off"]);
+        // A text field has no states to draw, and must not be drawn as if it did.
+        assert!(Field::Model.options().is_empty());
+        assert!(Field::Url.options().is_empty());
+
+        // Every option a toggle cycles through is one it advertises, or the UI
+        // is showing a choice the keys cannot reach.
+        let cfg = Config {
+            insecure_tls: false,
+            ..Config::default()
+        };
+        let mut s = Setup::new(&cfg);
+        for _ in 0..2 {
+            let shown = s.value(Field::Insecure).to_string();
+            assert!(
+                Field::Insecure.options().contains(&shown.as_str()),
+                "cycled to {shown:?}, which is not offered"
+            );
+            s.cycle_insecure();
+        }
+        for _ in 0..3 {
+            let shown = s.value(Field::Vision).to_string();
+            assert!(
+                Field::Vision.options().contains(&shown.as_str()),
+                "cycled to {shown:?}, which is not offered"
+            );
+            s.cycle_vision(true);
+        }
+    }
+
+    /// Flipping TLS has to reach the config the client is built from, in both
+    /// directions — turning the checks back *on* matters more than off.
+    #[test]
+    fn the_tls_toggle_round_trips_through_a_save() {
+        let cfg = Config {
+            insecure_tls: false,
+            ..Config::default()
+        };
+        let mut s = Setup::new(&cfg);
+        assert_eq!(s.value(Field::Insecure), "off", "seeded from the config");
+
+        s.cycle_insecure();
+        assert_eq!(s.value(Field::Insecure), "on");
+        let mut saved = cfg.clone();
+        s.apply(&mut saved);
+        assert!(saved.insecure_tls, "the save reaches the config");
+
+        // And back: a one-way toggle would be a trap.
+        let mut s = Setup::new(&saved);
+        assert_eq!(s.value(Field::Insecure), "on", "reopens where it was left");
+        s.cycle_insecure();
+        s.apply(&mut saved);
+        assert!(!saved.insecure_tls, "checks can be turned back on");
+    }
+
     #[test]
     fn vision_is_a_toggle_on_the_setup_page() {
         assert!(Field::Vision.is_toggle());
