@@ -153,3 +153,25 @@ A smaller model may need the steps spelled out, as in the example above, and may
 pressing `continue` rather than stopping to look. If a session runs away, koda's step
 budget ends it and says so; `debug action=terminate` closes it, and the next `launch`
 starts a fresh one either way.
+
+## Teaching koda to reach for it
+
+There is a ready-made skill in the repository at
+[`docs/skills/debugging.md`](https://github.com/simpletoolsindia/koda/blob/master/docs/skills/debugging.md).
+Copy it once and every project gets it:
+
+```sh
+mkdir -p ~/.config/koda/skills
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/docs/skills/debugging.md \
+  -o ~/.config/koda/skills/debugging.md
+```
+
+`koda skills` will list it. A skill is loaded only when it applies, so it costs nothing on
+turns that are not about debugging.
+
+It carries the parts that are easy to get wrong: **installing the adapter when it is
+missing** (including running `pip` through the interpreter koda actually probed, and the
+PEP 668 `--break-system-packages` case), using a `log_message` to watch a value across a
+loop instead of stopping ten times, `hit_condition` to skip to the interesting iteration,
+and the rule that stops sessions running away — *every stop should be followed by a
+question*, so two `continue`s with nothing evaluated in between means stop and look.

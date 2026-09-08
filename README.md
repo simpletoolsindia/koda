@@ -244,6 +244,11 @@ Stack (innermost first):
 total = 49
 ```
 
+There is a ready-made skill for this in `docs/skills/debugging.md` — copy it to
+`~/.config/koda/skills/` and koda will reach for the debugger on its own,
+install the adapter when it is missing, and watch a value across a loop with a
+logpoint instead of stopping ten times.
+
 One session at a time, and `list_adapters` says which debuggers this machine
 has. koda ships the registry, not the debuggers: `debugpy` for Python,
 `lldb-dap` for Rust and C, `dlv` for Go, `js-debug-adapter` for Node —
