@@ -1279,10 +1279,7 @@ impl App {
         let model_short: String = cfg.model.chars().take(28).collect();
         lines.push(Line::from(vec![
             Span::raw(indent.clone()),
-            Span::styled(
-                "a fast terminal coding agent".to_string(),
-                t.emphasis(t.accent_alt),
-            ),
+            Span::styled(tagline(self.tip_seed).to_string(), t.emphasis(t.accent_alt)),
             Span::styled(format!("  {}  {}", g.sep, model_short), t.dim()),
         ]));
         lines.push(Line::default());
@@ -4361,6 +4358,44 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
 /// gradient plus a soft bright band travelling left→right, so the logo "lights
 /// up" once on open. Draws over identical content, so when it stops there is no
 /// visible jump. Reduced-motion and non-TTY paths never reach here.
+/// What koda calls itself today.
+///
+/// The spinner-verb pattern — the one piece of terminal delight the research
+/// found people love enough to build ecosystems around — applied to the
+/// subtitle. One per launch, so it is a small surprise rather than a thing that
+/// churns while you read it. The first is the plain description, and it comes
+/// up as often as any other: the joke is optional, the sentence still has to
+/// say what this is.
+const TAGLINES: &[&str] = &[
+    "a fast terminal coding agent",
+    "your rubber duck learned to type",
+    "it reads the code so you can read the room",
+    "runs on your machine, not on your patience",
+    "the intern who never asks for a raise",
+    "compiles your ideas, not your excuses",
+    "has read your entire codebase. all of it.",
+    "powered by electricity and mild optimism",
+    "will not judge your variable names. much.",
+    "turning coffee into diffs",
+    "an agent, locally grown",
+    "here to make the tests pass. honestly.",
+];
+
+fn tagline(seed: usize) -> &'static str {
+    TAGLINES[seed % TAGLINES.len()]
+}
+
+/// The characters the wordmark scrambles through before it resolves.
+///
+/// A decode effect: for a few columns ahead of the arrival wavefront, cells
+/// flicker through noise and then land on the real glyph. It costs nothing —
+/// the intro is already redrawing those cells — and it is the difference
+/// between a logo appearing and a logo *arriving*.
+const GLITCH: [&str; 8] = ["▓", "▒", "░", "█", "▄", "▀", "▌", "▐"];
+const GLITCH_ASCII: [&str; 8] = ["#", "%", "*", "+", "=", "-", ":", "."];
+/// Columns ahead of the wavefront that are still scrambling.
+const GLITCH_BAND: f32 = 7.0;
+
 /// The visitor's frames: one braille cell, hopping within itself. The cell does
 /// not move vertically, so the row can never reflow.
 const VISITOR: [&str; 6] = ["⣀", "⠤", "⠒", "⠉", "⠒", "⠤"];
@@ -4553,14 +4588,37 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
         }
         let mut spans = vec![Span::raw("  ".to_string())];
         for (j, ch) in row.chars().enumerate() {
-            // Not arrived yet: leave the cell empty rather than dimming it, so
-            // the wordmark assembles instead of fading up as a whole.
-            if (j as f32) > front {
+            if ch == ' ' {
                 spans.push(Span::raw(" ".to_string()));
                 continue;
             }
-            if ch == ' ' {
-                spans.push(Span::raw(" ".to_string()));
+            // Not arrived yet. Cells just ahead of the wavefront scramble
+            // through noise before they resolve; further ahead they are simply
+            // not there, so the wordmark assembles rather than fading up whole.
+            if (j as f32) > front {
+                let ahead = j as f32 - front;
+                if ahead < GLITCH_BAND {
+                    let noise = if app.glyphs.fine_blocks {
+                        &GLITCH
+                    } else {
+                        &GLITCH_ASCII
+                    };
+                    // Hashed from the cell and the frame, so every cell
+                    // scrambles differently and none of it needs state.
+                    let h = (i as u64)
+                        .wrapping_mul(0x9E37_79B9)
+                        .wrapping_add(j as u64)
+                        .wrapping_add(elapsed.as_millis() as u64 / 40)
+                        .wrapping_mul(0x2545_F491_4F6C_DD1D);
+                    let dim = 1.0 - ahead / GLITCH_BAND;
+                    let (r, gg, bl) = anim::lerp_rgb(a, (90, 90, 110), 1.0 - dim);
+                    spans.push(Span::styled(
+                        noise[(h >> 33) as usize % noise.len()].to_string(),
+                        Style::default().fg(Color::Rgb(r, gg, bl)),
+                    ));
+                } else {
+                    spans.push(Span::raw(" ".to_string()));
+                }
                 continue;
             }
             // Same horizontal 3-stop gradient as the static banner.
@@ -5728,6 +5786,37 @@ mod tests {
         // reached with the wrong art.
         assert_eq!(banner_art(&crate::theme::UNICODE)[0], BANNER_ART[0]);
         assert_eq!(banner_art(&crate::theme::ASCII)[0], BANNER_ASCII[0]);
+    }
+
+    /// The subtitle is the one line that says what koda is. A joke may replace
+    /// it, but never at the cost of fitting a narrow terminal or of the plain
+    /// description being one of the options.
+    #[test]
+    fn every_tagline_fits_and_the_plain_one_is_among_them() {
+        assert_eq!(TAGLINES[0], "a fast terminal coding agent");
+        for line in TAGLINES {
+            assert!(!line.is_empty());
+            assert!(
+                UnicodeWidthStr::width(*line) <= 46,
+                "{line:?} is too wide for a narrow terminal"
+            );
+            assert!(line.is_ascii(), "{line:?} must render without unicode");
+        }
+        // The rotation covers all of them and never indexes out of range.
+        let seen: std::collections::HashSet<&str> = (0..TAGLINES.len() * 3).map(tagline).collect();
+        assert_eq!(seen.len(), TAGLINES.len());
+    }
+
+    /// The decode noise is drawn in the wordmark's own cells, so a glyph that
+    /// is not one column would shift the letters that follow it.
+    #[test]
+    fn glitch_noise_is_one_column_wide() {
+        for set in [&GLITCH, &GLITCH_ASCII] {
+            for ch in set {
+                assert_eq!(UnicodeWidthStr::width(*ch), 1, "{ch:?} is not one column");
+            }
+        }
+        assert!(GLITCH_ASCII.iter().all(|c| c.is_ascii()));
     }
 
     /// A costume must never change the width of the status row, or the line
