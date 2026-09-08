@@ -7,8 +7,16 @@
   <meta name="theme-color" content="#090a0d" />
   <title>koda · observability</title>
 
-  <!-- The UI remains build-free: Tailwind Play CDN + React UMD + Babel. -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Everything the page needs is inlined by build.sh: Tailwind, React and
+       the already-transpiled app. Nothing is fetched at runtime.
+
+       This used to pull Tailwind, React twice and an *unversioned*
+       @babel/standalone from two CDNs. Three consequences, all bad: the UI did
+       not work offline, which is the only environment koda targets; the page
+       ran whatever unpkg served that day, inside a document that can read your
+       source tree through /api/codegraph; and the promise that nothing leaves
+       your machine was true of the server and false of the page. -->
+  <script>/*__TAILWIND__*/</script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -42,9 +50,8 @@
     };
   </script>
 
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>/*__REACT__*/</script>
+  <script>/*__REACTDOM__*/</script>
 
   <style>
     :root {
@@ -212,9 +219,3 @@
   </div>
 
   <script>
-    Babel.registerPreset('react-classic', {
-      presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]],
-    });
-  </script>
-
-  <script type="text/babel" data-presets="react-classic">

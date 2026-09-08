@@ -1497,11 +1497,23 @@ async fn write_response(
     ctype: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    // No `Access-Control-Allow-Origin: *`. The UI is served from this same
+    // origin, so it never needed CORS — but the wildcard let *any* page you had
+    // open read this API from the browser you were already running it in. That
+    // is your system prompt, your code graph and your session list readable by
+    // a tab you forgot about, and `POST /api/config` able to repoint your model
+    // endpoint. Binding to 127.0.0.1 stops another machine; it does nothing
+    // about another tab.
+    //
+    // `Vary: Origin` so a cache cannot serve one origin's response to another,
+    // and the frame headers because nothing here should ever be embedded.
     let head = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: {ctype}\r\n\
          Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
+         Vary: Origin\r\n\
+         X-Frame-Options: DENY\r\n\
+         X-Content-Type-Options: nosniff\r\n\
          Cache-Control: no-store\r\n\
          Connection: close\r\n\r\n",
         body.len()
