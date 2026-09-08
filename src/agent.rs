@@ -340,6 +340,10 @@ pub struct Agent {
     /// most sessions never ask an intent-shaped question, and 150 ms of walking
     /// should not be spent on the ones that do not.
     lexical: Arc<std::sync::RwLock<Option<crate::index::Index>>>,
+    /// Set when the embedding endpoint has let us down once. The vector half
+    /// stays off for the session after that; the lexical half never depended
+    /// on it, so search keeps working either way.
+    embed_failed: Arc<std::sync::atomic::AtomicBool>,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
     /// Outcomes for read-only tools pre-computed concurrently for the current
@@ -487,6 +491,7 @@ impl Agent {
             reads_this_turn: 0,
             hinted: std::collections::HashSet::new(),
             lexical: Arc::default(),
+            embed_failed: Arc::default(),
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
@@ -569,6 +574,7 @@ impl Agent {
             reads_this_turn: 0,
             hinted: std::collections::HashSet::new(),
             lexical: Arc::default(),
+            embed_failed: Arc::default(),
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
@@ -2947,6 +2953,79 @@ impl Agent {
         }
     }
 
+    /// Whether a hybrid ranking is possible right now.
+    fn have_vectors(&self) -> bool {
+        !self.cfg.embed_model.trim().is_empty()
+            && !self.embed_failed.load(Ordering::Relaxed)
+            && self
+                .lexical
+                .read()
+                .map(|i| i.as_ref().is_some_and(|x| x.vectors.is_some()))
+                .unwrap_or(false)
+    }
+
+    /// Fill the index's vectors in the background, once.
+    ///
+    /// Never on the query path: an embedding server that is slow, or missing,
+    /// must cost the search nothing. If anything goes wrong — a transport
+    /// error, a model that does not exist, rows that disagree about their own
+    /// dimension — the vector half is abandoned for the session rather than
+    /// fused in degraded. A hybrid ranking is only as good as its worst input,
+    /// so half-working vectors are worse than none.
+    fn spawn_embedding_fill(&self) {
+        let model = self.cfg.embed_model.trim().to_string();
+        if model.is_empty() || self.embed_failed.load(Ordering::Relaxed) {
+            return;
+        }
+        let slot = self.lexical.clone();
+        let failed = self.embed_failed.clone();
+        let client = self.client.clone();
+        let root = self.ctx.root.clone();
+        tokio::spawn(async move {
+            let chunks = {
+                let Ok(guard) = slot.read() else { return };
+                match guard.as_ref() {
+                    Some(idx) if idx.vectors.is_none() => idx.chunks.clone(),
+                    _ => return,
+                }
+            };
+            let mut rows: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
+            for batch in chunks.chunks(crate::index::EMBED_BATCH) {
+                let texts: Vec<String> = batch
+                    .iter()
+                    .map(|c| crate::index::embed_text(&root, c).unwrap_or_default())
+                    .collect();
+                match client.embeddings(&model, &texts).await {
+                    Ok(mut got) if got.len() == texts.len() => rows.append(&mut got),
+                    Ok(_) => {
+                        crate::tel_warn!("index", "embedding batch size mismatch");
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    Err(e) => {
+                        crate::tel_warn!("index", "embedding failed", "detail" => format!("{e:#}"));
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+            let Ok(mut guard) = slot.write() else { return };
+            let Some(idx) = guard.as_mut() else { return };
+            match crate::index::attach_vectors(idx, &model, rows) {
+                Ok(()) => crate::tel_info!(
+                    "index",
+                    "vectors ready",
+                    "chunks" => idx.chunks.len(),
+                    "model" => model
+                ),
+                Err(why) => {
+                    crate::tel_warn!("index", "vectors rejected", "why" => why);
+                    failed.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
     /// Run a lexical search, building the index on first use.
     ///
     /// Reported with the file, the line span and the definitions the span
@@ -2966,11 +3045,34 @@ impl Agent {
             })
             .await;
         }
+        // Start the vectors filling if they are wanted and not there yet. This
+        // query runs lexical-only; the next one is hybrid.
+        self.spawn_embedding_fill();
+
+        // Embed the question only when there is something to compare it
+        // against, and never let that call fail the search.
+        let query_vec = if self.have_vectors() {
+            match self
+                .client
+                .embeddings(self.cfg.embed_model.trim(), &[text.to_string()])
+                .await
+            {
+                Ok(mut rows) if !rows.is_empty() => Some(rows.remove(0)),
+                _ => {
+                    self.embed_failed.store(true, Ordering::Relaxed);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let guard = self.lexical.read().ok();
         let Some(Some(idx)) = guard.as_deref() else {
             return "ERROR: could not build the search index. Use `search` instead.".into();
         };
-        let hits = idx.search(text, k);
+        let hybrid = query_vec.is_some();
+        let hits = idx.hybrid_search(text, query_vec.as_deref(), k);
         if hits.is_empty() {
             return format!(
                 "No code matched {text:?}. Try fewer words, or `search` for an exact string."
@@ -2992,6 +3094,14 @@ impl Agent {
             }
         }
         out.push_str("\nRead the ones that look right; this is a ranking, not an answer.");
+        // Say which halves ran. A ranking the reader cannot account for is one
+        // they cannot judge, and "the vectors were not ready yet" is the
+        // difference between a bad index and a warm one.
+        if !hybrid && !self.cfg.embed_model.trim().is_empty() {
+            out.push_str(
+                "\n(Word matching only — the meaning index is still building, or unavailable.)",
+            );
+        }
         out
     }
 

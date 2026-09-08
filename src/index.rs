@@ -61,6 +61,9 @@ pub struct Chunk {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Index {
     pub chunks: Vec<Chunk>,
+    /// Present only once an embedding model has been configured and the
+    /// background fill has finished. Absent is the normal state, not an error.
+    pub vectors: Option<Vectors>,
     /// term -> id
     vocab: HashMap<String, u32>,
     /// term id -> [(chunk id, term frequency)]
@@ -79,13 +82,96 @@ pub struct Hit {
     pub score: f32,
 }
 
+/// Embeddings for every chunk, L2-normalised so cosine is a dot product.
+///
+/// Stored as f16. Components of a normalised vector live in [-1, 1], where f16
+/// carries about three decimal digits — far more than a ranking needs — and it
+/// halves a store that is otherwise the largest thing koda keeps in memory for
+/// a repository.
+#[derive(Default, Serialize, Deserialize)]
+pub struct Vectors {
+    pub dim: usize,
+    /// `n * dim`, row-major.
+    data: Vec<u16>,
+    /// The model that produced these. Changing it invalidates them and nothing
+    /// else, since the lexical half never depended on it.
+    pub model: String,
+}
+
+impl Vectors {
+    pub fn rows(&self) -> usize {
+        self.data.len().checked_div(self.dim).unwrap_or(0)
+    }
+
+    fn push(&mut self, v: &[f32]) {
+        // Normalise on the way in so every query is a dot product.
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        self.data.extend(v.iter().map(|x| f16_from(x / norm)));
+    }
+
+    /// Cosine against every row. A flat scan: at koda's corpus sizes an ANN
+    /// index would be more code, more memory and more failure modes than the
+    /// millisecond it saves.
+    fn search(&self, query: &[f32], k: usize) -> Vec<Hit> {
+        if self.dim == 0 || query.len() != self.dim {
+            return Vec::new();
+        }
+        let norm = query.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+        let q: Vec<f32> = query.iter().map(|x| x / norm).collect();
+        let mut hits: Vec<Hit> = (0..self.rows())
+            .map(|i| {
+                let row = &self.data[i * self.dim..(i + 1) * self.dim];
+                let score = row.iter().zip(&q).map(|(a, b)| f16_to(*a) * b).sum::<f32>();
+                Hit { chunk: i, score }
+            })
+            .collect();
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+        hits.truncate(k);
+        hits
+    }
+}
+
+/// f32 -> f16 bits, round-to-nearest, flushing subnormals to zero.
+///
+/// Values here are components of a unit vector, so the interesting range is
+/// well inside f16's normal range; anything below it contributes nothing to a
+/// dot product worth keeping a denormal path for.
+fn f16_from(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mant = bits & 0x007f_ffff;
+    if exp >= 31 {
+        return sign | 0x7bff; // saturate rather than produce an infinity
+    }
+    if exp <= 0 {
+        return sign;
+    }
+    // Round to nearest, ties away from zero, on the 13 bits being dropped.
+    let mut half = sign | ((exp as u16) << 10) | (mant >> 13) as u16;
+    if mant & 0x1000 != 0 {
+        half = half.wrapping_add(1);
+    }
+    half
+}
+
+fn f16_to(h: u16) -> f32 {
+    let sign = ((h & 0x8000) as u32) << 16;
+    let exp = ((h >> 10) & 0x1f) as i32;
+    let mant = (h & 0x03ff) as u32;
+    if exp == 0 {
+        return f32::from_bits(sign);
+    }
+    f32::from_bits(sign | (((exp - 15 + 127) as u32) << 23) | (mant << 13))
+}
+
 impl Index {
     /// Score every chunk that shares a term with the query, best first.
     ///
     /// One f32 accumulator over the corpus and a walk of each query term's
     /// postings — measured at microseconds over a thousand chunks, so there is
     /// nothing to be clever about.
-    pub fn search(&self, query: &str, k: usize) -> Vec<Hit> {
+    fn rank_lexical(&self, query: &str, k: usize) -> Vec<Hit> {
         let terms = terms(None, query);
         if terms.is_empty() || self.chunks.is_empty() {
             return Vec::new();
@@ -119,12 +205,70 @@ impl Index {
             .collect();
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
 
-        // At most a couple of spans from any one file. Without this a file that
-        // happens to *list* the query's words -- a stopword table, a test
-        // fixture, a match arm full of names -- takes most of the page, and the
-        // second-best file never gets seen. Measured on this repo: the module
-        // holding the code-ambient word list took three of the top five for
-        // three different questions.
+        hits.truncate(k);
+        hits
+    }
+}
+
+/// Cormack et al.'s constant. Their own sweep moves MAP by 0.2% between k=10
+/// and k=100, so there is no tuning to be had here without labelled queries.
+const RRF_K: f32 = 60.0;
+/// How deep each path is read before fusing.
+const FUSE_DEPTH: usize = 50;
+/// Ranks a test chunk is pushed down, unless the question is about tests. The
+/// measured top-1 failure for "where is retry handled" was a test asserting on
+/// the English word "handles".
+const TEST_PENALTY: usize = 10;
+
+impl Index {
+    /// Fuse the lexical and vector rankings.
+    ///
+    /// Reciprocal rank fusion rather than a weighted sum of scores: BM25 scores
+    /// and cosine similarities are not on a common scale, and the literature's
+    /// better-performing alternative (convex combination) needs a weight tuned
+    /// on in-domain labelled queries, which no koda user is going to produce
+    /// for their own repository. RRF needs only the orderings.
+    pub fn hybrid_search(&self, query: &str, query_vec: Option<&[f32]>, k: usize) -> Vec<Hit> {
+        let lexical = self.rank_lexical(query, FUSE_DEPTH);
+        let dense = match (query_vec, self.vectors.as_ref()) {
+            (Some(q), Some(v)) => v.search(q, FUSE_DEPTH),
+            _ => Vec::new(),
+        };
+        if dense.is_empty() {
+            return self.finish_ranking(lexical, query, k);
+        }
+        let mut fused: HashMap<usize, f32> = HashMap::new();
+        for (rank, h) in lexical.iter().enumerate() {
+            *fused.entry(h.chunk).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+        }
+        for (rank, h) in dense.iter().enumerate() {
+            *fused.entry(h.chunk).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+        }
+        let mut hits: Vec<Hit> = fused
+            .into_iter()
+            .map(|(chunk, score)| Hit { chunk, score })
+            .collect();
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.chunk.cmp(&b.chunk)));
+        self.finish_ranking(hits, query, k)
+    }
+
+    /// The rules that apply however the ranking was produced: demote tests,
+    /// then keep the page diverse.
+    fn finish_ranking(&self, mut hits: Vec<Hit>, query: &str, k: usize) -> Vec<Hit> {
+        let asking_about_tests = query.to_ascii_lowercase().contains("test");
+        if !asking_about_tests {
+            // A stable demotion by position rather than by score, so it works
+            // the same whether the score is a BM25 sum or an RRF total.
+            let mut ordered: Vec<(usize, &Hit)> = hits.iter().enumerate().collect();
+            ordered.sort_by_key(|(i, h)| {
+                i + if is_test(&self.chunks[h.chunk].path) {
+                    TEST_PENALTY
+                } else {
+                    0
+                }
+            });
+            hits = ordered.into_iter().map(|(_, h)| h.clone()).collect();
+        }
         let mut per_file: HashMap<&str, usize> = HashMap::new();
         let mut kept = Vec::with_capacity(k);
         for h in hits {
@@ -141,6 +285,19 @@ impl Index {
         }
         kept
     }
+}
+
+/// Whether a path is test code. Cheap and syntactic on purpose: a chunk inside
+/// a `#[cfg(test)]` block would need the parser to say so, and the file-level
+/// signal catches most of it.
+fn is_test(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.starts_with("tests/")
+        || p.contains("/tests/")
+        || p.contains("test_")
+        || p.contains("_test.")
+        || p.contains(".test.")
+        || p.contains("spec.")
 }
 
 /// Split text into the terms the index stores.
@@ -393,6 +550,64 @@ impl Index {
     }
 }
 
+/// The text an embedding model sees for a chunk: the file, what it defines, and
+/// the span itself. The path and symbol names carry real signal for an
+/// intent-shaped question and cost almost nothing.
+pub fn embed_text(root: &Path, c: &Chunk) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(&c.path)).ok()?;
+    let body: Vec<&str> = text
+        .lines()
+        .skip(c.start.saturating_sub(1))
+        .take(c.end + 1 - c.start)
+        .collect();
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} — {}\n{}",
+        c.path,
+        c.names.join(", "),
+        body.join("\n")
+    ))
+}
+
+/// Chunks per embedding request. Small enough that one failure loses little,
+/// large enough that a thousand chunks is tens of round trips rather than a
+/// thousand.
+pub const EMBED_BATCH: usize = 32;
+
+/// Attach a completed set of vectors, if it matches the corpus.
+///
+/// The dimension is read from the model's own answer rather than configured,
+/// and a set that does not cover every chunk is refused outright: a partially
+/// embedded corpus would rank the embedded half above the rest for reasons
+/// that have nothing to do with the query.
+pub fn attach_vectors(idx: &mut Index, model: &str, rows: Vec<Vec<f32>>) -> Result<(), String> {
+    if rows.len() != idx.chunks.len() {
+        return Err(format!(
+            "embedded {} of {} chunks",
+            rows.len(),
+            idx.chunks.len()
+        ));
+    }
+    let Some(dim) = rows.first().map(|r| r.len()).filter(|d| *d > 0) else {
+        return Err("the embedding model returned no dimensions".into());
+    };
+    if rows.iter().any(|r| r.len() != dim) {
+        return Err("the embedding model returned rows of different lengths".into());
+    }
+    let mut v = Vectors {
+        dim,
+        data: Vec::with_capacity(rows.len() * dim),
+        model: model.to_string(),
+    };
+    for row in &rows {
+        v.push(row);
+    }
+    idx.vectors = Some(v);
+    Ok(())
+}
+
 /// Build the index by walking the workspace, under the same limits and the same
 /// ignore rules the graph uses — one traversal policy, not two.
 pub fn build(root: &Path) -> Index {
@@ -448,7 +663,7 @@ mod tests {
             idx.chunks.len()
         );
 
-        let hits = idx.search("where is retry handled", 8);
+        let hits = idx.hybrid_search("where is retry handled", None, 8);
         assert!(!hits.is_empty(), "no hits at all");
         let paths: Vec<&str> = hits
             .iter()
@@ -464,7 +679,7 @@ mod tests {
         // An exact symbol still finds its definition, so the fuzzy path costs
         // no precision. (Top-3 rather than top-1: this very test file mentions
         // the name, and BM25 has no way to know a test is not the answer.)
-        let hits = idx.search("stream_with_retry", 3);
+        let hits = idx.hybrid_search("stream_with_retry", None, 3);
         let paths: Vec<&str> = hits
             .iter()
             .map(|h| idx.chunks[h.chunk].path.as_str())
@@ -480,7 +695,7 @@ mod tests {
         let idx = build(Path::new(env!("CARGO_MANIFEST_DIR")));
         let build_ms = t0.elapsed().as_millis();
         let t1 = std::time::Instant::now();
-        let _ = idx.search("where is retry handled", 8);
+        let _ = idx.hybrid_search("where is retry handled", None, 8);
         eprintln!(
             "{} chunks over {} files · build {build_ms}ms · query {}us",
             idx.chunks.len(),
@@ -495,7 +710,7 @@ mod tests {
             "how does approval work for commands",
         ] {
             eprintln!("\n  {q:?}");
-            for h in idx.search(q, 5) {
+            for h in idx.hybrid_search(q, None, 5) {
                 let c = &idx.chunks[h.chunk];
                 eprintln!(
                     "    {:6.2}  {}:{}-{}  {}",
@@ -507,6 +722,102 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// f16 costs precision on purpose; it must not cost the ranking. Round-trip
+    /// error has to stay far below the gaps between cosine scores.
+    #[test]
+    fn f16_keeps_enough_precision_for_a_ranking() {
+        for x in [0.0f32, 1.0, -1.0, 0.5, -0.03125, 0.123_45, -0.987_65, 1e-3] {
+            let back = f16_to(f16_from(x));
+            assert!((back - x).abs() <= 0.001 + x.abs() * 0.001, "{x} -> {back}");
+        }
+        // Subnormals flush to zero rather than producing garbage.
+        assert_eq!(f16_to(f16_from(1e-9)), 0.0);
+        // And a value out of range saturates instead of becoming an infinity.
+        assert!(f16_to(f16_from(1e9)).is_finite());
+    }
+
+    /// Cosine over the stored rows, and the vectors being rejected rather than
+    /// half-applied when they do not cover the corpus.
+    #[test]
+    fn vectors_rank_by_direction_and_are_all_or_nothing() {
+        let mut idx = Index {
+            chunks: vec![
+                Chunk {
+                    path: "a.rs".into(),
+                    start: 1,
+                    end: 2,
+                    names: vec!["a".into()],
+                },
+                Chunk {
+                    path: "b.rs".into(),
+                    start: 1,
+                    end: 2,
+                    names: vec!["b".into()],
+                },
+            ],
+            ..Default::default()
+        };
+        // A short set is refused: a partly embedded corpus would rank the
+        // embedded half first for reasons unrelated to the query.
+        assert!(attach_vectors(&mut idx, "m", vec![vec![1.0, 0.0]]).is_err());
+        assert!(idx.vectors.is_none());
+        // Ragged rows are refused too.
+        assert!(attach_vectors(&mut idx, "m", vec![vec![1.0, 0.0], vec![1.0]]).is_err());
+
+        attach_vectors(&mut idx, "m", vec![vec![1.0, 0.0], vec![0.0, 2.0]]).expect("attached");
+        let v = idx.vectors.as_ref().expect("vectors");
+        assert_eq!(v.dim, 2);
+        assert_eq!(v.rows(), 2);
+        // Magnitude is normalised away, so only direction ranks.
+        let hits = v.search(&[0.0, 9.0], 2);
+        assert_eq!(hits[0].chunk, 1, "{hits:?}");
+        assert!((hits[0].score - 1.0).abs() < 0.01, "{hits:?}");
+    }
+
+    /// Fusion has to lift what both halves like, without either being able to
+    /// veto the other.
+    #[test]
+    fn fusion_lifts_what_both_paths_agree_on() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut idx = build(root);
+
+        let lexical = idx.hybrid_search("retry backoff", None, 5);
+        assert!(!lexical.is_empty());
+
+        // Point every vector at the second lexical hit; fusion should promote
+        // it above the first, since it now has support from both paths.
+        let target = lexical[1].chunk;
+        let dim = 4;
+        let rows: Vec<Vec<f32>> = (0..idx.chunks.len())
+            .map(|i| {
+                if i == target {
+                    vec![1.0, 0.0, 0.0, 0.0]
+                } else {
+                    vec![0.0, 0.0, 0.0, 1.0]
+                }
+            })
+            .collect();
+        attach_vectors(&mut idx, "fake", rows).expect("attached");
+        assert_eq!(idx.vectors.as_ref().map(|v| v.dim), Some(dim));
+
+        let fused = idx.hybrid_search("retry backoff", Some(&[1.0, 0.0, 0.0, 0.0]), 5);
+        assert_eq!(fused[0].chunk, target, "both paths agree on it");
+        // The lexical leader is still on the page: one path cannot veto.
+        assert!(
+            fused.iter().any(|h| h.chunk == lexical[0].chunk),
+            "lexical top-1 must survive fusion"
+        );
+    }
+
+    #[test]
+    fn tests_rank_below_implementation_unless_asked_for() {
+        assert!(is_test("tests/probe.py"));
+        assert!(is_test("src/foo/test_thing.rs"));
+        assert!(is_test("web-ui/app.test.js"));
+        assert!(!is_test("src/agent.rs"));
+        assert!(!is_test("src/latest.rs"), "substring must not catch this");
     }
 
     #[test]

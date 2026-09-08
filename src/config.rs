@@ -403,6 +403,15 @@ pub struct Config {
     #[serde(default)]
     pub ocr_model: String,
 
+    /// Embedding model for `codegraph query=search`, on the same endpoint as
+    /// the chat model (`/v1/embeddings`). Empty — the default — means lexical
+    /// search only, which is a complete feature rather than a degraded one.
+    /// Set it and koda also ranks by meaning, which is what tells "rate
+    /// limiting" apart from a frame *rate*. Small models suffice:
+    /// `nomic-embed-text`, `bge-small-en-v1.5`, `all-MiniLM-L6-v2`.
+    #[serde(default)]
+    pub embed_model: String,
+
     /// Attempts per request before giving up (1 = no retry).
     pub max_retries: u32,
     /// "debug" | "info" | "warn" | "error"
@@ -599,6 +608,7 @@ impl Default for Config {
             web_fetch: false,
             ocr: false,
             ocr_model: String::new(),
+            embed_model: String::new(),
             max_retries: 3,
             log_level: "info".into(),
             log_to_file: true,
@@ -1004,6 +1014,10 @@ log_to_file = true
 # Switch live with ctrl+p or /mode.
 mode = "execute"
 
+# Embedding model for `codegraph query=search`, on the same endpoint. Empty means
+# lexical search only. Try nomic-embed-text or bge-small-en-v1.5.
+embed_model = ""
+
 # Summarize the conversation automatically at this fraction of context_tokens.
 # 0 turns it off.
 auto_compact_at = 0.85
@@ -1268,5 +1282,23 @@ mod tests {
     #[test]
     fn default_shell_is_nonempty() {
         assert!(!default_shell().is_empty());
+    }
+
+    /// The one key that turns hybrid search on has to survive the merge from a
+    /// project file, or the feature is unreachable without editing the global
+    /// config.
+    #[test]
+    fn a_project_file_can_set_the_embed_model() {
+        let dir = std::env::temp_dir().join(format!("koda-cfg-embed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmp");
+        std::fs::write(
+            dir.join("koda.toml"),
+            "embed_model = \"nomic-embed-text\"\n",
+        )
+        .expect("write");
+        let cfg = Config::load(&dir).expect("load");
+        assert_eq!(cfg.embed_model, "nomic-embed-text");
+        assert_eq!(cfg.resolved().embed_model, "nomic-embed-text");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

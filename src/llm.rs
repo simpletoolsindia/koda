@@ -480,6 +480,44 @@ impl Client {
         rb
     }
 
+    /// Embed a batch of texts.
+    ///
+    /// On the same endpoint and the same auth as everything else, because that
+    /// is the whole reason this is affordable: the servers koda already talks
+    /// to (Ollama, llama.cpp, LM Studio) expose `/v1/embeddings` beside the
+    /// chat route, so there is no second thing to install or configure.
+    pub async fn embeddings(&self, model: &str, input: &[String]) -> Result<Vec<Vec<f32>>> {
+        let resp = self
+            .req(reqwest::Method::POST, "/embeddings")
+            .json(&serde_json::json!({ "model": model, "input": input }))
+            .send()
+            .await
+            .map_err(|e| classify_transport(&self.endpoint, &e))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(classify_status(status, &text, "").into());
+        }
+        let v: Value = serde_json::from_str(&text).context("parsing /embeddings response")?;
+        let items = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .context("embeddings response had no `data`")?;
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            let row = it
+                .get("embedding")
+                .and_then(|e| e.as_array())
+                .context("an embedding row had no `embedding`")?;
+            out.push(
+                row.iter()
+                    .filter_map(|x| x.as_f64().map(|f| f as f32))
+                    .collect::<Vec<f32>>(),
+            );
+        }
+        Ok(out)
+    }
+
     pub async fn models(&self) -> Result<Vec<String>> {
         let resp = self
             .req(reqwest::Method::GET, "/models")

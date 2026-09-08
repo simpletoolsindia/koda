@@ -447,10 +447,30 @@ because a file that merely *lists* the query's words — a stopword table, a mat
 arm full of names — otherwise takes most of the page.
 
 It builds on first use (150 ms over this repo: 1,620 chunks, 69 files) and
-queries in 65 µs, so there is no index to configure, persist or invalidate. It
-is lexical only, which is an honest limit rather than a finished story: BM25
-cannot tell "rate limiting" from a frame *rate*. The design for the dense half,
-with the evidence behind every choice, is in
+queries in 65 µs, so there is no index to configure, persist or invalidate.
+
+**Set `embed_model` and it also ranks by meaning.** Word matching alone cannot
+tell "rate limiting" from a frame *rate* — measured, and reproducible: on a
+small project the lexical half returns only the animation code for that query,
+and the hybrid half also finds `over_quota` and `cooldown_ms`. The model runs
+on the endpoint you already use (`/v1/embeddings`, which Ollama, llama.cpp and
+LM Studio all expose beside the chat route); `nomic-embed-text` or
+`bge-small-en-v1.5` are plenty.
+
+```toml
+embed_model = "nomic-embed-text"   # empty (the default) = word matching only
+```
+
+The two rankings are combined with reciprocal rank fusion rather than a
+weighted sum, because BM25 scores and cosine similarities are not on a common
+scale and the better-performing alternative needs a weight tuned on labelled
+queries from your own repository, which nobody is going to produce. Embedding
+happens in the background after the first search, so a slow or missing server
+costs the search nothing — and if it fails once, the vector half is dropped for
+the session rather than fused in half-working. A ranking is only as good as its
+worst input. When only words ran, the result says so.
+
+Every constant here, and the evidence for it, is in
 [docs/research-hybrid-retrieval.md](docs/research-hybrid-retrieval.md).
 
 Two things push the model to actually use it, because a graph nothing consults
