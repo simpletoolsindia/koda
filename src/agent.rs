@@ -344,6 +344,9 @@ pub struct Agent {
     /// stays off for the session after that; the lexical half never depended
     /// on it, so search keeps working either way.
     embed_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// The embedding model actually in use: the configured one, or whatever the
+    /// endpoint turned out to have. Resolved once per session.
+    embed_model: Arc<std::sync::RwLock<Option<String>>>,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
     /// Outcomes for read-only tools pre-computed concurrently for the current
@@ -492,6 +495,7 @@ impl Agent {
             hinted: std::collections::HashSet::new(),
             lexical: Arc::default(),
             embed_failed: Arc::default(),
+            embed_model: Arc::default(),
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
@@ -575,6 +579,7 @@ impl Agent {
             hinted: std::collections::HashSet::new(),
             lexical: Arc::default(),
             embed_failed: Arc::default(),
+            embed_model: Arc::default(),
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
@@ -2953,10 +2958,45 @@ impl Agent {
         }
     }
 
+    /// The embedding model to use, discovered rather than configured.
+    ///
+    /// Asking a user to name an embedding model means the feature only reaches
+    /// the people who already knew they wanted it. The endpoint knows what it
+    /// is serving, so koda asks: if `embed_model` is set it wins, and otherwise
+    /// the model list is matched by name against the families that are
+    /// embedders. Nothing found is not an error — that is a normal endpoint,
+    /// and search still works on words alone.
+    async fn resolve_embed_model(&self) -> Option<String> {
+        if let Ok(slot) = self.embed_model.read() {
+            if let Some(m) = slot.as_ref() {
+                return (!m.is_empty()).then(|| m.clone());
+            }
+        }
+        let configured = self.cfg.embed_model.trim().to_string();
+        let picked = if !configured.is_empty() {
+            configured
+        } else {
+            let names = self.client.models().await.unwrap_or_default();
+            let found = names.iter().find(|n| looks_like_embedder(n)).cloned();
+            match found {
+                Some(n) => {
+                    crate::tel_info!("index", "embedding model discovered", "model" => n.clone());
+                    n
+                }
+                // Remembered as "none" so the model list is asked for once.
+                None => String::new(),
+            }
+        };
+        let _ = self
+            .embed_model
+            .write()
+            .map(|mut w| *w = Some(picked.clone()));
+        (!picked.is_empty()).then_some(picked)
+    }
+
     /// Whether a hybrid ranking is possible right now.
     fn have_vectors(&self) -> bool {
-        !self.cfg.embed_model.trim().is_empty()
-            && !self.embed_failed.load(Ordering::Relaxed)
+        !self.embed_failed.load(Ordering::Relaxed)
             && self
                 .lexical
                 .read()
@@ -2972,8 +3012,7 @@ impl Agent {
     /// dimension — the vector half is abandoned for the session rather than
     /// fused in degraded. A hybrid ranking is only as good as its worst input,
     /// so half-working vectors are worse than none.
-    fn spawn_embedding_fill(&self) {
-        let model = self.cfg.embed_model.trim().to_string();
+    fn spawn_embedding_fill(&self, model: String) {
         if model.is_empty() || self.embed_failed.load(Ordering::Relaxed) {
             return;
         }
@@ -3045,18 +3084,26 @@ impl Agent {
             })
             .await;
         }
-        // Start the vectors filling if they are wanted and not there yet. This
-        // query runs lexical-only; the next one is hybrid.
-        self.spawn_embedding_fill();
+        // Find an embedding model if there is one, and start the vectors
+        // filling. This query runs on words; the next one also ranks by
+        // meaning. Nothing here is configured and nothing here is announced.
+        let embed_model = if self.embed_failed.load(Ordering::Relaxed) {
+            None
+        } else {
+            self.resolve_embed_model().await
+        };
+        // Whether meaning-ranking is coming at all, which is what the reader
+        // needs to know when only words ran.
+        let embedding_available = embed_model.is_some();
+        if let Some(m) = embed_model.clone() {
+            self.spawn_embedding_fill(m);
+        }
 
         // Embed the question only when there is something to compare it
         // against, and never let that call fail the search.
         let query_vec = if self.have_vectors() {
-            match self
-                .client
-                .embeddings(self.cfg.embed_model.trim(), &[text.to_string()])
-                .await
-            {
+            let model = embed_model.unwrap_or_default();
+            match self.client.embeddings(&model, &[text.to_string()]).await {
                 Ok(mut rows) if !rows.is_empty() => Some(rows.remove(0)),
                 _ => {
                     self.embed_failed.store(true, Ordering::Relaxed);
@@ -3097,10 +3144,8 @@ impl Agent {
         // Say which halves ran. A ranking the reader cannot account for is one
         // they cannot judge, and "the vectors were not ready yet" is the
         // difference between a bad index and a warm one.
-        if !hybrid && !self.cfg.embed_model.trim().is_empty() {
-            out.push_str(
-                "\n(Word matching only — the meaning index is still building, or unavailable.)",
-            );
+        if !hybrid && embedding_available {
+            out.push_str("\n(Word matching so far — the meaning index is still building.)");
         }
         out
     }
@@ -4463,6 +4508,31 @@ fn preview(root: &std::path::Path, c: &crate::index::Chunk) -> Vec<String> {
         .collect()
 }
 
+/// Whether a model id names an embedding model.
+///
+/// By family name, because that is all a `/models` list gives us. Deliberately
+/// conservative: a wrong guess here would embed with a chat model, which some
+/// servers will cheerfully do and produce a quietly worse ranking. The families
+/// listed are the ones that ship as embedders.
+fn looks_like_embedder(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    // A reranker scores pairs; it is not an embedder and will not answer here.
+    if id.contains("rerank") {
+        return false;
+    }
+    [
+        "embed",
+        "bge-",
+        "gte-",
+        "e5-",
+        "minilm",
+        "nomic",
+        "sfr-embedding",
+    ]
+    .iter()
+    .any(|m| id.contains(m))
+}
+
 /// The read-only calls that make a context grow without being asked to.
 const READ_TOOLS: &[&str] = &["read_file", "search", "find_files", "list_dir", "codegraph"];
 
@@ -5325,6 +5395,39 @@ mod tests {
     /// so a small model can re-issue the call instead of hitting a hard error.
     /// The path is known long before the content that makes the wait worth
     /// reporting, because it comes first in the arguments.
+    /// The feature has to reach people who never read the config file, so the
+    /// endpoint is asked what it has. A wrong guess would embed with a chat
+    /// model — which some servers will do rather than refuse — so the match is
+    /// by family name and errs towards finding nothing.
+    #[test]
+    fn an_embedding_model_is_recognised_by_its_family() {
+        for yes in [
+            "nomic-embed-text",
+            "nomic-embed-text:latest",
+            "bge-small-en-v1.5",
+            "text-embedding-3-small",
+            "mxbai-embed-large",
+            "all-MiniLM-L6-v2",
+            "snowflake-arctic-embed2",
+            "gte-Qwen2-7B-instruct",
+            "SFR-Embedding-Code-400M_R",
+        ] {
+            assert!(looks_like_embedder(yes), "{yes} is an embedder");
+        }
+        for no in [
+            "llama3.2",
+            "qwen2.5-coder:14b",
+            "granite-code",
+            "gpt-4o-mini",
+            "mtplx-qwen38-27b-bare-speed-fp16",
+            "deepseek-r1",
+            // A reranker scores pairs and would fail or mislead.
+            "bge-reranker-v2-m3",
+        ] {
+            assert!(!looks_like_embedder(no), "{no} is not an embedder");
+        }
+    }
+
     /// Three nudges share one mechanism, and the rule the three copies could
     /// not enforce between them is that only one may speak per tool result.
     #[test]

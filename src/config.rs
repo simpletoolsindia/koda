@@ -404,11 +404,13 @@ pub struct Config {
     pub ocr_model: String,
 
     /// Embedding model for `codegraph query=search`, on the same endpoint as
-    /// the chat model (`/v1/embeddings`). Empty — the default — means lexical
-    /// search only, which is a complete feature rather than a degraded one.
-    /// Set it and koda also ranks by meaning, which is what tells "rate
-    /// limiting" apart from a frame *rate*. Small models suffice:
-    /// `nomic-embed-text`, `bge-small-en-v1.5`, `all-MiniLM-L6-v2`.
+    /// the chat model (`/v1/embeddings`).
+    ///
+    /// Empty — the default — does **not** mean off: koda asks the endpoint what
+    /// models it has and uses an embedder if it finds one, because a setting
+    /// nobody knows to set is a feature nobody gets. Name one here only to
+    /// override that choice. Small models suffice: `nomic-embed-text`,
+    /// `bge-small-en-v1.5`, `all-MiniLM-L6-v2`.
     #[serde(default)]
     pub embed_model: String,
 
@@ -1014,8 +1016,9 @@ log_to_file = true
 # Switch live with ctrl+p or /mode.
 mode = "execute"
 
-# Embedding model for `codegraph query=search`, on the same endpoint. Empty means
-# lexical search only. Try nomic-embed-text or bge-small-en-v1.5.
+# Embedding model for `codegraph query=search`, on the same endpoint. Empty does
+# not mean off: koda uses an embedding model from the endpoint if it finds one.
+# Name one here only to override that. Try nomic-embed-text or bge-small-en-v1.5.
 embed_model = ""
 
 # Summarize the conversation automatically at this fraction of context_tokens.

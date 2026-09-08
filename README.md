@@ -449,17 +449,16 @@ arm full of names — otherwise takes most of the page.
 It builds on first use (150 ms over this repo: 1,620 chunks, 69 files) and
 queries in 65 µs, so there is no index to configure, persist or invalidate.
 
-**Set `embed_model` and it also ranks by meaning.** Word matching alone cannot
+**It also ranks by meaning, if your endpoint can.** Word matching alone cannot
 tell "rate limiting" from a frame *rate* — measured, and reproducible: on a
 small project the lexical half returns only the animation code for that query,
-and the hybrid half also finds `over_quota` and `cooldown_ms`. The model runs
-on the endpoint you already use (`/v1/embeddings`, which Ollama, llama.cpp and
-LM Studio all expose beside the chat route); `nomic-embed-text` or
-`bge-small-en-v1.5` are plenty.
+and the hybrid half also finds `over_quota` and `cooldown_ms`.
 
-```toml
-embed_model = "nomic-embed-text"   # empty (the default) = word matching only
-```
+There is nothing to configure. koda asks the endpoint what models it has and
+uses an embedding model if it finds one — `/v1/embeddings` sits beside the chat
+route on Ollama, llama.cpp and LM Studio, so if you have `nomic-embed-text` or
+`bge-small-en-v1.5` pulled, this is already on. A setting nobody knows to set is
+a feature nobody gets. Name one in `embed_model` only to override the choice.
 
 The two rankings are combined with reciprocal rank fusion rather than a
 weighted sum, because BM25 scores and cosine similarities are not on a common
