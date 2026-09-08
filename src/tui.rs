@@ -3724,8 +3724,15 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     // Only the keys that apply to the current state.
     let hints: &[(&str, &str)] = if app.pending.is_some() {
         &[("y", "allow"), ("a", "always"), ("n", "decline")]
-    } else if app.asking.is_some() {
-        &[("type", "your answer"), ("enter", "send")]
+    } else if let Some(a) = &app.asking {
+        // The dialog has two modes and the row has to agree with the one on
+        // screen: telling someone to type while a list of options is showing
+        // sends them to the wrong keys.
+        if a.custom {
+            &[("type", "your answer"), ("enter", "send")]
+        } else {
+            &[("↑↓", "move"), ("1-9", "pick"), ("enter", "select")]
+        }
     } else if app.picker.is_some() || app.setup.is_some() {
         &[("↑↓", "move"), ("enter", "choose"), ("esc", "cancel")]
     } else if app.plan_blocked {
@@ -4493,9 +4500,12 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
     // Then the payload the choice is about.
     match &p.preview {
         Some(text) if p.name == "run_command" => {
-            for l in md::hard_wrap(text, body_w) {
+            // One prompt marker, on the first line only: a wrapped command is
+            // still one command, and a `$` down its continuation lines reads as
+            // several.
+            for (i, l) in md::hard_wrap(text, body_w).into_iter().enumerate() {
                 lines.push(Line::from(vec![
-                    Span::styled("$ ".to_string(), t.dim()),
+                    Span::styled(if i == 0 { "$ " } else { "  " }.to_string(), t.dim()),
                     Span::styled(l, t.emphasis(t.text)),
                 ]));
             }

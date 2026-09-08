@@ -1505,8 +1505,11 @@ pub fn preview(name: &str, args: &Value, ctx: &ToolCtx) -> Option<String> {
             Some(unified_diff(&content, &replaced, &rel(ctx, &full)))
         }
         "run_command" => {
+            // Bare. The approval prompt draws its own `$` marker, styled apart
+            // from the command, and two of them read as a typo in the command
+            // the user is being asked to approve.
             let cmd = args.get("command")?.as_str()?;
-            Some(format!("$ {cmd}"))
+            Some(cmd.to_string())
         }
         _ => None,
     }
