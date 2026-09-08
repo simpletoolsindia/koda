@@ -205,7 +205,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/logs", "what the agent has been doing"),
     ("/debug", "toggle raw request/response capture"),
     ("/watch", "watch files for AI! / AI? triggers"),
-    ("/reason", "reasoning effort: off/low/medium/high"),
+    ("/reason", "how hard the model thinks — pick from a list"),
     ("/websearch", "turn web search on or off"),
     ("/skills", "list skills, or reload them from disk"),
     (
@@ -313,6 +313,7 @@ impl Metrics {
 enum ChoiceKind {
     Mode,
     Model,
+    Reason,
 }
 
 /// State for an in-flight `ask_user` question. When `options` is non-empty the
@@ -1208,6 +1209,16 @@ impl App {
                 .is_some_and(|t| t.elapsed() < VISITOR_WALK)
     }
 
+    /// Apply a thinking level and tell the running agent.
+    fn set_reasoning(&mut self, level: String) {
+        self.cfg.reasoning_effort = level.clone();
+        self.send(Command::UpdateConfig(Box::new(self.cfg.clone())));
+        self.note(match level.as_str() {
+            "off" => "thinking off — the model answers directly".to_string(),
+            other => format!("thinking → {other}"),
+        });
+    }
+
     fn show_welcome(&mut self, cfg: &Config) {
         let t = self.theme;
         let g = self.glyphs;
@@ -1686,6 +1697,7 @@ impl App {
                             self.model = val.clone();
                             self.send(Command::SetModel(val));
                         }
+                        ChoiceKind::Reason => self.set_reasoning(val),
                     }
                 }
             }
@@ -2516,26 +2528,23 @@ impl App {
                 self.watch_clear = true;
                 self.note("watch off — cleared all watched files");
             }
-            "reason" | "reasoning" => {
-                // /reason [off|low|medium|high] — cycle if no arg given.
-                let next = match arg.trim().to_ascii_lowercase().as_str() {
-                    "" => match self.cfg.reasoning_effort.as_str() {
-                        "off" => "low",
-                        "low" => "medium",
-                        "medium" => "high",
-                        _ => "off",
-                    }
-                    .to_string(),
-                    other @ ("off" | "low" | "medium" | "high") => other.to_string(),
-                    _ => {
-                        self.note("usage: /reason [off|low|medium|high]");
-                        return;
-                    }
-                };
-                self.cfg.reasoning_effort = next.clone();
-                self.send(Command::UpdateConfig(Box::new(self.cfg.clone())));
-                self.note(format!("reasoning effort → {next}"));
-            }
+            "reason" | "reasoning" => match arg.trim().to_ascii_lowercase().as_str() {
+                // Bare `/reason` opens the list, like `/mode` and `/model`.
+                // It used to cycle, which means finding "off" from "low" costs
+                // three presses and you cannot see what you are choosing
+                // between — for a setting whose wrong value makes a model look
+                // like it has hung, that is the wrong shape.
+                "" => {
+                    let levels = REASON_LEVELS.iter().map(|l| l.to_string()).collect();
+                    let cur = REASON_LEVELS
+                        .iter()
+                        .position(|l| *l == self.cfg.reasoning_effort)
+                        .unwrap_or(0);
+                    self.choices = Some((levels, cur, ChoiceKind::Reason));
+                }
+                other if REASON_LEVELS.contains(&other) => self.set_reasoning(other.to_string()),
+                _ => self.note("usage: /reason [off|low|medium|high]"),
+            },
             "theme" => self.theme_cmd(&arg),
             "url" | "endpoint" => {
                 if arg.is_empty() {
@@ -4419,6 +4428,11 @@ const VISITOR_FLOOR: Duration = Duration::from_secs(600);
 ///
 /// Every glyph is East Asian *Neutral*, so no terminal can render it double
 /// width and shift the row.
+/// The thinking levels, in the order the picker offers them. `off` first: it is
+/// the one people reach for when a model is spending its whole output budget
+/// thinking, and the list should open on the way out of that.
+const REASON_LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
+
 const COSTUMES: [[&str; 6]; 4] = [
     ["⠁", "⠈", "⠐", "⠠", "⠄", "⠂"], // orbit
     ["◜", "◠", "◝", "◞", "◡", "◟"], // arc
@@ -4806,6 +4820,7 @@ fn choices_popup(f: &mut Frame, app: &App, area: Rect) {
     let title = match kind {
         ChoiceKind::Mode => "select mode",
         ChoiceKind::Model => "select model",
+        ChoiceKind::Reason => "how hard should it think?",
     };
     let w = area.width.saturating_sub(6).clamp(30, 80).min(area.width);
     let rows = (list.len() as u16).clamp(1, 14);
