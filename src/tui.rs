@@ -52,6 +52,11 @@ const SPINNER_DELAY: Duration = Duration::from_millis(200);
 /// How long the welcome banner's entrance shimmer plays before it settles into
 /// the static gradient. Kept short so it never delays getting to work.
 const WELCOME_ANIM: Duration = Duration::from_millis(1400);
+/// How much of the intro is the wordmark arriving; the rest is the highlight
+/// crossing it and settling.
+const REVEAL_FRACTION: f32 = 0.45;
+/// Columns over which the leading edge fades back to the gradient.
+const EDGE_WIDTH: f32 = 6.0;
 
 /// Light-hearted status messages shown while koda is working and no specific
 /// tool activity is in flight. They rotate every ~10s so a long turn feels
@@ -409,6 +414,10 @@ pub struct App {
     /// tests"), from the latest tool start — shown in the working status so the
     /// user sees live activity, not a generic spinner.
     activity: Option<String>,
+    /// The id of an `about_creator` call in flight, and when its answer landed.
+    /// The one moment koda celebrates: someone asked who made it.
+    dance_call: Option<String>,
+    dance_at: Option<Instant>,
     /// Where this session starts in the tip rotation, so a user who mostly runs
     /// short turns is not shown the same first tip every time.
     tip_seed: usize,
@@ -813,6 +822,9 @@ impl App {
                 // see the child is working — e.g. "↳ subagent: reading cart.py".
                 // A new call: its arguments are counted from zero again.
                 self.draft_seen = 0;
+                if name == "about_creator" {
+                    self.dance_call = Some(id.clone());
+                }
                 let phrase = activity_label(&name, &label);
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
@@ -861,6 +873,13 @@ impl App {
                 detail,
                 view,
             } => {
+                // Someone asked who made this. Say it with a bit of ceremony.
+                if self.dance_call.as_deref() == Some(id.as_str()) {
+                    self.dance_call = None;
+                    if ok && self.motion.animates() {
+                        self.dance_at = Some(Instant::now());
+                    }
+                }
                 // Done with this tool — the model now decides the next step,
                 // which can take a few seconds. Say so rather than dropping to a
                 // generic quip that reads as idle.
@@ -1074,6 +1093,9 @@ impl App {
             || self
                 .welcome_at
                 .is_some_and(|t| t.elapsed() < WELCOME_ANIM)
+            // …and the curtain call, which is the only other thing that moves
+            // on its own. Both are bounded, so an idle koda still does nothing.
+            || self.dance_at.is_some_and(|t| t.elapsed() < DANCE)
     }
 
     fn show_welcome(&mut self, cfg: &Config) {
@@ -1226,6 +1248,9 @@ impl App {
     // -------------------------------------------------------------------- keys
 
     fn on_key(&mut self, key: KeyEvent) {
+        // Any key ends the curtain call — and is then handled as normal, so
+        // dismissing it never costs the keystroke you meant to type.
+        self.dance_at = None;
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -3464,6 +3489,15 @@ fn draw(f: &mut Frame, app: &mut App) {
     if let Some(s) = &app.settings {
         s.draw(f, area, &app.theme, &app.glyphs);
     }
+    // The curtain call goes on top of everything and takes itself away.
+    if let Some(started) = app.dance_at {
+        let elapsed = started.elapsed();
+        if elapsed < DANCE {
+            creator_card(f, app, area, elapsed);
+        } else {
+            app.dance_at = None;
+        }
+    }
     if app.logs.is_some() {
         log_overlay(f, app, area);
     }
@@ -4193,6 +4227,84 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
 /// gradient plus a soft bright band travelling left→right, so the logo "lights
 /// up" once on open. Draws over identical content, so when it stops there is no
 /// visible jump. Reduced-motion and non-TTY paths never reach here.
+/// How long the creator card dances before it clears itself.
+const DANCE: Duration = Duration::from_millis(4200);
+
+/// The dancer, one frame per beat. Arms up, arms down — the oldest joke in
+/// ASCII, and still the one people smile at.
+const DANCE_FRAMES: [&str; 4] = ["♪┏(°.°)┛♪", "♪┗(°.°)┓♪", "♪┏(°.°)┓♪", "♪┗(°.°)┛♪"];
+/// The same beat where the box-drawing set is not available.
+const DANCE_ASCII: [&str; 4] = [r"\o/", "|o|", r"/o", "|o|"];
+
+/// A short curtain call when someone asks who made koda.
+///
+/// Event-tied, not ambient: it plays because a person asked a question, once,
+/// and clears itself. That is the whole reason it is allowed to exist — a
+/// surprise you asked for is delight, and the same animation arriving unbidden
+/// while you are reading a diff is an interruption.
+///
+/// Drawn as an overlay, so the transcript is never invalidated and nothing
+/// below it moves; the answer itself is already in the transcript and stays
+/// there after the dancing stops.
+fn creator_card(f: &mut Frame, app: &App, area: Rect, elapsed: Duration) {
+    let t = &app.theme;
+    let g = &app.glyphs;
+    let frames: &[&str; 4] = if g.fine_blocks {
+        &DANCE_FRAMES
+    } else {
+        &DANCE_ASCII
+    };
+    // One step every 180ms: fast enough to read as dancing, slow enough that
+    // the eye follows it rather than seeing a blur.
+    let beat = (elapsed.as_millis() / 180) as usize % frames.len();
+    let dancer = frames[beat];
+    // A gentle bob, so the whole figure moves rather than only its arms.
+    let lift = usize::from(beat % 2 == 0);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("{}{dancer}", " ".repeat(4 + lift)),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("  made by  ".to_string(), t.dim()),
+            Span::styled(
+                "Sridhar Karuppusamy".to_string(),
+                Style::default()
+                    .fg(t.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  reach him at  ".to_string(), t.dim()),
+            Span::styled("support@simpletools.in".to_string(), t.fg(t.info)),
+        ]),
+    ];
+
+    let w = 40u16.min(area.width.saturating_sub(4));
+    let h = lines.len() as u16 + 2;
+    if w < 24 || area.height < h + 2 {
+        return; // No room to be charming without being in the way.
+    }
+    let rect = Rect {
+        x: (area.width.saturating_sub(w)) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(t.fg(t.accent))
+        .title(Span::styled(
+            " koda ".to_string(),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
 fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration) {
     let t = &app.theme;
     let (Some(a), Some(b), Some(c)) = (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info))
@@ -4204,8 +4316,28 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
         .map(|r| r.chars().count())
         .max()
         .unwrap_or(1);
-    // A band that sweeps across the banner width over the animation window.
-    let bright = anim::shimmer(cols, elapsed, WELCOME_ANIM);
+
+    // Three beats in one window, so opening koda has a beginning rather than a
+    // decoration over something already sitting there.
+    //
+    // 1. The wordmark *arrives*: a wavefront crosses it left to right, with the
+    //    columns ahead of it not yet drawn. Eased out, so it moves fast and
+    //    lands softly instead of scrolling past at a constant rate.
+    // 2. A highlight sweeps the finished letters.
+    // 3. It settles into the static gradient the banner keeps.
+    //
+    // All of it derived from elapsed time — no state, no per-frame allocation,
+    // and if the frame clock is busy the animation simply skips ahead rather
+    // than falling behind.
+    let progress = elapsed.as_secs_f32() / WELCOME_ANIM.as_secs_f32();
+    let front = anim::ease_out_cubic((progress / REVEAL_FRACTION).min(1.0)) * cols as f32;
+    // The sweep starts as the wavefront finishes, so the two read as one motion.
+    let sweep_elapsed = elapsed.saturating_sub(WELCOME_ANIM.mul_f32(REVEAL_FRACTION));
+    let bright = anim::shimmer(
+        cols,
+        sweep_elapsed,
+        WELCOME_ANIM.mul_f32(1.0 - REVEAL_FRACTION),
+    );
     for (i, row) in BANNER_ART.iter().enumerate() {
         // Row 0 of the banner sits one line below the top (a leading blank).
         let y = text_area.y + 1 + i as u16;
@@ -4214,6 +4346,12 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
         }
         let mut spans = vec![Span::raw("  ".to_string())];
         for (j, ch) in row.chars().enumerate() {
+            // Not arrived yet: leave the cell empty rather than dimming it, so
+            // the wordmark assembles instead of fading up as a whole.
+            if (j as f32) > front {
+                spans.push(Span::raw(" ".to_string()));
+                continue;
+            }
             if ch == ' ' {
                 spans.push(Span::raw(" ".to_string()));
                 continue;
@@ -4225,8 +4363,11 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
             } else {
                 anim::lerp_rgb(b, c, (x - 0.5) * 2.0)
             };
-            // Lift toward white where the sweeping band is brightest.
-            let lift = bright.get(j).copied().unwrap_or(0.0);
+            // Lift toward white where the sweeping band is brightest — and at
+            // the wavefront itself, which is what makes the reveal read as a
+            // leading edge rather than a mask being pulled back.
+            let edge = 1.0 - ((front - j as f32) / EDGE_WIDTH).clamp(0.0, 1.0);
+            let lift = bright.get(j).copied().unwrap_or(0.0).max(edge);
             if lift > 0.0 {
                 let (wr, wg, wb) = anim::lerp_rgb((r, gg, bl), (255, 255, 255), lift * 0.85);
                 r = wr;
@@ -4856,6 +4997,8 @@ pub async fn run(
         cancelling: false,
         compacting: None,
         activity: None,
+        dance_call: None,
+        dance_at: None,
         // The clock is seed enough: this only has to differ between sessions.
         tip_seed: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
