@@ -1,0 +1,46 @@
+---
+title: Overview
+description: Everything koda can do, with what it costs you to turn on.
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Most of koda is on by default because it costs nothing to have available. The things that
+are off need something from you — a network request, a browser, a second program — so they
+are opt-in and say so.
+
+## On by default
+
+| Capability | Setting | What it gives you |
+| --- | --- | --- |
+| [Code graph](/koda/codegraph/) | `codegraph = true` | Where a symbol is defined and who uses it, without grepping. |
+| [Sessions](/koda/sessions/) | `sessions = true` | `/resume`, `/search` and `/fork` across every past conversation. |
+| [Memory](/koda/memory/) | `memory = true` | Durable facts and command outcomes carried to the next session. |
+| [Subagents](/koda/skills/#subagents) | `subagents = true` | A wide search costs a paragraph instead of thirty files. |
+| [Skills](/koda/skills/) | — | Project conventions loaded only when they are relevant. |
+| [Documents](/koda/images/) | build feature | PDF, Word, Excel and CSV read with `@`. |
+| [Debugger](/koda/debugger/) | — | Breakpoints, stepping and variables over the Debug Adapter Protocol. |
+
+## Off until you turn it on
+
+| Capability | Setting | Why it is off |
+| --- | --- | --- |
+| [Web search](/koda/web/) | `web_search = true` | Sends your query to DuckDuckGo or your SearXNG instance. |
+| [Web fetch](/koda/web/#fetching-a-page) | `web_fetch = true` | A model-supplied URL becomes a request from your machine. |
+| [Browser](/koda/browse/) | `browser = true` | Drives a real Chromium; much slower than a fetch. |
+| [Watch mode](/koda/watch/) | `watch = true` | Acts on comment triggers without being asked. |
+| [Web control center](/koda/webui/) | `web_ui = true` | Serves a local page on `127.0.0.1`. |
+| [OCR](/koda/images/#ocr-fallback) | `ocr = true` | Needs `tesseract`, or a vision model to route through. |
+| [Learning](/koda/memory/#learning-from-how-you-work) | `learning = true` | Watches how you work to distil rules. |
+| [Debug capture](/koda/troubleshooting/#capturing-a-bad-turn) | `debug = true` | Writes raw request and response bodies to disk. |
+
+## Browse by what you are doing
+
+<CardGrid>
+  <LinkCard title="Finding code" description="The symbol graph, and why search is the wrong tool for a name." href="/koda/codegraph/" />
+  <LinkCard title="Debugging a program" description="Breakpoints, logpoints, hit conditions, and reading a stopped frame." href="/koda/debugger/" />
+  <LinkCard title="Teaching it your project" description="Skills, role agents, memory, and rules learned from your corrections." href="/koda/skills/" />
+  <LinkCard title="Reading the web" description="Search, fetch, and a real browser for pages that render client-side." href="/koda/web/" />
+  <LinkCard title="Reading documents" description="PDFs, spreadsheets, screenshots and OCR." href="/koda/images/" />
+  <LinkCard title="Watching a turn" description="The trace waterfall, the inspector, and the prompt diff." href="/koda/webui/" />
+</CardGrid>

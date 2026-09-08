@@ -1,0 +1,119 @@
+---
+title: Quickstart
+description: Install koda, point it at a local model, and fix a real bug — about five minutes from nothing.
+sidebar:
+  order: 2
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+koda needs two things: the koda binary, and a model for it to talk to. This page gets you
+both and then puts them to work.
+
+<Steps>
+
+1. ### Install koda
+
+   The installer builds from source and offers to install Rust first if you do not have
+   it. It puts the binary in `~/.local/bin` — no `sudo`, no system directories.
+
+   <Tabs syncKey="os">
+   <TabItem label="macOS / Linux">
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
+   ```
+   </TabItem>
+   <TabItem label="Windows">
+   ```powershell
+   irm https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.ps1 | iex
+   ```
+   </TabItem>
+   </Tabs>
+
+   If the bin directory is not on your `PATH`, the installer tells you the one line to
+   add. Full options — system-wide installs, the interactive menu, building by hand — are
+   on the [Installation](/koda/install/) page.
+
+2. ### Get a model running
+
+   Ollama is the shortest path. Any OpenAI-compatible server works — see
+   [LLM providers](/koda/providers/) for LM Studio, llama.cpp, vLLM, MLX and the cloud.
+
+   ```sh
+   brew install ollama          # or: curl -fsSL https://ollama.com/install.sh | sh
+   ollama serve                 # leave this running
+   ollama pull qwen2.5-coder:14b
+   ```
+
+   `qwen2.5-coder:14b` wants roughly 10 GB of RAM. On a 16 GB machine use
+   `qwen2.5-coder:7b` instead and expect weaker tool use.
+
+3. ### Point koda at it
+
+   ```sh
+   cd ~/your-project
+   koda -u http://localhost:11434/v1 -m qwen2.5-coder:14b
+   ```
+
+   Or run `koda`, type `/setup`, and fill in the endpoint, model and API key in the form —
+   it fetches the model list from whatever URL you type and writes your config, so you
+   never pass those flags again.
+
+4. ### Ask for something
+
+   Type a request the way you would say it to a colleague. koda decides which files to
+   read and which tools to use.
+
+   ```
+   the discount test fails — fix it
+   ```
+
+   It will read the failing test, look up the function in the symbol graph, and propose an
+   edit.
+
+5. ### Approve the change
+
+   Before any file is written you get a diff and a prompt:
+
+   ```
+   edit cart.py
+     @@ -14,3 +14,3 @@
+   14  def apply_discount(amount, percent):
+   15 -    return amount - percent
+   15 +    return amount * (1 - percent / 100)
+
+   apply this edit?   y once · a always · n deny
+   ```
+
+   Press <kbd>y</kbd> to apply it once, <kbd>a</kbd> to stop being asked about this tool
+   for the rest of the session, or <kbd>n</kbd> to deny — which tells the model to ask you
+   what to do instead.
+
+6. ### Let it check its own work
+
+   Ask it to run the suite. Commands ask for approval the same way.
+
+   ```
+   run the tests
+   ```
+
+</Steps>
+
+## What to try next
+
+- <kbd>ctrl+p</kbd> cycles the mode. `PLAN` removes the write and command tools entirely,
+  which is the right place to start an unfamiliar task — see
+  [Modes & autonomy](/koda/modes/).
+- Type `/` to see every command. `/settings` opens one page holding everything koda can be
+  configured to do.
+- Prefix a line with `!` to run a shell command yourself with no model call and no tokens
+  spent: `!git status`.
+- Mention a file with `@` to pull it into the message — `@report.pdf summarise this` works
+  on PDFs, spreadsheets and screenshots too.
+- `/undo` puts back every file the agent changed in the last turn.
+
+:::tip[If the model keeps producing malformed tool calls]
+That is a model problem, not a configuration problem. Small models lose the tool-call
+format. Move up to a 14B or larger coder model before changing anything else — see
+[Model choice](/koda/providers/#model-choice-matters-more-than-anything-else).
+:::

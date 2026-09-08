@@ -1,0 +1,74 @@
+---
+title: Themes & appearance
+description: The eleven palettes, what the block fills are for, and how koda degrades to sixteen colours or none.
+---
+
+`/theme` switches live. With no argument it shows a swatch of every palette, so you pick
+by eye rather than by name.
+
+## The palettes
+
+| Name | Character |
+| --- | --- |
+| `neon` | Electric cyan-green, hot magenta and lime on deep indigo. The default. |
+| `dark` | A quieter dark palette for a long session. |
+| `ansi` | Your terminal's own sixteen colours. Drops the fills for a rule. |
+| `catppuccin-mocha` | Soft pastels on warm dark. |
+| `tokyo-night` | Cool blues and purples. |
+| `gruvbox-dark` | Retro warm earth tones. |
+| `nord` | Muted arctic blues. |
+| `dracula` | High-contrast purple and pink. |
+| `rose-pine` | Low-saturation rose and pine. |
+| `solarized-light` | The only light palette. |
+| `mono` | No colour at all — hierarchy from bold and dim. |
+
+`theme = "auto"` (the default) resolves to `neon`. That is a deliberate choice rather than
+a fallback: the block fills that give the transcript its shape need colours koda can
+predict, and a palette derived from your terminal's sixteen cannot supply them.
+
+## Why fills instead of boxes
+
+Blocks are grouped by a **tinted background**, not a border: warm behind your messages,
+cool behind tool output, red behind failures.
+
+A fill costs no rows. A box costs two, plus a perimeter walk per block, on every redraw —
+and in a transcript that is thousands of blocks long, that is the difference between a
+frame you notice and one you do not. The tint also carries information a border cannot:
+the block's *kind* is legible before you have read a word of it.
+
+`ansi` and `mono` cannot rely on a predictable background, so they drop the fills and use
+a rule instead. The hierarchy survives; only the mechanism changes.
+
+## What else is coloured
+
+Structured output — `/help`, `/models`, `/theme`, `/skills`, `/tools` — renders as filled
+blocks with a bold amber heading: title on the left, hint on the right, sized to your
+terminal, long rows clipped.
+
+The bottom bar is chevron-separated segments, each in its own colour: model, project,
+branch, endpoint, then tokens and a context gauge drawn to eighth-block precision. Above
+the input sits the mode chip, what the agent is doing, step progress, and only the keys
+that apply right now.
+
+The plan gets a standing block with a progress gauge. Done steps are struck through; the
+step in flight is the only bold row.
+
+## Degrading gracefully
+
+| Condition | What happens |
+| --- | --- |
+| `NO_COLOR=1` or `TERM=dumb` | Forces `mono`. Hierarchy comes from bold and dim alone. |
+| `icons = "ascii"` | Replaces box drawing and braille for terminals that cannot render them. |
+| Terminal narrower than 92 columns | The layout drops to a denser arrangement. |
+| Narrower than 64 columns | It drops again, to the essentials. |
+
+## Motion
+
+| Setting | Command | What it governs |
+| --- | --- | --- |
+| `motion` | `/motion` | All animation: spinners, gauges, progressive reveal. |
+| `reveal` | `/reveal` | Only the progressive typing-in of streaming text. Requires `motion`. |
+| `sync_output` | — | Wraps each frame in DEC 2026 synchronized-update markers, so a frame arrives whole rather than torn. |
+
+Turning `motion` off leaves a fully static UI that reads exactly the same. Nothing in
+koda's design depends on something moving.

@@ -1,0 +1,32 @@
+---
+/**
+ * A koda transcript, drawn the way koda draws it: blocks grouped by a tinted
+ * fill rather than a border, warm behind your message, cool behind tool output.
+ * The colours are the NEON palette from src/theme.rs.
+ */
+---
+
+<div class="koda-term not-content" role="img" aria-label="A koda session: the user asks it to fix a failing discount test; koda plans three steps, looks up apply_discount in the code graph, reads and edits cart.py showing a diff, runs pytest, and reports the fix.">
+  <span class="row fill-user"><span class="c-alt">▌</span> the discount test fails — fix it</span>
+  <span class="row">&nbsp;</span>
+  <span class="row"><span class="c-warn b">  plan</span>                                  <span class="c-muted">2/3</span> <span class="c-accent">████████</span><span class="c-muted">░░░░</span></span>
+  <span class="row">  <span class="c-ok">✓</span> <span class="strike">read the failing test</span></span>
+  <span class="row">  <span class="c-ok">✓</span> <span class="strike">fix apply_discount</span></span>
+  <span class="row">  <span class="c-accent">◐</span> <span class="b">run the suite</span></span>
+  <span class="row">&nbsp;</span>
+  <span class="row fill-tool">  <span class="c-ok">✓</span> <span class="c-alt">codegraph</span> symbol apply_discount  <span class="c-muted">4ms</span></span>
+  <span class="row fill-tool">  <span class="c-ok">✓</span> <span class="c-alt">read</span> cart.py (21 lines)  <span class="c-muted">2ms  ctrl+r</span></span>
+  <span class="row fill-tool">  <span class="c-ok">✓</span> <span class="c-alt">edit</span> cart.py (1 replacement)  <span class="c-muted">3ms</span></span>
+  <span class="row fill-tool">   <span class="c-muted">│</span>      <span class="c-violet">@@ -14,3 +14,3 @@</span></span>
+  <span class="row fill-tool">   <span class="c-muted">│   14</span>  def apply_discount(amount, percent):</span>
+  <span class="row fill-tool">   <span class="c-muted">│   15</span> <span class="c-err">-    return amount - percent</span></span>
+  <span class="row fill-tool">   <span class="c-muted">│   15</span> <span class="c-ok">+    return amount * (1 - percent / 100)</span></span>
+  <span class="row fill-tool">  <span class="c-ok">✓</span> <span class="c-alt">$</span> python3 -m pytest -q <span class="c-muted">→ exit 0  380ms</span></span>
+  <span class="row">&nbsp;</span>
+  <span class="row">Fixed. <span class="c-violet">apply_discount</span> subtracted the percent instead of</span>
+  <span class="row">applying it.</span>
+  <span class="row">&nbsp;</span>
+  <span class="row"> <span class="c-accent b">EXEC</span>  <span class="c-ok">●</span> ready <span class="c-muted"> · 3/3 steps        @ file · ctrl+p mode · /help</span></span>
+  <span class="row"> <span class="c-accent">❯</span> <span class="cursor">&nbsp;</span></span>
+  <span class="statusbar"> <span class="c-accent">qwen2.5-coder:14b</span> <span class="c-muted">❯</span> <span class="c-alt">myproject</span> <span class="c-muted">❯</span> <span class="c-warn">main</span> <span class="c-muted">❯</span> <span class="c-info">localhost:11434</span>  4.1k tok <span class="c-accent">██▎</span><span class="c-muted">░░░░░</span> 27%</span>
+</div>

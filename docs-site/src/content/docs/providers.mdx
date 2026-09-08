@@ -1,0 +1,214 @@
+---
+title: LLM providers
+description: Point koda at Ollama, LM Studio, llama.cpp, vLLM, MLX, or any cloud endpoint that speaks the OpenAI chat-completions API.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+koda has one client and one protocol. If a server implements the OpenAI
+`/v1/chat/completions` API, koda can drive it — local or hosted, it makes no difference to
+the code. That is the entire compatibility story: there is no provider plugin to write and
+no adapter to pick.
+
+The fastest way to set one up is `/setup` inside koda. Type a base URL and it fetches the
+model list from that server, lets you pick, takes an API key if one is needed, and writes
+your config file. Everything below is the same thing done from the shell.
+
+## Local servers
+
+<Tabs syncKey="provider">
+<TabItem label="Ollama">
+
+```sh
+brew install ollama          # or: curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+ollama pull qwen2.5-coder:14b
+
+koda -u http://localhost:11434/v1 -m qwen2.5-coder:14b
+```
+
+Ollama's OpenAI-compatible endpoint lives at `/v1`, and it is what koda defaults to. Set
+the context window on the model, not in koda — Ollama truncates at the model's `num_ctx`
+regardless of what you ask for.
+
+</TabItem>
+<TabItem label="LM Studio">
+
+Start the server from LM Studio's **Developer** tab, then:
+
+```sh
+koda -u http://localhost:1234/v1
+```
+
+Omit `-m` and koda uses whichever model the server reports first, which is usually the one
+you have loaded.
+
+</TabItem>
+<TabItem label="llama.cpp">
+
+`--jinja` matters: without it the server will not apply the model's chat template, and
+tool calling degrades badly.
+
+```sh
+llama-server -m model.gguf -c 32768 --jinja --port 8080
+koda -u http://localhost:8080/v1
+```
+
+</TabItem>
+<TabItem label="vLLM">
+
+```sh
+vllm serve Qwen/Qwen2.5-Coder-14B-Instruct --port 8000
+koda -u http://localhost:8000/v1 -m Qwen/Qwen2.5-Coder-14B-Instruct
+```
+
+</TabItem>
+<TabItem label="MLX">
+
+```sh
+mlx_lm.server --model mlx-community/Qwen2.5-Coder-14B-Instruct-4bit --port 8080
+koda -u http://localhost:8080/v1
+```
+
+</TabItem>
+<TabItem label="Cloud">
+
+Any hosted OpenAI-compatible endpoint works the same way — OpenAI, OpenRouter, Groq,
+Together, Mistral, DeepSeek, or your company's gateway.
+
+```sh
+koda -u https://openrouter.ai/api/v1 --api-key "$OPENROUTER_API_KEY" -m qwen/qwen-2.5-coder-32b-instruct
+```
+
+koda also reads `KODA_BASE_URL` / `OPENAI_BASE_URL`, `KODA_API_KEY` / `OPENAI_API_KEY` and
+`KODA_MODEL` / `OPENAI_MODEL`, so an environment you already export works untouched.
+
+</TabItem>
+</Tabs>
+
+`koda models` lists what the endpoint offers. Omit `-m` and koda uses the first model the
+server reports.
+
+## Model choice matters more than anything else
+
+Tool calling is what makes an agent an agent, and small models are bad at it. No amount of
+configuration compensates for a model that cannot hold the tool-call format for a whole
+turn.
+
+On a 32–64 GB Mac, in rough order of how well they behave:
+
+1. **Qwen2.5-Coder 14B / 32B** — the reliable default.
+2. **Devstral Small** — trained for agentic work; strong tool discipline.
+3. **GLM-4 9B** — good on a smaller machine.
+
+Below about 7B, expect the model to lose the tool format mid-turn. koda's
+[text protocol](/koda/protocols/) helps a model that has no native tool support, but it
+cannot fix a model that will not follow instructions.
+
+Give it **at least 16k of context**. Agent conversations fill up fast with file contents;
+koda [curates the request](/koda/prompt/) to fit whatever you have, but there is a floor
+below which there is nothing useful left to keep.
+
+## Several endpoints at once
+
+A provider bundles the four things you have to get right — where to talk, the key, the
+model, and whether it takes images — under a name you can switch to in a word.
+
+| Command | What it does |
+| --- | --- |
+| `/provider` | List saved providers; the active one is marked. |
+| `/provider <name>` | Switch to it, and remember the choice. |
+| `/provider add` | Open the setup page to save a new one. |
+
+`/settings` has a **provider** row that cycles the same list. The active provider's name
+replaces the host in the status bar, because `omniroute` says more at a glance than
+`localhost:20128`.
+
+In the config file they are table arrays:
+
+```toml
+base_url = "http://localhost:11434/v1"   # used when no provider is active
+active_provider = "omniroute"
+
+[[provider]]
+name = "omniroute"
+base_url = "http://localhost:20128/v1"
+api_key = "sk-..."
+model = "auto"
+vision = "on"
+
+[[provider]]
+name = "ollama"
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5-coder:14b"
+```
+
+A field left out of a provider falls through to the top-level one, so a provider can name
+just a model and inherit the rest.
+
+:::caution[TOML binds bare keys to the table above them]
+Keep `active_provider` and every other top-level setting **above** the first
+`[[provider]]` block, or they become fields of that provider. koda writes the file that
+way itself.
+:::
+
+### A context budget per provider
+
+`context_tokens` belongs to the model behind the endpoint, so a provider can carry its
+own. A local 8k model and a hosted 200k one should not share a number.
+
+```toml
+[[provider]]
+name = "local"
+context_tokens = 8000        # 0 or omitted inherits the global value
+```
+
+### An agent with its own model
+
+A [role agent](/koda/skills/) can name the model it runs on — a property of the role, not
+of whatever the session happens to be using. A reviewer wants a careful model, a
+scaffolder a fast one.
+
+```markdown
+---
+name: reviewer
+role: reviewer
+model: omniroute/auto
+when: reviewing a diff before it ships
+---
+
+Read the diff. Flag correctness bugs first, style last.
+```
+
+`provider/model` runs the agent on that saved provider, with its endpoint and its key
+rather than the session's. A bare model name uses the current endpoint. Leave `model` out
+and the agent runs on whatever the session is using.
+
+## Servers behind a private CA
+
+An endpoint behind a corporate proxy that re-signs TLS with a CA your machine does not
+trust will fail to connect. The right fix is installing that CA. When you cannot,
+`insecure_tls` accepts the certificate anyway:
+
+```toml
+[[provider]]
+name = "internal"
+base_url = "https://llm.internal.corp/v1"
+insecure_tls = true
+```
+
+It is also the **tls** field on `/setup` and the **tls verification** row in `/settings`,
+both toggled with <kbd>←</kbd>/<kbd>→</kbd>. Changing it takes effect immediately — koda
+rebuilds its HTTP client rather than waiting for a restart.
+
+:::danger[What this turns off]
+`insecure_tls` disables the check that the server is who it claims to be, so anything able
+to sit in the path can read and alter the traffic — your API key and your source included.
+koda prints a warning at startup whenever it is on.
+
+Set it per provider rather than globally. A provider may relax TLS for itself and can
+never relax it for another, so trusting one internal host cannot quietly weaken your
+connection to a public API in the same config.
+:::

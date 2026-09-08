@@ -1,0 +1,48 @@
+---
+import Default from '@astrojs/starlight/components/Hero.astro';
+import Terminal from './Terminal.astro';
+
+const route = Astro.locals.starlightRoute;
+const isHome = route.id === '' || route.id === 'index';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+
+{
+  isHome ? (
+    <div class="koda-hero not-content">
+      <div>
+        <h1 id="_top" class="koda-hero__lede">
+          A coding agent that never leaves your machine.
+        </h1>
+        <p class="koda-hero__sub">
+          koda drives the model you already run locally — Ollama, LM Studio, llama.cpp, vLLM, MLX
+          — and any other server that speaks the OpenAI chat API. It reads and edits your code,
+          runs your tests, and shows you a diff before it changes anything.
+        </p>
+        <div class="koda-hero__actions">
+          <a class="primary" href={`${base}/quickstart/`}>Start in five minutes</a>
+          <a class="ghost" href={`${base}/architecture/`}>How it works</a>
+          <a class="ghost" href="https://github.com/simpletoolsindia/koda">Source on GitHub</a>
+        </div>
+        <div class="koda-install">
+          <span class="c-muted"># macOS / Linux</span>{'\n'}
+          curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
+        </div>
+        <p class="koda-hero__facts">
+          <span>One binary, <b>~6 MB</b></span>
+          <span>·</span>
+          <span>Starts in <b>~3 ms</b></span>
+          <span>·</span>
+          <span><b>No</b> runtime dependencies</span>
+          <span>·</span>
+          <span>Rust <b>1.82+</b></span>
+          <span>·</span>
+          <span><b>MIT</b></span>
+        </p>
+      </div>
+      <Terminal />
+    </div>
+  ) : (
+    <Default />
+  )
+}

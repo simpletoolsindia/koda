@@ -1,0 +1,130 @@
+---
+title: Installation
+description: Install koda on macOS, Linux or Windows — one-liner, interactive menu, or a manual cargo build.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+koda builds from source into a single static binary with no runtime dependencies. The
+installers do the build for you and will offer to install Rust first if it is missing.
+
+## The installers
+
+<Tabs syncKey="os">
+<TabItem label="macOS / Linux">
+
+Clone and run the script for an interactive menu — install, install system-wide, update,
+uninstall:
+
+```sh
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
+./install.sh
+```
+
+Or take the one-liner, which clones for you:
+
+```sh
+# official edition
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
+
+# uncensored edition (stealth browsing)
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/uncensored/install.sh | bash
+```
+
+It installs to `~/.local/bin`, so no `sudo` is needed. For a system-wide install:
+
+```sh
+PREFIX=/usr/local ./install.sh
+```
+
+On macOS the installer re-signs the copied binary so Gatekeeper does not kill it.
+
+</TabItem>
+<TabItem label="Windows">
+
+PowerShell, with an interactive menu. It adds koda to your user `PATH`.
+
+```powershell
+git clone https://github.com/simpletoolsindia/koda.git; cd koda
+.\install.ps1
+```
+
+Or the one-liner:
+
+```powershell
+irm https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.ps1 | iex
+```
+
+It installs to `%LOCALAPPDATA%\koda\bin`. Override the location with `-Prefix`.
+
+</TabItem>
+<TabItem label="By hand">
+
+Anything with Rust 1.82 or newer:
+
+```sh
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
+cargo build --release
+cp target/release/koda ~/.local/bin/
+```
+
+On Windows, copy to `%LOCALAPPDATA%\koda\bin`; on a system-wide Unix install,
+`/usr/local/bin`.
+
+A packager who wants the smaller binary can drop the document readers:
+
+```sh
+cargo build --release --no-default-features
+```
+
+That removes PDF, Word and Excel parsing, which account for about 1.4 MB.
+
+</TabItem>
+</Tabs>
+
+## The two optional extras
+
+At the end of an interactive install you are asked about two programs. koda needs neither
+of them to run.
+
+| Extra | What it buys you | If you decline |
+| --- | --- | --- |
+| `ripgrep` | Faster `search` across large projects. | koda's in-process search is used instead. |
+| `tesseract` | Offline OCR, so a screenshot reaches a model with no vision. | Set `ocr_model` to a vision model instead — see [Files, images & OCR](/koda/images/). |
+
+Both are a single `[Y/n]` prompt. When the installer is piped (`curl … | bash`) it has no
+terminal to ask at, so both are skipped without one.
+
+## Choosing an edition
+
+The one-liners above pick the branch. To switch a checkout you already have:
+
+```sh
+git checkout master        # or: git checkout uncensored
+./install.sh
+```
+
+Both installers honour `KODA_BRANCH` if you want a branch they do not name.
+
+## Verify it worked
+
+```sh
+koda --version
+koda config          # the effective configuration, after every layer is applied
+```
+
+If `koda` is not found, the bin directory is not on your `PATH`. The installer prints the
+exact line to add to your shell profile; on macOS and Linux that is usually:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Updating and removing
+
+Re-run `./install.sh` and pick **update** from the menu — it pulls the branch you are on
+and rebuilds. **Uninstall** removes the binary. Your configuration
+(`~/.config/koda/config.toml`) and per-project data (`<project>/.koda/`) are left alone;
+delete those by hand if you want them gone.

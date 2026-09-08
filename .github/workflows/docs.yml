@@ -1,0 +1,67 @@
+name: Docs
+
+# Build the Astro Starlight docs site and publish it to GitHub Pages.
+#
+#   * Push to master touching docs-site/ (or this file) -> build + deploy.
+#   * Pull request touching the same paths             -> build only, so a
+#                                                         broken docs build
+#                                                         fails the PR rather
+#                                                         than the deploy.
+#   * Manual dispatch                                  -> deploy on demand.
+#
+# Pages must be set to "GitHub Actions" as its source (Settings -> Pages).
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs-site/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# One deploy at a time; never cancel one in flight, or Pages is left half-updated.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/dist
+
+  deploy:
+    # Only master deploys. A pull request stops after the build above.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

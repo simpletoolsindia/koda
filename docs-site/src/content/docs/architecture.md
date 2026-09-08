@@ -1,0 +1,100 @@
+---
+title: Architecture
+description: One Rust binary, every layer in-process — the modules koda is made of and why there is no sidecar.
+---
+
+koda is a single Rust binary of roughly 42,000 lines. Every layer is in-process: no sidecar
+services, no per-tool subprocess, no runtime to install. The TUI, the agent loop, the
+tools, the code graph and the HTTP client are compiled into the same executable and talk
+to each other by function call.
+
+That is the reason a cold start is about 3 milliseconds and a file read is not a `fork`.
+
+## The modules
+
+| Module | Lines | What it owns |
+| --- | --- | --- |
+| `tui.rs` | 5,600 | The terminal UI: layout, input, overlays, the status bar. |
+| `agent.rs` | 5,500 | The agent loop — stream a completion, run any tool calls, repeat. |
+| `tools.rs` | 5,200 | Every tool's implementation and its approval rules. |
+| `view.rs` | 3,000 | The transcript model and its rendering, with per-block line caching. |
+| `graph.rs` | 2,300 | The [code graph](/koda/codegraph/): two passes, definitions then references. |
+| `webui.rs` | 2,100 | The [local control center](/koda/webui/) and its API. |
+| `learning.rs` | 2,000 | Observation, rule induction, promotion and retirement. |
+| `dap.rs` | 1,600 | The [Debug Adapter Protocol](/koda/debugger/) client. |
+| `config.rs` | 1,300 | The four configuration layers and their merge order. |
+| `md.rs` | 1,300 | A single-pass markdown renderer and keyword syntax highlighter. |
+| `llm.rs` | 960 | The OpenAI-compatible client: streaming SSE, native tool-call deltas. |
+| `context.rs` | 760 | [Request curation](/koda/prompt/) — deciding what the model still needs. |
+| `trace.rs` | 750 | Turn structure: every model call, tool call and compaction, in order. |
+| `theme.rs` | 740 | The eleven palettes and the semantic colour roles they fill. |
+| `prompt.rs` | 560 | The system prompt. Deliberately short. |
+
+Plus `session.rs`, `memory.rs`, `skills.rs`, `web.rs`, `watch.rs`, `engine.rs`,
+`settings.rs`, `setup.rs`, `panel.rs`, `anim.rs`, `editor.rs`, `fuzzy.rs`, `log.rs` and
+`debug.rs`.
+
+## The shape
+
+```
+        your keystrokes
+              │
+        ┌─────▼──────┐
+        │   tui.rs   │  input, overlays, approval prompts, status bar
+        └─────┬──────┘
+              │  a user message
+        ┌─────▼──────┐
+        │  agent.rs  │  the loop: complete → tools → complete → …
+        └──┬──────┬──┘
+           │      │
+   ┌───────▼──┐  ┌▼─────────┐
+   │ prompt   │  │ tools.rs │  read, edit, run, codegraph, debug,
+   │ context  │  └────┬─────┘  delegate, web, skills, memory
+   └───────┬──┘       │
+           │          ├── graph.rs   symbol lookup, in-process
+   ┌───────▼──┐       ├── dap.rs     a real debugger over stdio
+   │  llm.rs  │       ├── web.rs     search / fetch / browse
+   └───────┬──┘       └── memory.rs  durable facts
+           │
+    your model's endpoint
+```
+
+Everything to the left of the endpoint runs in your process. The only thing that leaves
+the machine is the request to the model — and, if you turned them on, a web search or a
+fetch.
+
+## Three decisions worth knowing
+
+**The system prompt is short on purpose.** Local models have small context windows and
+degrade quickly when the instructions crowd out the actual task. Every token of prompt is
+a token the model does not spend on your code. This is why the base rules
+[name no locating tool at all](/koda/codegraph/#making-the-model-actually-use-it): a rule
+in the prompt beats a section further down, so the prompt says as little as it can get
+away with.
+
+**The markdown renderer is not a full parser.** It handles the subset that LLM output
+actually uses, in a single pass, with no allocations beyond the spans. A correct
+CommonMark implementation would be slower on every streamed token and would not render
+anything a model emits any better.
+
+**The code graph is regex, not a parser.** Two passes over the project — collect
+definitions, then collect the identifiers each file mentions, then join. That is O(files),
+not O(symbols × files), and it survives a file that does not compile. Accurate enough to
+point at the right file, which the model then reads properly.
+
+## Why it stays fast
+
+- Each transcript block caches its rendered lines, so a streaming token re-lays-out only
+  the block that changed.
+- Redraws are coalesced. A burst of tokens is one frame, and nothing is drawn when nothing
+  changed.
+- Only the visible window of lines reaches the renderer.
+- File tools are in-process; there is no subprocess per read.
+- The code graph is two passes over the project, not a parse per query.
+- Frames are wrapped in DEC 2026 synchronized-update markers, so a frame arrives whole
+  rather than torn.
+
+The working budget is an idle frame of about 8.6 µs on a 4,000-block transcript. Every
+visual device in koda is chosen against that number — which is why blocks are grouped by a
+[background tint rather than a box](/koda/themes/#why-fills-instead-of-boxes): a tint is
+one style write per cell, and a border is a perimeter walk plus two extra rows.

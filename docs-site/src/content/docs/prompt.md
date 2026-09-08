@@ -1,0 +1,75 @@
+---
+title: Prompt & context
+description: What goes into the system prompt, and what koda does when a request will not fit the window.
+---
+
+## The system prompt
+
+The built-in prompt is deliberately short. Local models have small context windows and
+degrade quickly when instructions crowd out the actual task: every token of prompt is a
+token the model does not spend on your code.
+
+You can replace it. Open `/settings`, select **system prompt**, and press enter to edit it
+inline — empty means the built-in one. Per-tool prompt overrides go in a `[tool_prompts]`
+table in the config.
+
+Whichever prompt is in force, koda appends the facts a model cannot know on its own: the
+workspace path, the project type, and the current date, time and UTC offset. That last one
+matters more than it sounds — it is why koda dates a changelog entry from your clock
+instead of guessing a year from its training data.
+
+Your `instructions`, and any `AGENTS.md` / `CLAUDE.md` / `.koda.md` in the workspace root,
+are appended either way.
+
+## Fitting a small context
+
+A local model with an 8k window spends most of it on tool results it can no longer use:
+the first read of a file that has since been edited twice, the listing from six steps
+back, the 400-line build log whose only payload was `ok`.
+
+Dropping the oldest messages to make room frees exactly the wrong thing. The first message
+in a session is the description of the job.
+
+So when a request does not fit, koda decides what the model still needs, in escalating
+passes, stopping as soon as it fits:
+
+**1. Supersede.** A `read_file` answered again later, or a file edited since it was read,
+is stale. Its body becomes one line saying what replaced it.
+
+**2. Squeeze.** What survives is truncated on a ladder. The step in flight keeps
+everything. Recent steps keep their detail. Older ones keep their head and tail. Anything
+naming what you just asked about keeps twice as much as anything that does not.
+
+**3. Drop.** Only now are whole exchanges removed, oldest first — and never the opening
+request.
+
+This runs on a **copy at send time**. Your history, the session file and `/compact` are
+untouched, so nothing is lost for good. Raise `context_tokens` and the next request
+carries the full detail again. Under budget it does nothing at all.
+
+## Curation and compaction are different tools
+
+| | What it does | What it changes |
+| --- | --- | --- |
+| **Curation** | Trims the copy about to be sent. | Nothing. Runs every request, automatically. |
+| **`/compact`** | Writes a real summary and keeps that. | The conversation itself. |
+
+`/compact` is the tool for a session that has genuinely moved on. Curation is what keeps a
+long turn working in the meantime. `auto_compact_at = 0.85` runs compaction automatically
+once context passes that fraction of the budget; `0` disables it.
+
+## The memory block scales too
+
+Memory in the prompt is sized to the window: one remembered fact per roughly 1k of
+context, between four and twenty. A model with 8k does not spend its context on notes
+instead of the task, and a model with 200k gets the full set.
+
+## Reasoning effort
+
+Thinking models can be told how hard to think. `/reason` cycles
+`off → low → medium → high`, or pass a level directly (`/reason high`), or set
+`reasoning_effort` in the config.
+
+koda sends it as `reasoning_effort` on the request. Servers that do not support the field
+ignore it, and `off` omits it entirely. Reasoning deltas are displayed dimmed — expandable
+with <kbd>ctrl+t</kbd> — and never sent back in the next request.

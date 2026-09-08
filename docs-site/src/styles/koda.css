@@ -1,0 +1,495 @@
+/* ---------------------------------------------------------------------------
+   koda docs — visual language
+
+   The palette is not invented for this site. Every value below is koda's own,
+   read out of src/theme.rs: the NEON palette koda starts in by default, and
+   SOLARIZED_LIGHT for light mode. The structural devices are the terminal's
+   too — koda groups a block with a tinted fill and a rail rather than a box,
+   because a fill costs no rows and the tint carries the block's kind. The
+   same rule holds here: almost nothing on this page is outlined.
+--------------------------------------------------------------------------- */
+
+:root {
+  --koda-sans: 'Space Grotesk Variable', 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --koda-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --sl-font: var(--koda-sans);
+  --sl-font-mono: var(--koda-mono);
+
+  /* NEON — koda's default terminal palette */
+  --k-text: #e9ecff;
+  --k-muted: #7a82b4;
+  --k-accent: #00f5d4;
+  --k-accent-alt: #ff47cd;
+  --k-success: #58ff9c;
+  --k-warning: #ffc740;
+  --k-error: #ff4a6e;
+  --k-info: #54adff;
+  --k-violet: #b294ff;
+  --k-border: #3a3e6e;
+  --k-surface: #141834;
+  --k-panel: #181a3a;
+  --k-bg-user: #261a36;
+  --k-bg-tool: #141834;
+  --k-bg-err: #301628;
+  --k-bg: #0a0b1c;
+
+  /* Fills, at the weight the TUI uses them: present, never loud. */
+  --k-fill-accent: color-mix(in srgb, var(--k-accent) 9%, transparent);
+  --k-fill-alt: color-mix(in srgb, var(--k-accent-alt) 9%, transparent);
+  --k-fill-warn: color-mix(in srgb, var(--k-warning) 10%, transparent);
+  --k-fill-err: color-mix(in srgb, var(--k-error) 10%, transparent);
+  --k-fill-info: color-mix(in srgb, var(--k-info) 10%, transparent);
+  --k-fill-quiet: color-mix(in srgb, var(--k-violet) 6%, transparent);
+
+  --sl-color-accent-low: color-mix(in srgb, var(--k-accent) 22%, var(--k-bg));
+  --sl-color-accent: var(--k-accent);
+  --sl-color-accent-high: color-mix(in srgb, var(--k-accent) 70%, white);
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: var(--k-text);
+  --sl-color-gray-2: #c9cef0;
+  --sl-color-gray-3: #9aa2d4;
+  --sl-color-gray-4: var(--k-muted);
+  --sl-color-gray-5: #474d80;
+  --sl-color-gray-6: #23264d;
+  --sl-color-gray-7: #171a3a;
+  --sl-color-black: var(--k-bg);
+
+  --sl-color-bg: var(--k-bg);
+  --sl-color-bg-nav: color-mix(in srgb, var(--k-bg) 88%, black);
+  --sl-color-bg-sidebar: var(--k-bg);
+  --sl-color-bg-inline-code: var(--k-fill-quiet);
+  --sl-color-hairline: color-mix(in srgb, var(--k-border) 55%, transparent);
+  --sl-color-hairline-light: color-mix(in srgb, var(--k-border) 80%, transparent);
+  --sl-color-hairline-shade: color-mix(in srgb, var(--k-border) 40%, transparent);
+  --sl-color-text: var(--k-text);
+  --sl-color-text-accent: var(--k-accent);
+  --sl-color-text-invert: var(--k-bg);
+
+  --sl-color-green: var(--k-success);
+  --sl-color-orange: var(--k-warning);
+  --sl-color-red: var(--k-error);
+  --sl-color-blue: var(--k-info);
+  --sl-color-purple: var(--k-violet);
+
+  --sl-shadow-sm: none;
+  --sl-shadow-md: none;
+  --sl-shadow-lg: none;
+
+  --sl-content-width: 48rem;
+  --sl-line-height: 1.72;
+  --sl-text-code: 0.875rem;
+}
+
+/* SOLARIZED_LIGHT — koda's light palette, same source file */
+:root[data-theme='light'] {
+  --k-text: #586e75;
+  --k-muted: #93a1a1;
+  --k-accent: #268bd2;
+  --k-accent-alt: #d33682;
+  --k-success: #859900;
+  --k-warning: #b58900;
+  --k-error: #dc322f;
+  --k-info: #2aa198;
+  --k-violet: #6c71c4;
+  --k-border: #cbc7b4;
+  --k-surface: #eee8d5;
+  --k-panel: #f0ead6;
+  --k-bg-user: #f5eedb;
+  --k-bg-tool: #eeece0;
+  --k-bg-err: #f8e8e4;
+  --k-bg: #fdf6e3;
+
+  --sl-color-accent-low: color-mix(in srgb, var(--k-accent) 16%, var(--k-bg));
+  --sl-color-accent: var(--k-accent);
+  --sl-color-accent-high: #17557f;
+  --sl-color-white: #073642;
+  --sl-color-gray-1: #073642;
+  --sl-color-gray-2: #33555e;
+  --sl-color-gray-3: var(--k-text);
+  --sl-color-gray-4: #7c8f92;
+  --sl-color-gray-5: var(--k-muted);
+  --sl-color-gray-6: #e6dfc8;
+  --sl-color-gray-7: #f2ecd8;
+  --sl-color-black: #ffffff;
+  --sl-color-bg: var(--k-bg);
+  --sl-color-bg-nav: color-mix(in srgb, var(--k-bg) 90%, var(--k-surface));
+  --sl-color-bg-sidebar: var(--k-bg);
+  --sl-color-text: var(--k-text);
+  --sl-color-text-invert: #ffffff;
+}
+
+/* --- Type ---------------------------------------------------------------- */
+
+body {
+  font-family: var(--koda-sans);
+  font-feature-settings: 'ss01' 1, 'ss03' 1;
+  background: var(--k-bg);
+}
+
+.sl-markdown-content {
+  font-size: 1.0125rem;
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4,
+.content-panel h1 {
+  font-family: var(--koda-sans);
+  letter-spacing: -0.022em;
+  font-weight: 600;
+}
+
+/* Starlight wraps a heading in .sl-heading-wrapper and makes the heading itself
+   inline, so the section rule belongs on the wrapper or it tracks the text. */
+.sl-markdown-content .sl-heading-wrapper.level-h2 {
+  display: block;
+  margin-top: 2.9rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--sl-color-hairline-shade);
+}
+.sl-markdown-content h2 { font-size: 1.5rem; }
+
+.sl-markdown-content h3 {
+  font-size: 1.175rem;
+  color: var(--sl-color-white);
+}
+
+/* A page's own title carries koda's heading colour, as the TUI's headings do. */
+.content-panel h1#_top {
+  font-size: clamp(2rem, 1.4rem + 2vw, 2.6rem);
+  letter-spacing: -0.03em;
+}
+
+.sl-markdown-content strong { font-weight: 600; color: var(--sl-color-white); }
+
+.sl-markdown-content a:not(:where(.not-content *)) {
+  color: var(--k-accent);
+  text-decoration-color: color-mix(in srgb, var(--k-accent) 40%, transparent);
+  text-underline-offset: 0.22em;
+}
+.sl-markdown-content a:hover:not(:where(.not-content *)) {
+  text-decoration-color: var(--k-accent);
+}
+
+/* --- Inline code, keys --------------------------------------------------- */
+
+.sl-markdown-content :not(pre) > code:not(:where(.not-content *)) {
+  font-family: var(--koda-mono);
+  font-size: 0.855em;
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  background: var(--k-fill-quiet);
+  color: var(--k-violet);
+  border: 0;
+}
+
+.sl-markdown-content kbd {
+  font-family: var(--koda-mono);
+  font-size: 0.8em;
+  padding: 0.15em 0.45em;
+  border-radius: 3px;
+  background: var(--k-surface);
+  color: var(--sl-color-white);
+  border-bottom: 2px solid var(--k-border);
+}
+
+/* --- Fills, not boxes ---------------------------------------------------- */
+
+.starlight-aside {
+  border: 0;
+  border-inline-start: 2px solid var(--starlight-aside-color);
+  border-radius: 0;
+  padding: 1rem 1.15rem;
+  background: var(--starlight-aside-fill);
+}
+.starlight-aside--note   { --starlight-aside-color: var(--k-info);      --starlight-aside-fill: var(--k-fill-info); }
+.starlight-aside--tip    { --starlight-aside-color: var(--k-success);   --starlight-aside-fill: color-mix(in srgb, var(--k-success) 10%, transparent); }
+.starlight-aside--caution{ --starlight-aside-color: var(--k-warning);   --starlight-aside-fill: var(--k-fill-warn); }
+.starlight-aside--danger { --starlight-aside-color: var(--k-error);     --starlight-aside-fill: var(--k-fill-err); }
+.starlight-aside__title { font-family: var(--koda-mono); font-size: 0.8rem; font-weight: 600; letter-spacing: 0.01em; }
+.starlight-aside__title svg { display: none; }
+
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+  border-inline-start: 2px solid var(--k-border);
+  background: var(--k-fill-quiet);
+  padding: 0.85rem 1.15rem;
+  color: var(--sl-color-gray-2);
+}
+
+/* Tables read like koda's aligned tables: a header rule, no grid. */
+.sl-markdown-content table:not(:where(.not-content *)) {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.94rem;
+}
+.sl-markdown-content th:not(:where(.not-content *)) {
+  font-family: var(--koda-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--k-warning);
+  text-align: start;
+  border: 0;
+  border-bottom: 1px solid var(--k-border);
+  padding: 0.45rem 0.9rem 0.45rem 0;
+  white-space: nowrap;
+}
+.sl-markdown-content td:not(:where(.not-content *)) {
+  border: 0;
+  border-bottom: 1px solid var(--sl-color-hairline-shade);
+  padding: 0.55rem 0.9rem 0.55rem 0;
+  vertical-align: top;
+}
+.sl-markdown-content tbody tr:last-child td:not(:where(.not-content *)) { border-bottom: 0; }
+
+/* --- Code frames --------------------------------------------------------- */
+
+.expressive-code .frame {
+  box-shadow: none;
+}
+.expressive-code .frame pre {
+  border: 0;
+  border-inline-start: 2px solid color-mix(in srgb, var(--k-accent) 45%, transparent);
+  border-radius: 0;
+  background: var(--k-surface);
+}
+.expressive-code .frame.is-terminal pre {
+  border-inline-start-color: color-mix(in srgb, var(--k-accent-alt) 45%, transparent);
+}
+.expressive-code .frame .header {
+  font-family: var(--koda-mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.01em;
+}
+
+/* --- Sidebar: koda's group titles and glyph rail ------------------------- */
+
+.sidebar-content {
+  font-size: 0.9rem;
+}
+.sidebar-content summary,
+.sidebar-content .group-label > span,
+starlight-sidebar-nav .group-label {
+  font-family: var(--koda-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--k-muted);
+}
+.sidebar-content a {
+  border-radius: 3px;
+  padding-block: 0.28rem;
+}
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover {
+  background: var(--k-fill-accent);
+  color: var(--k-accent);
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--k-accent);
+}
+
+/* --- Right rail ---------------------------------------------------------- */
+
+.right-sidebar-panel h2 {
+  font-family: var(--koda-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--k-muted);
+}
+.right-sidebar-panel a[aria-current='true'] { color: var(--k-accent); }
+
+/* --- Header -------------------------------------------------------------- */
+
+.header {
+  border-bottom: 1px solid var(--sl-color-hairline-shade);
+  backdrop-filter: blur(8px);
+}
+.site-title {
+  font-family: var(--koda-mono);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.site-title img { width: 1.55rem; height: 1.55rem; }
+
+site-search button[data-open-modal] {
+  border-radius: 3px;
+  border-color: var(--sl-color-hairline);
+  font-family: var(--koda-mono);
+  font-size: 0.78rem;
+}
+
+/* --- Pagination: koda's chevron status segments -------------------------- */
+
+.pagination-links a {
+  border: 0;
+  border-radius: 0;
+  background: var(--k-fill-quiet);
+  box-shadow: none;
+  padding: 0.85rem 1rem;
+}
+.pagination-links a:hover { background: var(--k-fill-accent); }
+.pagination-links a span:first-child {
+  font-family: var(--koda-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  color: var(--k-muted);
+}
+.pagination-links a svg { color: var(--k-accent); }
+
+/* --- Cards --------------------------------------------------------------- */
+
+.card {
+  border: 0;
+  border-radius: 0;
+  border-top: 2px solid color-mix(in srgb, var(--k-accent) 55%, transparent);
+  background: var(--k-fill-quiet);
+  padding: 1.1rem 1.15rem;
+}
+.card .title { font-family: var(--koda-sans); font-weight: 600; font-size: 1rem; }
+.card .icon {
+  color: var(--k-accent);
+  font-size: 1.15rem;
+  border: 0;
+  padding: 0;
+  background: none;
+}
+.card .body { font-size: 0.93rem; color: var(--sl-color-gray-3); }
+
+/* --- Steps: the quickstart genuinely is a sequence ----------------------- */
+
+.sl-steps > li::before {
+  font-family: var(--koda-mono);
+  background: var(--k-surface);
+  color: var(--k-accent);
+  border: 1px solid var(--k-border);
+}
+.sl-steps > li { border-inline-start-color: var(--sl-color-hairline-shade); }
+
+/* --- Badges -------------------------------------------------------------- */
+
+.sl-badge {
+  font-family: var(--koda-mono);
+  border-radius: 2px;
+  border: 0;
+  font-weight: 600;
+}
+
+/* --- The terminal, as koda draws it ------------------------------------- */
+
+.koda-term {
+  font-family: var(--koda-mono);
+  font-size: clamp(0.6rem, 0.32rem + 0.7vw, 0.755rem);
+  line-height: 1.62;
+  background: var(--k-bg);
+  color: var(--k-text);
+  padding: 1.1rem 0 0;
+  overflow-x: auto;
+  border: 1px solid var(--k-border);
+  border-radius: 6px;
+  tab-size: 2;
+}
+.koda-term pre { margin: 0; padding: 0 1.1rem; background: none; font: inherit; }
+.koda-term .row { display: block; padding: 0 1.1rem; white-space: pre; }
+.koda-term .fill-user { background: var(--k-bg-user); }
+.koda-term .fill-tool { background: var(--k-bg-tool); }
+.koda-term .fill-err  { background: var(--k-bg-err); }
+.koda-term .c-accent { color: var(--k-accent); }
+.koda-term .c-alt    { color: var(--k-accent-alt); }
+.koda-term .c-ok     { color: var(--k-success); }
+.koda-term .c-warn   { color: var(--k-warning); }
+.koda-term .c-err    { color: var(--k-error); }
+.koda-term .c-info   { color: var(--k-info); }
+.koda-term .c-violet { color: var(--k-violet); }
+.koda-term .c-muted  { color: var(--k-muted); }
+.koda-term .b        { font-weight: 600; }
+.koda-term .strike   { text-decoration: line-through; opacity: 0.6; }
+.koda-term .statusbar {
+  display: block;
+  white-space: pre;
+  padding: 0.35rem 1.1rem 0.75rem;
+  color: var(--k-muted);
+}
+
+/* One cursor blinks. Nothing else on this site moves on its own. */
+.koda-term .cursor {
+  display: inline-block;
+  width: 0.6em;
+  background: var(--k-accent);
+  color: var(--k-bg);
+  animation: koda-blink 1.15s step-end infinite;
+}
+@keyframes koda-blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+@media (prefers-reduced-motion: reduce) {
+  .koda-term .cursor { animation: none; }
+}
+
+/* --- Hero ---------------------------------------------------------------- */
+
+.koda-hero { padding-block: 1.5rem 0.5rem; }
+.koda-hero__lede {
+  max-width: 34ch;
+  font-size: clamp(2.1rem, 1.3rem + 2.9vw, 3.4rem);
+  line-height: 1.06;
+  letter-spacing: -0.038em;
+  font-weight: 600;
+  color: var(--sl-color-white);
+  margin: 0 0 1rem;
+  text-wrap: balance;
+}
+.koda-hero__sub {
+  max-width: 62ch;
+  font-size: 1.075rem;
+  line-height: 1.6;
+  color: var(--sl-color-gray-3);
+  margin: 0 0 1.6rem;
+}
+.koda-hero__actions { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.1rem; }
+.koda-hero__actions a {
+  font-family: var(--koda-mono);
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.6rem 1.05rem;
+  border-radius: 3px;
+  text-decoration: none;
+  display: inline-block;
+}
+.koda-hero__actions a.primary { background: var(--k-accent); color: #04121a; }
+.koda-hero__actions a.primary:hover { background: color-mix(in srgb, var(--k-accent) 80%, white); }
+.koda-hero__actions a.ghost { background: var(--k-fill-quiet); color: var(--sl-color-white); }
+.koda-hero__actions a.ghost:hover { background: var(--k-fill-accent); color: var(--k-accent); }
+
+.koda-hero__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.7rem;
+  font-family: var(--koda-mono);
+  font-size: 0.76rem;
+  color: var(--k-muted);
+  margin-bottom: 2rem;
+}
+.koda-hero__facts b { color: var(--sl-color-gray-2); font-weight: 500; }
+
+.koda-install {
+  font-family: var(--koda-mono);
+  font-size: 0.775rem;
+  line-height: 1.55;
+  background: var(--k-surface);
+  border-inline-start: 2px solid var(--k-accent-alt);
+  padding: 0.7rem 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--sl-color-gray-2);
+  margin-bottom: 1.8rem;
+}
+.koda-install .c-muted { color: var(--k-muted); }
+
+@media (min-width: 72rem) {
+  .koda-hero { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 2.5rem; align-items: start; }
+}
+
+/* --- Splash pages: let the hero and the grid breathe --------------------- */
+
+[data-has-hero] .content-panel:first-of-type { border-bottom: 0; padding-bottom: 0; }
+[data-has-hero] .hero { padding-block: 0; }

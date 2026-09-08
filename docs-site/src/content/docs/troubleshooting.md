@@ -1,0 +1,125 @@
+---
+title: Troubleshooting
+description: What to check when koda will not connect, the model will not call tools, or a turn went wrong three steps in.
+---
+
+Failures do not put stack traces on your screen. Transient ones — connection reset, 429,
+5xx, an empty stream — are retried with backoff. What you see is one plain sentence; the
+full detail goes to the event log, and the status bar shows a count when anything was
+logged as a warning or an error.
+
+```
+/logs                            in the TUI
+~/.local/state/koda/koda.log     the file behind it
+```
+
+`log_detail = true` adds debug-level telemetry to the `/logs` view.
+
+## koda is not found after installing
+
+The bin directory is not on your `PATH`. On macOS and Linux:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add it to your shell profile. On Windows the installer adds
+`%LOCALAPPDATA%\koda\bin` to your user `PATH`, which needs a new terminal to take effect.
+
+## It cannot reach the model
+
+Check the endpoint answers at all:
+
+```sh
+curl -s http://localhost:11434/v1/models | head
+koda models          # the same question, through koda's client
+```
+
+| Symptom | Usual cause |
+| --- | --- |
+| Connection refused | The server is not running. `ollama serve`, or start LM Studio's server from the Developer tab. |
+| 404 on `/chat/completions` | The base URL is missing `/v1`. |
+| 401 | The server wants a key. Set it with `/setup` or `--api-key`. |
+| Certificate error | A proxy re-signing TLS. Install its CA, or see [`insecure_tls`](/koda/providers/#servers-behind-a-private-ca). |
+| Nothing at all, and no error | Wrong port. `koda config` prints the URL actually in use, after all four layers. |
+
+## The model produces malformed tool calls
+
+This is the most common real problem, and it is a model problem.
+
+**First, change the model.** Below about 7B, models lose the tool-call format mid-turn.
+Move to Qwen2.5-Coder 14B or larger, or Devstral Small — see
+[Model choice](/koda/providers/#model-choice-matters-more-than-anything-else).
+
+**Then check the context window.** Give it at least 16k. On Ollama the window is a property
+of the model (`num_ctx`), not of koda; a model served with 2k will truncate regardless of
+`context_tokens`.
+
+**On llama.cpp, check `--jinja`.** Without it the server does not apply the model's chat
+template, and tool calling degrades badly.
+
+**Only then touch `tool_protocol`.** If a server accepts the `tools` field, does not error,
+and silently ignores it, `auto` cannot detect that — set `text` explicitly. Any other case
+`auto` already handles. See [Tool-call protocols](/koda/protocols/).
+
+## The agent keeps searching instead of finding things
+
+Check the code graph is on and built:
+
+```
+/tools               is codegraph listed?
+```
+
+`codegraph = true` is the default. If the project was opened before the scan finished, or
+files changed outside koda and `codegraph_refresh_ms` is `0`, the graph can be stale — a
+restart rebuilds it.
+
+## A turn ran out of steps
+
+`max_steps` (default 24) bounds the round trips in one turn. When it is hit, `step_check`
+asks the model whether work remains rather than stopping flat, up to `max_steps_hard`
+(96). If you are hitting the hard ceiling, the task is too big for one turn: break it up,
+or use `/orc` to decompose it across [role agents](/koda/skills/).
+
+## Context fills up too fast
+
+`/compact` writes a summary and keeps that. `auto_compact_at = 0.85` does it for you.
+
+If it happens constantly, raise `context_tokens` to match what the model actually serves —
+and remember that koda [curates the request](/koda/prompt/) rather than truncating history,
+so a low budget costs you detail rather than losing your conversation.
+
+## The screen looks wrong
+
+| Symptom | Fix |
+| --- | --- |
+| Boxes and braille render as garbage | `icons = "ascii"`, or `--icons ascii`. |
+| Colours are unreadable | `/theme` to pick by eye. `ansi` uses your terminal's own sixteen. |
+| No colour wanted at all | `NO_COLOR=1`, or `theme = "mono"`. |
+| Frames tear while streaming | Your terminal does not support DEC 2026. Set `sync_output = false`. |
+| Cannot select text with the mouse | `/mouse` off hands selection back to the terminal. |
+| Layout is cramped | It adapts at 92 and 64 columns. Widen the window. |
+
+## Capturing a bad turn
+
+`/debug` — or `debug = true`, or `KODA_DEBUG=1` — records the exact request body koda sent
+and the raw streamed response. That is enough to reproduce a bad turn.
+
+```
+~/.local/state/koda/debug/rr-session-N.json      the request
+~/.local/state/koda/debug/rr-session-N.res.log   the raw SSE
+```
+
+`/debug` prints where they are.
+
+For understanding *why* a turn went wrong rather than reproducing it, the
+[web control center](/koda/webui/) is better: the trace waterfall shows the steps in order,
+and **Prompt Δ** diffs each request against the previous one, so what compaction dropped or
+what a learned rule added is visible rather than silent.
+
+## Undoing something
+
+`/undo` puts back every file the agent changed in the last turn.
+
+Past that, koda is not a version control system. Work in a git repository with a clean
+tree, especially at `AUTO-WRITE` or above.

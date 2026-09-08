@@ -1,0 +1,59 @@
+---
+title: Web search & fetch
+description: Two opt-in tools — search finds a page, fetch reads it — with a self-hosted backend if you want one.
+---
+
+Both tools are off by default, for the same reason: they turn something the model said
+into a request from your machine.
+
+## Search
+
+Turn it on with `/websearch`, or `web_search = true`. koda tells you which backend is
+active.
+
+There are two, chosen automatically:
+
+| Backend | When it is used | What it means |
+| --- | --- | --- |
+| **SearXNG** | `searx_url` is set | Your own instance. Private, self-hosted, no third party sees the query. |
+| **DuckDuckGo** | Otherwise | The keyless HTML endpoint, so search works out of the box with nothing to host. |
+
+```toml
+web_search = true
+searx_url = "http://localhost:8888"   # optional; omit to use DuckDuckGo
+search_backend = "duckduckgo"          # duckduckgo | searxng
+search_results = 6
+```
+
+A SearXNG instance needs `json` in `search.formats` in its `settings.yml`, or koda cannot
+read the results.
+
+You can also pick the backend explicitly in `/settings`: enable web search, choose
+DuckDuckGo or SearXNG (entering the instance address inline), then close to confirm.
+
+## Fetching a page
+
+With `web_fetch` on — off by default, toggled in `/settings` — the agent can GET a URL and
+read it as plain text. HTML is stripped and the output is capped at
+`max_tool_output_bytes`.
+
+It is the companion to search: search finds a page, `web_fetch` reads it. Only `http` and
+`https` are accepted.
+
+:::caution[Fetched content is untrusted]
+Anything the agent reads from the web is data, not instructions. koda tells the model as
+much, but a page that tries to instruct the agent is a real thing, and the reason this
+tool is opt-in.
+:::
+
+## When a fetch comes back empty
+
+A plain GET is enough for a documentation page and useless for anything that renders
+client-side — you get an empty shell, a spinner, or a cookie wall.
+
+When `web_fetch` returns almost no text, koda adds a note saying the page probably renders
+with JavaScript and points at the `browse` tool, or at the setting if the browser is off.
+Without that note a near-empty page looks like a real one that happens to be short, and
+the model reasons about the wrong thing.
+
+See [Browsing live pages](/koda/browse/) for the browser.

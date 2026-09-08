@@ -1,0 +1,68 @@
+---
+title: koda
+description: A single-binary terminal coding agent for local LLMs. Reads and edits your code, runs commands, and shows you a diff before it changes anything.
+template: splash
+hero:
+  tagline: A terminal coding agent for local LLMs
+editUrl: false
+lastUpdated: false
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Two ways in
+
+<CardGrid>
+  <Card title="You want it working" icon="rocket">
+    Install koda, point it at a model, and fix your first bug. Plain English, copy-paste
+    commands, about five minutes.
+
+    [Quickstart](/koda/quickstart/)
+  </Card>
+  <Card title="You want to know how" icon="setting">
+    One Rust binary, no sidecars. The agent loop, the tool protocols, how a request is
+    curated to fit a small context window.
+
+    [Architecture](/koda/architecture/)
+  </Card>
+</CardGrid>
+
+## What it does
+
+<CardGrid>
+  <Card title="Runs on your hardware" icon="laptop">
+    Your code is read by a model on your machine. Nothing is uploaded, no account, no
+    metering. Cloud endpoints work too — that is your choice, not the default.
+  </Card>
+  <Card title="Asks before it acts" icon="approve-check">
+    Every write shows a unified diff first. Every command asks. `PLAN` mode removes the
+    write tools entirely, so nothing on disk can change while you are still thinking.
+  </Card>
+  <Card title="Runs a real debugger" icon="seti:powershell">
+    The `debug` tool drives your language's actual debug adapter — breakpoints,
+    stepping, variables, logpoints. The model reads state instead of guessing at it.
+  </Card>
+  <Card title="Knows where things live" icon="seti:folder">
+    A symbol graph of the whole project is built on open, so the model asks where
+    `apply_discount` is defined rather than grepping for it.
+  </Card>
+  <Card title="Survives a small context" icon="seti:config">
+    An 8k window fills up fast. koda supersedes stale reads, squeezes what is left on a
+    ladder, and only then drops — never the opening request.
+  </Card>
+  <Card title="Remembers between sessions" icon="seti:notebook">
+    Facts, procedures and style rules land as plain markdown in your project you can
+    read, edit, commit or delete. Nothing is inferred behind your back.
+  </Card>
+</CardGrid>
+
+## Pick a starting point
+
+<CardGrid>
+  <LinkCard title="Installation" description="macOS, Linux and Windows, from a one-liner or by hand." href="/koda/install/" />
+  <LinkCard title="LLM providers" description="Ollama, LM Studio, llama.cpp, vLLM, MLX, and any OpenAI-compatible endpoint." href="/koda/providers/" />
+  <LinkCard title="Configuration" description="Every key in config.toml, what it does and what it defaults to." href="/koda/config/" />
+  <LinkCard title="Tools & safety" description="What the agent can do, what it must ask before doing, and how the sandbox works." href="/koda/tools/" />
+  <LinkCard title="Troubleshooting" description="Bad tool calls, connection failures, models that lose the format." href="/koda/troubleshooting/" />
+  <LinkCard title="FAQ" description="Is it free, is it private, which model should I run." href="/koda/faq/" />
+</CardGrid>
