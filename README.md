@@ -257,6 +257,33 @@ any other command, unless autonomy is turned up.
 
 [dap]: https://microsoft.github.io/debug-adapter-protocol/
 
+## A little delight
+
+Three small things, all caused by something you did — never by a timer. That
+distinction is the whole design: every piece of terminal delight people keep
+(lazygit's explosion when you nuke the working tree, `sl` when you mistype
+`ls`) fires because of an action, and looping idle animation is disqualified
+three times over — WCAG 2.2.2 wants a pause control past five seconds,
+repainting at a few frames per second can permanently suppress the terminal's
+own cursor blink, and koda otherwise never wakes at all when idle.
+
+- **The intro.** The wordmark arrives on a wavefront rather than sitting there.
+  One second, and any keystroke ends it immediately — Neovim's rule: an intro
+  is gone the moment there is something real to show.
+- **A costume.** One turn in twelve, the thinking glyph in the status row wears
+  a different face. Zero extra cells, frames or wakeups; it ends when the turn
+  does.
+- **A visitor.** After a turn that did real work and ended well, roughly one
+  time in eight and never twice within ten minutes, a single braille cell hops
+  across the one row on screen that is always blank, for nine hundred
+  milliseconds, and walks off. It will not appear while anything waits on you,
+  while an overlay is open, while you are typing, or if you have scrolled up.
+
+And asking who made koda gets a short curtain call. `/motion off` turns all of
+it off; a terminal without box-drawing glyphs never sees it. The reasoning and
+the evidence are in
+[docs/research-tui-delight.md](docs/research-tui-delight.md).
+
 ## Nudges
 
 Three things koda wants the model to do differently, all learned from reading

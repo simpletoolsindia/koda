@@ -51,7 +51,9 @@ use unicode_width::UnicodeWidthStr;
 const SPINNER_DELAY: Duration = Duration::from_millis(200);
 /// How long the welcome banner's entrance shimmer plays before it settles into
 /// the static gradient. Kept short so it never delays getting to work.
-const WELCOME_ANIM: Duration = Duration::from_millis(1400);
+/// The intro's whole window. Under NN/g's upper bound for larger motion, and
+/// short enough that it is finished before anyone waits on it.
+const WELCOME_ANIM: Duration = Duration::from_millis(1000);
 /// How much of the intro is the wordmark arriving; the rest is the highlight
 /// crossing it and settling.
 const REVEAL_FRACTION: f32 = 0.45;
@@ -151,6 +153,15 @@ fn working_message(elapsed: Duration) -> &'static str {
 /// The KODA banner art, shared by the static welcome and its entrance shimmer.
 /// A bold "ANSI Shadow" face with drop shadows — fancier and more striking than
 /// a flat block face, while still compact.
+/// The wordmark, in the double-line face.
+///
+/// `spec-visual-language.md` bans `╔═╗` for borders *around content*; this is a
+/// logo, not a frame, and the ban does not reach it.
+///
+/// Every glyph here is East Asian **Ambiguous**, which `unicode-width` resolves
+/// to 1 but a terminal configured for CJK ambiguous-wide renders at 2 — the
+/// banner would be 72 columns, not 36. Nothing in-process can detect that
+/// choice, so the assumption is asserted by test instead of guessed at.
 const BANNER_ART: [&str; 6] = [
     "██╗  ██╗  ██████╗  ██████╗   █████╗ ",
     "██║ ██╔╝ ██╔═══██╗ ██╔══██╗ ██╔══██╗",
@@ -159,6 +170,30 @@ const BANNER_ART: [&str; 6] = [
     "██║  ██╗ ╚██████╔╝ ██████╔╝ ██║  ██║",
     "╚═╝  ╚═╝  ╚═════╝  ╚═════╝  ╚═╝  ╚═╝",
 ];
+
+/// The same wordmark where the box-drawing set is not available.
+///
+/// `show_welcome` used to reach for the unicode art unconditionally, so on a
+/// terminal whose locale is not UTF-8 — exactly the case `theme::glyphs` picks
+/// ASCII for — the first thing koda printed was mojibake. Rows are padded to
+/// equal width because the intro's wavefront indexes columns across all of
+/// them.
+const BANNER_ASCII: [&str; 5] = [
+    " _  __   ___    ____     _    ",
+    "| |/ /  / _ \\  |  _ \\   / \\   ",
+    "| ' /  | | | | | | | | / _ \\  ",
+    "| . \\  | |_| | | |_| |/ ___ \\ ",
+    "|_|\\_\\  \\___/  |____//_/   \\_\\",
+];
+
+/// The wordmark this terminal can actually draw.
+fn banner_art(g: &Glyphs) -> &'static [&'static str] {
+    if g.fine_blocks {
+        &BANNER_ART
+    } else {
+        &BANNER_ASCII
+    }
+}
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "keys and commands"),
@@ -414,6 +449,21 @@ pub struct App {
     /// tests"), from the latest tool start — shown in the working status so the
     /// user sees live activity, not a generic spinner.
     activity: Option<String>,
+    /// Turns this session, which is the costume's die.
+    turn_count: u64,
+    /// A turn wrote or edited a file, which is one of the two ways a turn
+    /// counts as having done real work.
+    wrote_this_turn: bool,
+    /// The visitor: when it started, and when one last appeared. Both bounded,
+    /// so this can never become something that runs on its own.
+    visitor_at: Option<Instant>,
+    last_visitor: Option<Instant>,
+    /// Which alternate glyph set this turn wears, if any.
+    ///
+    /// Chosen once when the turn starts, not derived per frame: a seed that
+    /// moves with the clock would re-roll on every redraw and the status glyph
+    /// would flicker between faces.
+    costume: Option<usize>,
     /// The id of an `about_creator` call in flight, and when its answer landed.
     /// The one moment koda celebrates: someone asked who made it.
     dance_call: Option<String>,
@@ -788,6 +838,15 @@ impl App {
                 self.busy = true;
                 self.cancelling = false;
                 self.activity = None;
+                // One turn in COSTUME_ODDS wears a different face. Rolled here,
+                // held for the whole turn, forgotten when it ends.
+                self.turn_count = self.turn_count.wrapping_add(1);
+                let roll = (self.turn_count ^ self.tip_seed as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    >> 33;
+                self.costume = (roll % COSTUME_ODDS == 0)
+                    .then(|| (roll / COSTUME_ODDS) as usize % COSTUMES.len());
+                self.wrote_this_turn = false;
                 self.received = 0;
                 self.draft_seen = 0;
                 self.follow = true;
@@ -886,6 +945,7 @@ impl App {
                 self.activity = Some("thinking about the next step".into());
                 // A write may have created a file, so `@` completion is stale.
                 if summary.starts_with("created") || summary.starts_with("wrote") {
+                    self.wrote_this_turn = true;
                     self.files.invalidate();
                     self.files_ready = false;
                 }
@@ -1006,10 +1066,16 @@ impl App {
             } => {
                 // A turn that has ended must not leave half a sentence hidden.
                 self.transcript.finish_reveal();
+                let worked = self.wrote_this_turn
+                    || self
+                        .turn_started
+                        .is_some_and(|t| t.elapsed() >= Duration::from_secs(20));
                 self.busy = false;
                 self.cancelling = false;
                 self.activity = None;
                 self.turn_started = None;
+                self.costume = None;
+                self.maybe_send_visitor(completed && worked);
                 self.tokens = history_tokens;
                 // Prompts the user queued while koda was working are picked up
                 // here, once the current task's tool calls have all finished.
@@ -1077,6 +1143,47 @@ impl App {
     /// First screen: a framed card with what koda knows about this project and
     /// what to type. Everything here is a fact the user would otherwise have to
     /// ask for.
+    /// Send the visitor across the spacer row, if this is one of the rare
+    /// moments where it can only be a small pleasure.
+    ///
+    /// Every condition here exists to answer one question: could this possibly
+    /// be in the way? It fires on the *transition* to idle after a turn that
+    /// did real work and ended well — never on a timer, because a thing that
+    /// arrives while you are reading is an interruption however charming it is.
+    /// Then: nothing may be waiting on the user, no overlay may be open, the
+    /// composer must be empty (they are not mid-thought), the eye must be at
+    /// the bottom of the transcript, motion must be on, and it must be at least
+    /// ten minutes since the last one whatever the dice say.
+    fn maybe_send_visitor(&mut self, earned: bool) {
+        if !earned
+            || !self.motion.animates()
+            || self.pending.is_some()
+            || self.asking.is_some()
+            || self.picker.is_some()
+            || self.setup.is_some()
+            || self.settings.is_some()
+            || self.logs.is_some()
+            || self.plan_blocked
+            || !self.follow
+            || !self.editor.is_empty()
+            || !self.glyphs.fine_blocks
+        {
+            return;
+        }
+        if self
+            .last_visitor
+            .is_some_and(|t| t.elapsed() < VISITOR_FLOOR)
+        {
+            return;
+        }
+        let roll = (self.turn_count ^ self.tip_seed as u64).wrapping_mul(0x2545_F491_4F6C_DD1D);
+        if (roll >> 29) % VISITOR_ODDS != 0 {
+            return;
+        }
+        self.visitor_at = Some(Instant::now());
+        self.last_visitor = Some(Instant::now());
+    }
+
     /// Whether anything on screen needs periodic repainting.
     ///
     /// Everything else in koda is event-driven, so this is the complete list of
@@ -1096,6 +1203,9 @@ impl App {
             // …and the curtain call, which is the only other thing that moves
             // on its own. Both are bounded, so an idle koda still does nothing.
             || self.dance_at.is_some_and(|t| t.elapsed() < DANCE)
+            || self
+                .visitor_at
+                .is_some_and(|t| t.elapsed() < VISITOR_WALK)
     }
 
     fn show_welcome(&mut self, cfg: &Config) {
@@ -1125,7 +1235,7 @@ impl App {
         // KODA in a condensed half-block face with a horizontal 3-stop colour
         // gradient (accent → accent-alt → info) so it reads as one lit object.
         // Falls back to a flat accent on non-truecolor palettes (ANSI/mono).
-        let art = BANNER_ART;
+        let art = banner_art(&g);
         let cols = art.iter().map(|r| r.chars().count()).max().unwrap_or(1);
         let grad = |col: usize| -> ratatui::style::Color {
             match (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info)) {
@@ -1248,9 +1358,13 @@ impl App {
     // -------------------------------------------------------------------- keys
 
     fn on_key(&mut self, key: KeyEvent) {
-        // Any key ends the curtain call — and is then handled as normal, so
-        // dismissing it never costs the keystroke you meant to type.
+        // Any key ends the curtain call and the intro — and is then handled as
+        // normal, so dismissing either never costs the keystroke you meant to
+        // type. Neovim's rule: an intro is removed as soon as there is
+        // something real to show.
         self.dance_at = None;
+        self.welcome_at = None;
+        self.visitor_at = None;
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -3275,8 +3389,8 @@ fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(1),                    // powerline status bar (mode + model)
     ])
     .split(area);
-    let (body, plan_area, rule, tip_area, input, status) = (
-        chunks[0], chunks[1], chunks[2], chunks[3], chunks[5], chunks[6],
+    let (body, plan_area, rule, tip_area, spacer_area, input, status) = (
+        chunks[0], chunks[1], chunks[2], chunks[3], chunks[4], chunks[5], chunks[6],
     );
 
     // Transcript, with a one-column scrollbar reserved only when it scrolls.
@@ -3489,6 +3603,17 @@ fn draw(f: &mut Frame, app: &mut App) {
     if let Some(s) = &app.settings {
         s.draw(f, area, &app.theme, &app.glyphs);
     }
+    // The visitor, in the one row that is always empty. Drawn before the
+    // overlays, so anything that matters covers it rather than the reverse.
+    if let Some(started) = app.visitor_at {
+        let elapsed = started.elapsed();
+        if elapsed < VISITOR_WALK && spacer_area.height > 0 && !m.tiny {
+            draw_visitor(f, app, spacer_area, elapsed);
+        } else if elapsed >= VISITOR_WALK {
+            app.visitor_at = None;
+        }
+    }
+
     // The curtain call goes on top of everything and takes itself away.
     if let Some(started) = app.dance_at {
         let elapsed = started.elapsed();
@@ -3689,10 +3814,11 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 // The sweep derives its frame from elapsed time rather than a
                 // counter, so its pace is identical whether the loop is redrawing
                 // for animation or because the user typed.
+                let set = costume(app, g);
                 let glyph = if app.motion.animates() {
-                    g.thinking[anim::sweep(started.elapsed()) % g.thinking.len()]
+                    set[anim::sweep(started.elapsed()) % set.len()]
                 } else {
-                    g.thinking[0]
+                    set[0]
                 };
                 left.push(Span::styled(format!(" {glyph} "), t.fg(t.accent)));
                 // Show what the agent is doing right now (reading X, editing Y). When
@@ -3800,6 +3926,14 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
         spans.extend(right);
     }
     truncate_line(spans, width)
+}
+
+/// The glyph set this turn is wearing.
+fn costume<'a>(app: &'a App, g: &'a Glyphs) -> &'a [&'static str] {
+    match app.costume {
+        Some(i) if g.fine_blocks && app.motion.animates() => &COSTUMES[i % COSTUMES.len()],
+        _ => g.thinking,
+    }
 }
 
 /// A short present-tense phrase for what a tool is doing, shown live in the
@@ -4227,6 +4361,41 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
 /// gradient plus a soft bright band travelling left→right, so the logo "lights
 /// up" once on open. Draws over identical content, so when it stops there is no
 /// visible jump. Reduced-motion and non-TTY paths never reach here.
+/// The visitor's frames: one braille cell, hopping within itself. The cell does
+/// not move vertically, so the row can never reflow.
+const VISITOR: [&str; 6] = ["⣀", "⠤", "⠒", "⠉", "⠒", "⠤"];
+/// How long it takes to cross. Short enough to be over before it becomes the
+/// thing you are looking at, and far under WCAG 2.2.2's five seconds, so no
+/// pause control is owed.
+const VISITOR_WALK: Duration = Duration::from_millis(900);
+/// Columns it crosses, at most.
+const VISITOR_SPAN: u16 = 24;
+/// Turns between visits, on average…
+const VISITOR_ODDS: u64 = 8;
+/// …and the floor underneath that, whatever the dice say.
+const VISITOR_FLOOR: Duration = Duration::from_secs(600);
+
+/// Alternate faces for the thinking glyph in the status row.
+///
+/// The Claude Code spinner-verb pattern applied to the glyph instead of the
+/// word: one turn in [`COSTUME_ODDS`] wears a different set for its whole
+/// duration. It costs nothing — no extra cell, no extra frame, no extra wakeup,
+/// no new stop condition, since it ends when the turn does.
+///
+/// Every glyph is East Asian *Neutral*, so no terminal can render it double
+/// width and shift the row.
+const COSTUMES: [[&str; 6]; 4] = [
+    ["⠁", "⠈", "⠐", "⠠", "⠄", "⠂"], // orbit
+    ["◜", "◠", "◝", "◞", "◡", "◟"], // arc
+    ["✦", "✧", "⋆", "∗", "⋆", "✧"], // spark
+    ["▘", "▝", "▗", "▖", "▗", "▝"], // corners
+];
+
+/// Turns between costumes, on average. Often enough to be noticed and mentioned,
+/// rare enough to stay a surprise: a costume every turn is a theme, not a
+/// delight.
+const COSTUME_ODDS: u64 = 12;
+
 /// How long the creator card dances before it clears itself.
 const DANCE: Duration = Duration::from_millis(4200);
 
@@ -4235,6 +4404,41 @@ const DANCE: Duration = Duration::from_millis(4200);
 const DANCE_FRAMES: [&str; 4] = ["♪┏(°.°)┛♪", "♪┗(°.°)┓♪", "♪┏(°.°)┓♪", "♪┗(°.°)┛♪"];
 /// The same beat where the box-drawing set is not available.
 const DANCE_ASCII: [&str; 4] = [r"\o/", "|o|", r"/o", "|o|"];
+
+/// One braille cell, bouncing left to right across the spacer row and walking
+/// off the end.
+///
+/// It never moves vertically — the hop is which dots are lit *inside* the cell —
+/// so the row cannot reflow, and at the end of the span it is simply not drawn:
+/// no fade, no pop, no residue.
+fn draw_visitor(f: &mut Frame, app: &App, row: Rect, elapsed: Duration) {
+    let t = &app.theme;
+    let span = VISITOR_SPAN.min(row.width.saturating_sub(2));
+    if span < 8 {
+        return;
+    }
+    let progress = elapsed.as_secs_f32() / VISITOR_WALK.as_secs_f32();
+    let x = (anim::ease_out_cubic(progress) * span as f32) as u16;
+    if x >= span {
+        return; // walked off
+    }
+    // Six hops across the span, as a triangle so it lands and rises again.
+    let phase = (progress * 6.0).fract();
+    let hop = (phase * VISITOR.len() as f32) as usize % VISITOR.len();
+    let cell = Rect {
+        x: row.x + 1 + x,
+        y: row.y,
+        width: 1,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            VISITOR[hop].to_string(),
+            t.fg(theme::mix(t.muted, t.accent, 0.35)),
+        ))),
+        cell,
+    );
+}
 
 /// A short curtain call when someone asks who made koda.
 ///
@@ -4311,9 +4515,12 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
     else {
         return; // No gradient on non-truecolor palettes; nothing to shimmer.
     };
-    let cols = BANNER_ART
+    let art = banner_art(&app.glyphs);
+    // Display width, not `chars().count()`: the two agree for this face only by
+    // accident, and the next glyph added would break the wavefront silently.
+    let cols = art
         .iter()
-        .map(|r| r.chars().count())
+        .map(|r| UnicodeWidthStr::width(*r))
         .max()
         .unwrap_or(1);
 
@@ -4338,7 +4545,7 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
         sweep_elapsed,
         WELCOME_ANIM.mul_f32(1.0 - REVEAL_FRACTION),
     );
-    for (i, row) in BANNER_ART.iter().enumerate() {
+    for (i, row) in art.iter().enumerate() {
         // Row 0 of the banner sits one line below the top (a leading blank).
         let y = text_area.y + 1 + i as u16;
         if y >= text_area.y + text_area.height {
@@ -4997,6 +5204,11 @@ pub async fn run(
         cancelling: false,
         compacting: None,
         activity: None,
+        turn_count: 0,
+        wrote_this_turn: false,
+        visitor_at: None,
+        last_visitor: None,
+        costume: None,
         dance_call: None,
         dance_at: None,
         // The clock is seed enough: this only has to differ between sessions.
@@ -5480,6 +5692,59 @@ mod tests {
         let mut empty = ask(&["Postgres"]);
         empty.on_key(key(KeyCode::Esc));
         assert!(answered(empty.on_key(key(KeyCode::Enter))).is_none());
+    }
+
+    /// The first thing koda draws has to be drawable. The unicode wordmark is
+    /// only correct if every glyph is one column wide, and there has to be a
+    /// face for terminals that cannot render it at all — which is exactly the
+    /// case `theme::glyphs` picks ASCII for.
+    #[test]
+    fn both_wordmarks_are_rectangular_and_one_column_per_cell() {
+        for (name, art) in [("unicode", &BANNER_ART[..]), ("ascii", &BANNER_ASCII[..])] {
+            let widths: Vec<usize> = art.iter().map(|r| UnicodeWidthStr::width(*r)).collect();
+            assert!(
+                widths.windows(2).all(|w| w[0] == w[1]),
+                "{name} rows are ragged: {widths:?} — the intro's wavefront indexes \
+                 columns across every row"
+            );
+            for row in art {
+                for ch in row.chars() {
+                    assert_eq!(
+                        unicode_width::UnicodeWidthChar::width(ch)
+                            .unwrap_or(0)
+                            .max(1),
+                        1,
+                        "{name}: {ch:?} is not one column"
+                    );
+                }
+            }
+        }
+        // The fallback must survive a terminal that cannot show anything else.
+        assert!(
+            BANNER_ASCII.iter().all(|r| r.is_ascii()),
+            "the fallback banner is not ASCII"
+        );
+        // …and the glyph set decides which one is used, so neither path can be
+        // reached with the wrong art.
+        assert_eq!(banner_art(&crate::theme::UNICODE)[0], BANNER_ART[0]);
+        assert_eq!(banner_art(&crate::theme::ASCII)[0], BANNER_ASCII[0]);
+    }
+
+    /// A costume must never change the width of the status row, or the line
+    /// reflows every time one appears.
+    #[test]
+    fn every_costume_is_one_column_wide() {
+        for set in COSTUMES {
+            assert_eq!(set.len(), crate::theme::UNICODE.thinking.len());
+            for frame in set {
+                assert_eq!(frame.chars().count(), 1, "{frame:?} is more than one char");
+                assert_eq!(
+                    UnicodeWidthStr::width(frame),
+                    1,
+                    "{frame:?} is not one column"
+                );
+            }
+        }
     }
 
     /// A half-written call has no card yet, so the status row is the only place
