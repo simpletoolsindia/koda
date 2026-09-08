@@ -347,6 +347,9 @@ pub struct Agent {
     /// The embedding model actually in use: the configured one, or whatever the
     /// endpoint turned out to have. Resolved once per session.
     embed_model: Arc<std::sync::RwLock<Option<String>>>,
+    /// Set once a server has said this model cannot think, so the hint is not
+    /// sent again for the rest of the session.
+    no_reasoning: bool,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
     /// Outcomes for read-only tools pre-computed concurrently for the current
@@ -496,6 +499,7 @@ impl Agent {
             lexical: Arc::default(),
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
+            no_reasoning: false,
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
@@ -580,6 +584,7 @@ impl Agent {
             lexical: Arc::default(),
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
+            no_reasoning: false,
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
@@ -1000,6 +1005,18 @@ impl Agent {
                     let msg = user_message(&e);
                     crate::tel_error!("agent", "turn failed", "detail" => format!("{e:#}"));
                     // Servers that lack tool support reject the `tools` field; fall back.
+                    // A model that cannot think is not a model koda cannot
+                    // use. Ollama rejects `reasoning_effort` outright for one,
+                    // so drop the hint for the session and try again — the same
+                    // shape as the tool-protocol fallback below, and for the
+                    // same reason: the request is refusable, the work is not.
+                    if !self.no_reasoning && looks_like_reasoning_rejection(&format!("{e:#}")) {
+                        self.no_reasoning = true;
+                        let _ = tx.send(Event::Notice(
+                            "this model does not support thinking — continuing without it".into(),
+                        ));
+                        continue;
+                    }
                     if !self.text_mode
                         && self.cfg.tool_protocol == ToolProtocol::Auto
                         && looks_like_tool_rejection(&format!("{e:#}"))
@@ -1547,7 +1564,11 @@ impl Agent {
             } else {
                 Some(self.advertised_tools())
             },
-            reasoning_effort: self.cfg.reasoning_effort.clone(),
+            reasoning_effort: if self.no_reasoning {
+                "off".into()
+            } else {
+                self.cfg.reasoning_effort.clone()
+            },
         };
 
         if self.depth == 0 {
@@ -4648,6 +4669,17 @@ pub fn user_message(e: &anyhow::Error) -> String {
     }
 }
 
+/// Whether the server refused the request because the model cannot think.
+///
+/// Ollama answers `"gemma3:4b" does not support thinking` **[measured]**;
+/// others phrase it around the field name. Both shapes are matched, and a
+/// false positive costs only the reasoning hint.
+fn looks_like_reasoning_rejection(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    (m.contains("does not support") || m.contains("unsupported") || m.contains("unknown"))
+        && (m.contains("thinking") || m.contains("reasoning"))
+}
+
 fn looks_like_tool_rejection(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     (m.contains("tool") || m.contains("function"))
@@ -5426,6 +5458,31 @@ mod tests {
         ] {
             assert!(!looks_like_embedder(no), "{no} is not an embedder");
         }
+    }
+
+    /// A model that cannot think is not a model koda cannot use. Ollama refuses
+    /// the whole request for one, so the refusal has to be recognised and the
+    /// hint dropped rather than the turn failing.
+    #[test]
+    fn a_model_that_cannot_think_is_recognised_and_not_fatal() {
+        // The exact text Ollama returns [measured].
+        assert!(looks_like_reasoning_rejection(
+            "the server rejected the request: \"gemma3:4b\" does not support thinking"
+        ));
+        assert!(looks_like_reasoning_rejection(
+            "unknown field `reasoning_effort`"
+        ));
+        assert!(looks_like_reasoning_rejection(
+            "unsupported parameter: reasoning"
+        ));
+        // Not every refusal is this one.
+        assert!(!looks_like_reasoning_rejection("model not found"));
+        assert!(!looks_like_reasoning_rejection(
+            "the server rejected the API key"
+        ));
+        assert!(!looks_like_reasoning_rejection(
+            "tools are not supported by this model"
+        ));
     }
 
     /// Three nudges share one mechanism, and the rule the three copies could
