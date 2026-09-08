@@ -11,6 +11,7 @@ mod editor;
 mod engine;
 mod fuzzy;
 mod graph;
+mod index;
 mod learning;
 mod llm;
 mod log;

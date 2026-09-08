@@ -56,6 +56,7 @@ calls to guess at:
 - Where is X defined, and what breaks if I change it? -> codegraph query=symbol name=X
 - What does this file define and import, and who depends on it? -> codegraph query=file path=...
 - Unfamiliar project, or \"where does this live\"? -> codegraph query=overview
+- A question that names no symbol (\"where is retry handled\")? -> codegraph query=search text=...
 
 Always:
 - Before you edit an existing symbol, call codegraph query=symbol on it. The graph names \

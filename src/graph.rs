@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
-const MAX_FILES: usize = 4000;
-const MAX_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_FILES: usize = 4000;
+pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Def {
@@ -89,7 +89,7 @@ impl Refreshed {
     }
 }
 
-fn language_of(path: &Path) -> Option<&'static str> {
+pub fn language_of(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "rs" => "rust",
@@ -519,7 +519,7 @@ fn strip_literals_and_comments(lang: &str, line: &str) -> String {
 }
 
 /// Language keywords that must never be counted as symbol references.
-fn keywords(lang: &str) -> &'static [&'static str] {
+pub fn keywords(lang: &str) -> &'static [&'static str] {
     match lang {
         "rust" => &[
             "let", "mut", "fn", "pub", "use", "mod", "struct", "enum", "impl", "trait", "for",
@@ -606,17 +606,18 @@ fn keywords(lang: &str) -> &'static [&'static str] {
 
 /// The per-file result of a parse, so files can be parsed in parallel and then
 /// merged into the graph on one thread (merging is cheap; parsing is the cost).
-struct FileParse {
+pub struct FileParse {
     rel: String,
-    lang: &'static str,
-    defs: Vec<(String, &'static str, usize)>, // (name, kind, line)
+    pub lang: &'static str,
+    /// (name, kind, 1-based line)
+    pub defs: Vec<(String, &'static str, usize)>,
     imports: Vec<String>,
     ids: BTreeSet<String>,
 }
 
 /// Parse one file's bytes into definitions, imports and mentioned identifiers.
 /// Pure and self-contained, so it is safe to run on a worker thread.
-fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
+pub fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
     let mut defs = Vec::new();
     let mut imports = Vec::new();
     let mut ids = BTreeSet::new();
@@ -826,7 +827,7 @@ fn parse_in_parallel(inputs: Vec<(String, &'static str, String)>) -> Vec<FilePar
 /// Deliberately not here: `build` and `out`, which are real source directories
 /// often enough that excluding them by name would lose code. .gitignore remains
 /// the right mechanism for those.
-fn is_vendor_dir(name: &str) -> bool {
+pub fn is_vendor_dir(name: &str) -> bool {
     matches!(
         name,
         ".git"

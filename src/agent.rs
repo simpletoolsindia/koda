@@ -336,6 +336,10 @@ pub struct Agent {
     /// Which hints have already fired this turn. One set rather than a flag
     /// each: they are one mechanism, and only one of them may speak per result.
     hinted: std::collections::HashSet<&'static str>,
+    /// The lexical index, built on first use. Separate from the graph because
+    /// most sessions never ask an intent-shaped question, and 150 ms of walking
+    /// should not be spent on the ones that do not.
+    lexical: Arc<std::sync::RwLock<Option<crate::index::Index>>>,
     used_codegraph_this_turn: bool,
     /// Prevent repeated codegraph reminders from polluting tool results.
     /// Outcomes for read-only tools pre-computed concurrently for the current
@@ -482,6 +486,7 @@ impl Agent {
             steps_since_plan: 0,
             reads_this_turn: 0,
             hinted: std::collections::HashSet::new(),
+            lexical: Arc::default(),
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
@@ -563,6 +568,7 @@ impl Agent {
             steps_since_plan: 0,
             reads_this_turn: 0,
             hinted: std::collections::HashSet::new(),
+            lexical: Arc::default(),
             used_codegraph_this_turn: false,
             prefetched: std::collections::HashMap::new(),
             quiet: true,
@@ -2941,6 +2947,54 @@ impl Agent {
         }
     }
 
+    /// Run a lexical search, building the index on first use.
+    ///
+    /// Reported with the file, the line span and the definitions the span
+    /// covers, plus the opening lines of each hit. Not the whole chunk: the
+    /// model decides what to `read_file` from here, and a page of full bodies
+    /// would spend the context this tool exists to save.
+    async fn lexical_search(&self, text: &str, k: usize) -> String {
+        if self.lexical.read().map(|i| i.is_none()).unwrap_or(true) {
+            let slot = self.lexical.clone();
+            let root = self.ctx.root.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if slot.read().map(|i| i.is_some()).unwrap_or(false) {
+                    return;
+                }
+                let idx = crate::index::build(&root);
+                let _ = slot.write().map(|mut w| *w = Some(idx));
+            })
+            .await;
+        }
+        let guard = self.lexical.read().ok();
+        let Some(Some(idx)) = guard.as_deref() else {
+            return "ERROR: could not build the search index. Use `search` instead.".into();
+        };
+        let hits = idx.search(text, k);
+        if hits.is_empty() {
+            return format!(
+                "No code matched {text:?}. Try fewer words, or `search` for an exact string."
+            );
+        }
+        let mut out = format!("{} places that look like {text:?}:\n", hits.len());
+        for h in &hits {
+            let c = &idx.chunks[h.chunk];
+            let _ = write!(
+                out,
+                "\n{}:{}-{}  {}\n",
+                c.path,
+                c.start,
+                c.end,
+                c.names.join(", ")
+            );
+            for line in preview(&self.ctx.root, c) {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+        out.push_str("\nRead the ones that look right; this is a ranking, not an answer.");
+        out
+    }
+
     async fn query_graph(&self, args: &Value) -> tools::Outcome {
         if !self.cfg.codegraph {
             return tools::Outcome {
@@ -2952,6 +3006,48 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
+        // Fuzzy search needs no graph, so it is answered before the graph is
+        // touched: a question that names no symbol should not wait on a scan
+        // that indexes symbols. Deliberately a mode on this tool rather than a
+        // tool of its own — the schema is already the biggest fixed cost in a
+        // small model's window, and a model that guesses a symbol name wrong
+        // should be able to fall back without picking a different tool.
+        let mode = args
+            .get("query")
+            .and_then(|q| q.as_str())
+            .unwrap_or("overview")
+            .trim()
+            .to_ascii_lowercase();
+        if mode == "search" {
+            let text = args
+                .get("text")
+                .or_else(|| args.get("name"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                return tools::Outcome {
+                    ok: false,
+                    content: "ERROR: query=search needs `text` — the question in words.".into(),
+                    summary: "codegraph: missing text".into(),
+                    view: tools::ToolView::Plain,
+                };
+            }
+            let k = args
+                .get("k")
+                .and_then(|k| k.as_u64())
+                .unwrap_or(8)
+                .clamp(1, 20) as usize;
+            let content = self.lexical_search(&text, k).await;
+            return tools::Outcome {
+                ok: !content.starts_with("ERROR"),
+                summary: format!("search {text}"),
+                content,
+                view: tools::ToolView::Plain,
+            };
+        }
+
         // If the startup scan has not landed yet, build it now rather than
         // telling the model to come back later — it cannot wait.
         if self.graph.read().map(|g| g.is_none()).unwrap_or(true) {
@@ -4238,6 +4334,24 @@ fn plan_reminder(plan: &[tools::Todo], steps_since: usize) -> Option<String> {
 /// it and sends what fits, so the only cost of keeping more is memory, and the
 /// only cost of keeping less is detail curation could have used.
 const RETAINED_WINDOWS: usize = 4;
+
+/// The first few non-blank lines of a chunk, so a ranking can be judged without
+/// opening every hit.
+fn preview(root: &std::path::Path, c: &crate::index::Chunk) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join(&c.path)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .skip(c.start.saturating_sub(1))
+        .take(c.end + 1 - c.start)
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .map(|l| {
+            let t = l.trim_end();
+            t.chars().take(110).collect()
+        })
+        .collect()
+}
 
 /// The read-only calls that make a context grow without being asked to.
 const READ_TOOLS: &[&str] = &["read_file", "search", "find_files", "list_dir", "codegraph"];

@@ -430,6 +430,29 @@ users, `file` lists what a file defines and who depends on it. Regex-based rathe
 than a full parser: accurate enough to point at the right file, which the model
 then reads properly.
 
+### Searching by intent
+
+`codegraph query=search text="where is retry handled"` answers the question the
+graph cannot: one that names no symbol. It is BM25 over definition-sized chunks
+— each definition plus the doc comment above it, which is the part a plain-words
+question actually matches.
+
+Most of the quality is in the tokeniser, not the ranking. Identifiers are
+emitted whole *and* split (`stream_with_retry` → `stream`, `retry`), so exact
+symbol lookup keeps its precision while prose can still reach code; language
+keywords and code-ambient English are dropped. `handle` is in that stoplist by
+measurement: without it, "where is retry handled" ranks a test asserting on the
+word "handles" above the retry code. Results are capped at two spans per file,
+because a file that merely *lists* the query's words — a stopword table, a match
+arm full of names — otherwise takes most of the page.
+
+It builds on first use (150 ms over this repo: 1,620 chunks, 69 files) and
+queries in 65 µs, so there is no index to configure, persist or invalidate. It
+is lexical only, which is an honest limit rather than a finished story: BM25
+cannot tell "rate limiting" from a frame *rate*. The design for the dense half,
+with the evidence behind every choice, is in
+[docs/research-hybrid-retrieval.md](docs/research-hybrid-retrieval.md).
+
 Two things push the model to actually use it, because a graph nothing consults
 is dead weight. The base rules no longer name a locating tool at all — a rule
 saying "use search to locate code" is the rule a small model follows, whatever

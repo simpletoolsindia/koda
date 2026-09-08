@@ -350,7 +350,9 @@ fn build_specs() -> Vec<Spec> {
                    what a file depends on, or how the project is structured, without \
                    grepping or reading around. `symbol` (name): its definition file/line \
                    and every file that uses it. `file` (path): what it defines, imports, \
-                   and who depends on it. `overview`: a map of an unfamiliar project. Call \
+                   and who depends on it. `search` (text): the places that look like a \
+                   question in plain words -- \"where is retry handled\" -- when you cannot \
+                   name the symbol. `overview`: a map of an unfamiliar project. Call \
                    this before search/read for any 'where/what-uses/how-structured' \
                    question; use read_file / search only for free-text or when the symbol \
                    isn't in the graph.",
@@ -359,9 +361,11 @@ fn build_specs() -> Vec<Spec> {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "enum": ["overview", "symbol", "file"],
+                        "enum": ["overview", "symbol", "file", "search"],
                         "description": "Which question to ask."
                     },
+                    "text": str_prop("For query=search: the question in plain words, e.g. \"where is retry handled\". Use this when you do not know the symbol's name."),
+                    "k": { "type": "integer", "description": "For query=search: how many places to return (default 8)." },
                     "name": str_prop("Symbol name, for query=symbol."),
                     "path": str_prop("File path, for query=file.")
                 },

@@ -39,7 +39,7 @@ const ALLOWANCE: usize = 3_000;
 const FLOOR: usize = 240;
 
 /// Ordinary prose that carries no signal about which file the user means.
-const STOPWORDS: &[&str] = &[
+pub const STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "this", "that", "from", "into", "you", "your", "can", "not",
     "are", "was", "were", "have", "has", "had", "but", "all", "any", "how", "why", "what", "when",
     "then", "than", "them", "they", "our", "out", "get", "please", "make", "add", "fix", "now",
