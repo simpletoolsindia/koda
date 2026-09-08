@@ -104,7 +104,12 @@ pub fn adapters() -> &'static [Adapter] {
 /// Whether an adapter's executable is actually on this machine.
 fn installed(a: &Adapter) -> bool {
     if a.name == "debugpy" {
-        // The command is python; what has to exist is the module.
+        // The command is python; what has to exist is the module — and *which*
+        // python matters, since a machine can easily have several and only one
+        // of them carrying debugpy. That is a real failure, met while setting
+        // this up: installing a second python moved `python3` on PATH and the
+        // adapter vanished, correctly reported as "not installed" but with no
+        // hint as to which interpreter had been asked.
         return Command::new(a.command)
             .args(["-c", "import debugpy.adapter"])
             .stdout(Stdio::null())
@@ -155,13 +160,19 @@ pub fn pick_adapter(program: &str, named: Option<&str>) -> Result<&'static Adapt
         .find(|a| installed(a))
         .copied()
         .ok_or_else(|| {
+            // Name the interpreter or binary that was actually probed. With two
+            // pythons on PATH, "install debugpy" is advice the user may have
+            // followed already — for the other one.
+            let tried: Vec<String> = matching
+                .iter()
+                .map(|a| match which(a.command) {
+                    Some(p) => format!("{} (found at {})", a.name, p.display()),
+                    None => format!("{} (`{}` is not on PATH)", a.name, a.command),
+                })
+                .collect();
             anyhow!(
-                "a `.{ext}` program needs one of these installed: {}",
-                matching
-                    .iter()
-                    .map(|a| a.command)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "no debug adapter for a `.{ext}` program is installed. Tried: {}",
+                tried.join("; ")
             )
         })
 }
@@ -1309,6 +1320,14 @@ mod tests {
         // A file nothing can debug is a clear error, not a default…
         let err = pick_adapter("notes.txt", None).unwrap_err().to_string();
         assert!(err.contains(".txt"), "{err}");
+        // When nothing is installed, the message has to name what was probed:
+        // with two pythons on PATH, "install debugpy" may be advice the user
+        // already followed, for the other one.
+        if let Err(e) = pick_adapter("main.go", None) {
+            let m = e.to_string();
+            assert!(m.contains("dlv"), "{m}");
+            assert!(m.contains("PATH") || m.contains("found at"), "{m}");
+        }
         // …and so is one whose adapter is not on this machine: the message has
         // to name what to install, since that is the whole remedy.
         match pick_adapter("main.py", None) {
