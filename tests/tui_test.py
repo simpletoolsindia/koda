@@ -445,7 +445,19 @@ t3.send("\x15")  # ctrl+u: clear the slash so the hint stops overlaying
 t3.send("/help\r")
 t3.read(3.0, until="Examples")
 check("/help shows command examples", t3.saw("Examples") and t3.saw("/mode plan"), t3)
-check("/help lists a concrete example", t3.saw("/theme tokyo-night") or t3.saw("/auto"), t3)
+# Any one of these proves the panel listed a real, copyable invocation rather
+# than a bare command name. Several are checked because the panel is longer
+# than the screen: it scrolls while it draws, and this emulator samples frames
+# only at read boundaries, so which lines it happens to catch is not stable.
+# koda renders all of them — verified in a real terminal at this same size.
+check(
+    "/help lists a concrete example",
+    t3.saw("/model qwen2.5-coder:14b")
+    or t3.saw("/theme tokyo-night")
+    or t3.saw("/auto")
+    or t3.saw("/detailhelp"),
+    t3,
+)
 t3.send("/tools\r")
 t3.read(1.5, until="run_command")
 check("/tools lists the tool suite", t3.saw("edit_file") and t3.saw("find_files"), t3)

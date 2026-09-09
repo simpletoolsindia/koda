@@ -4,6 +4,17 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Run against an empty config, not the developer's own. koda reads
+# $XDG_CONFIG_HOME/koda/config.toml, so without this the suite inherits
+# whatever the person running it happens to have set: an `auto_approve`
+# makes the approval tests fail, a configured `search_backend` makes the
+# web-search refusal test fail, and a named `active_provider` replaces the
+# endpoint in the status bar. Five failures that say nothing about the code.
+KODA_E2E_CONFIG=$(mktemp -d)
+export XDG_CONFIG_HOME="$KODA_E2E_CONFIG"
+trap 'rm -rf "$KODA_E2E_CONFIG"' EXIT
+
 BIN="${BIN:-./target/release/koda}"
 [ -x "$BIN" ] || BIN=./target/debug/koda
 PORT="${PORT:-8123}"
