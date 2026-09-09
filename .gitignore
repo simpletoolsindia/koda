@@ -29,3 +29,8 @@ examples/**/target/
 
 # OS / editor cruft
 .DS_Store
+
+# Demo recordings: the .cast files under demos/casts are the sources and are
+# committed; the GIFs rendered from them are build output. The copies the docs
+# site publishes live in docs-site/public/demos and are committed there.
+demos/*.gif

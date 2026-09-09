@@ -51,6 +51,7 @@ export default defineConfig({
           label: 'Start here',
           items: [
             { label: 'What koda is', slug: 'introduction' },
+            { label: 'See it work', slug: 'demos' },
             { label: 'Quickstart', slug: 'quickstart' },
             { label: 'Installation', slug: 'install' },
             { label: 'LLM providers', slug: 'providers' },
