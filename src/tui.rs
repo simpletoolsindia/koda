@@ -4032,10 +4032,12 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     // moment the indexers finish, so an ordinary session never sees it.
     let idx = crate::index::progress::status();
     if idx.working {
-        let label = if idx.files > 0 {
-            format!("{} · {} files", idx.what, idx.files)
-        } else {
-            idx.what.to_string()
+        let label = match (idx.files, idx.chunks) {
+            (f, _) if f > 0 => format!("{} · {f} files", idx.what),
+            // The finished state says what it produced, which is the only
+            // number that tells you whether search will answer anything.
+            (_, c) if c > 0 => format!("{} · {c} chunks", idx.what),
+            _ => idx.what.to_string(),
         };
         segs.push(Segment::new(label, t.accent_alt));
     }

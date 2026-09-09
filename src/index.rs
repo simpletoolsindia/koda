@@ -1117,6 +1117,15 @@ pub mod progress {
     pub(super) static FILES: AtomicUsize = AtomicUsize::new(0);
     pub(super) static CHUNKS: AtomicUsize = AtomicUsize::new(0);
     pub(super) static STARTED_MS: AtomicU64 = AtomicU64::new(0);
+    /// When the last pass finished, so the result can be held on screen.
+    pub(super) static FINISHED_MS: AtomicU64 = AtomicU64::new(0);
+    /// How long "index ready" stays up after the work is done.
+    ///
+    /// Warm, the whole pass is ~30 ms and the TUI paints every ~75 ms, so
+    /// without this the indicator finishes between two frames and is never
+    /// drawn at all — the feature exists and nobody can see it. Long enough to
+    /// read, short enough that it is gone before it is in the way.
+    const LINGER_MS: u64 = 1_600;
     /// 0 none · 1 loading cache · 2 building · 3 sweeping for changes
     pub(super) static PHASE: AtomicU8 = AtomicU8::new(0);
     use std::sync::atomic::AtomicU8;
@@ -1155,6 +1164,7 @@ pub mod progress {
     pub fn done(chunks: usize) {
         CHUNKS.store(chunks, Relaxed);
         PHASE.store(0, Relaxed);
+        FINISHED_MS.store(now_ms(), Relaxed);
     }
 
     /// Called by whichever thread owns each half of the work.
@@ -1165,9 +1175,29 @@ pub mod progress {
         INDEX_BUSY.store(on, Relaxed);
     }
 
+    /// Pretend the linger has elapsed. Tests should not sleep for 1.6s to
+    /// watch a label disappear.
+    #[cfg(test)]
+    pub fn expire_for_test() {
+        FINISHED_MS.store(1, Relaxed);
+    }
+
     pub fn status() -> Status {
         let index = INDEX_BUSY.load(Relaxed);
         let graph = GRAPH_BUSY.load(Relaxed);
+        let chunks = CHUNKS.load(Relaxed);
+        // Hold the result briefly after the work ends, so a warm start that
+        // takes less than one frame still says what it did.
+        if !index && !graph {
+            let done_at = FINISHED_MS.load(Relaxed);
+            let recent = done_at > 0 && now_ms().saturating_sub(done_at) < LINGER_MS;
+            return Status {
+                working: recent,
+                what: if recent { "index ready" } else { "" },
+                files: 0,
+                chunks,
+            };
+        }
         Status {
             working: index || graph,
             what: match (index, PHASE.load(Relaxed)) {
@@ -1796,10 +1826,11 @@ mod tests {
     fn progress_reports_what_the_indexers_are_doing() {
         use super::progress;
 
-        // Nothing running: the status row shows nothing at all.
+        // Nothing running, and nothing recently finished: the row is empty.
         progress::set_index_busy(false);
         progress::set_graph_busy(false);
         progress::done(0);
+        progress::expire_for_test();
         let idle = progress::status();
         assert!(!idle.working);
         assert_eq!(idle.what, "");
@@ -1827,12 +1858,22 @@ mod tests {
             assert_eq!(progress::status().files, 2);
         }
 
-        // Finishing publishes the chunk count and clears the indicator.
+        // Finishing publishes the chunk count and holds it briefly. Warm, the
+        // whole pass is ~30ms against a ~75ms frame, so without the linger the
+        // indicator lands between two frames and is never drawn — which is
+        // exactly how this shipped the first time.
         progress::done(1799);
         progress::set_index_busy(false);
         let end = progress::status();
-        assert!(!end.working, "the row must clear when the work is done");
+        assert!(end.working, "the result must survive at least one frame");
+        assert_eq!(end.what, "index ready");
         assert_eq!(end.chunks, 1799);
+
+        // …and then get out of the way.
+        progress::expire_for_test();
+        let after = progress::status();
+        assert!(!after.working, "the row must clear once it has been seen");
+        assert_eq!(after.what, "");
     }
 
     use super::*;
