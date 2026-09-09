@@ -1101,6 +1101,91 @@ fn normalise(path: &str) -> String {
 
 /// Build the index by walking the workspace, under the same limits and the same
 /// ignore rules the graph uses — one traversal policy, not two.
+/// Live progress for the background indexers, so the TUI can show that work is
+/// happening instead of leaving a new user staring at a search that quietly
+/// does not answer yet.
+///
+/// Process-global and atomic, like `trace` and `debug`: the indexers run on
+/// their own threads with no handle back to the UI, and threading one through
+/// would be a lot of plumbing to move four numbers. The cost on the indexing
+/// side is one relaxed store per file, which is nothing beside reading it.
+pub mod progress {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+
+    pub(super) static GRAPH_BUSY: AtomicBool = AtomicBool::new(false);
+    pub(super) static INDEX_BUSY: AtomicBool = AtomicBool::new(false);
+    pub(super) static FILES: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static CHUNKS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static STARTED_MS: AtomicU64 = AtomicU64::new(0);
+    /// 0 none · 1 loading cache · 2 building · 3 sweeping for changes
+    pub(super) static PHASE: AtomicU8 = AtomicU8::new(0);
+    use std::sync::atomic::AtomicU8;
+
+    /// What the indexers are doing right now.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Status {
+        pub working: bool,
+        /// A short phrase for the status row: "indexing", "mapping symbols".
+        pub what: &'static str,
+        /// Files read so far in this pass. 0 until the walk starts.
+        pub files: usize,
+        /// Chunks in the published index, once there is one.
+        pub chunks: usize,
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    pub fn begin(phase: u8) {
+        PHASE.store(phase, Relaxed);
+        FILES.store(0, Relaxed);
+        if STARTED_MS.load(Relaxed) == 0 {
+            STARTED_MS.store(now_ms(), Relaxed);
+        }
+    }
+
+    pub(crate) fn file() {
+        FILES.fetch_add(1, Relaxed);
+    }
+
+    pub fn done(chunks: usize) {
+        CHUNKS.store(chunks, Relaxed);
+        PHASE.store(0, Relaxed);
+    }
+
+    /// Called by whichever thread owns each half of the work.
+    pub fn set_graph_busy(on: bool) {
+        GRAPH_BUSY.store(on, Relaxed);
+    }
+    pub fn set_index_busy(on: bool) {
+        INDEX_BUSY.store(on, Relaxed);
+    }
+
+    pub fn status() -> Status {
+        let index = INDEX_BUSY.load(Relaxed);
+        let graph = GRAPH_BUSY.load(Relaxed);
+        Status {
+            working: index || graph,
+            what: match (index, PHASE.load(Relaxed)) {
+                (true, 1) => "reading the index cache",
+                (true, 2) => "indexing",
+                (true, 3) => "checking for changes",
+                (true, _) => "indexing",
+                // The symbol graph is the other half, and finishes first on
+                // every tree big enough for the difference to show.
+                _ if graph => "mapping symbols",
+                _ => "",
+            },
+            files: FILES.load(Relaxed),
+            chunks: CHUNKS.load(Relaxed),
+        }
+    }
+}
+
 pub fn build(root: &Path) -> Index {
     let mut idx = Index::default();
     // Read first, tokenise second. The walk is I/O bound and the tokeniser is
@@ -1113,6 +1198,7 @@ pub fn build(root: &Path) -> Index {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
+        progress::file();
         let Some(lang) = graph::language_of(entry.path()) else {
             continue;
         };
@@ -1700,6 +1786,55 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
+
+    /// The status the TUI reads while the background indexers run.
+    ///
+    /// Without this the indicator is invisible in tests and only checkable by
+    /// racing a 3000-file repository with a screen capture, which is how it was
+    /// verified the first time and is not a way to keep it working.
+    #[test]
+    fn progress_reports_what_the_indexers_are_doing() {
+        use super::progress;
+
+        // Nothing running: the status row shows nothing at all.
+        progress::set_index_busy(false);
+        progress::set_graph_busy(false);
+        progress::done(0);
+        let idle = progress::status();
+        assert!(!idle.working);
+        assert_eq!(idle.what, "");
+
+        // The symbol graph is the other half, and is named separately because
+        // it finishes first and would otherwise look like a stalled index.
+        progress::set_graph_busy(true);
+        assert_eq!(progress::status().what, "mapping symbols");
+        progress::set_graph_busy(false);
+
+        // Each index phase reads as what it is, and the file counter climbs.
+        progress::set_index_busy(true);
+        for (phase, want) in [
+            (1u8, "reading the index cache"),
+            (2, "indexing"),
+            (3, "checking for changes"),
+        ] {
+            progress::begin(phase);
+            let st = progress::status();
+            assert!(st.working, "phase {phase} should read as working");
+            assert_eq!(st.what, want);
+            assert_eq!(st.files, 0, "each phase starts its own count");
+            progress::file();
+            progress::file();
+            assert_eq!(progress::status().files, 2);
+        }
+
+        // Finishing publishes the chunk count and clears the indicator.
+        progress::done(1799);
+        progress::set_index_busy(false);
+        let end = progress::status();
+        assert!(!end.working, "the row must clear when the work is done");
+        assert_eq!(end.chunks, 1799);
+    }
+
     use super::*;
 
     /// A scratch workspace, removed on drop.

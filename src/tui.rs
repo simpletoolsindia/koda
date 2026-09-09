@@ -4023,6 +4023,23 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
 
     let mut segs = vec![];
 
+    // The index and symbol graph are built on their own threads at startup, so
+    // the first prompt is never held behind a large repository. That is the
+    // right trade, but silently: on a big tree `codegraph` and `search` simply
+    // do not answer yet, and nothing says why. Show the work while it happens.
+    //
+    // Reading it is three relaxed atomic loads, and the segment disappears the
+    // moment the indexers finish, so an ordinary session never sees it.
+    let idx = crate::index::progress::status();
+    if idx.working {
+        let label = if idx.files > 0 {
+            format!("{} · {} files", idx.what, idx.files)
+        } else {
+            idx.what.to_string()
+        };
+        segs.push(Segment::new(label, t.accent_alt));
+    }
+
     // While a turn is running, surface what the agent is doing right now (the
     // running tool / command / subagent) in the persistent bottom bar, so the
     // user can always see it even when the transcript has scrolled the tool

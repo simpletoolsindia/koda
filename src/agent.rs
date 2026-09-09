@@ -435,10 +435,12 @@ impl Agent {
             let scan_root = root.clone();
             let every = cfg.codegraph_refresh_ms;
             std::thread::spawn(move || {
+                crate::index::progress::set_graph_busy(true);
                 let g = crate::graph::scan(&scan_root);
                 if let Ok(mut w) = slot.write() {
                     *w = Some(g);
                 }
+                crate::index::progress::set_graph_busy(false);
                 if every == 0 {
                     return;
                 }
@@ -481,10 +483,16 @@ impl Agent {
             let every = cfg.codegraph_refresh_ms;
             std::thread::spawn(move || {
                 let t0 = std::time::Instant::now();
+                crate::index::progress::set_index_busy(true);
+                crate::index::progress::begin(1);
                 let (mut idx, how) = match crate::index::Index::load(&idx_root) {
                     Some(cached) => (cached, "cache"),
-                    None => (crate::index::build(&idx_root), "build"),
+                    None => {
+                        crate::index::progress::begin(2);
+                        (crate::index::build(&idx_root), "build")
+                    }
                 };
+                crate::index::progress::begin(3);
                 // Whatever the source, the tree is swept once before the index
                 // is published: a cache is only ever as good as its last save,
                 // and an index that is confidently wrong about a file the user
@@ -503,6 +511,8 @@ impl Agent {
                 // it exists, and writing a megabyte to disk first would hold a
                 // search that is already answerable behind an errand.
                 let write_back = changed > 0 || how == "build";
+                crate::index::progress::done(idx.chunks.len());
+                crate::index::progress::set_index_busy(false);
                 if let Ok(mut w) = slot.write() {
                     *w = Some(idx);
                 }
