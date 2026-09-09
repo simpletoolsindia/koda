@@ -5,6 +5,8 @@ sidebar:
   order: 4
 ---
 
+import Demo from '../../components/Demo.astro';
+
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 koda has one client and one protocol. If a server implements the OpenAI
@@ -15,6 +17,8 @@ no adapter to pick.
 The fastest way to set one up is `/setup` inside koda. Type a base URL and it fetches the
 model list from that server, lets you pick, takes an API key if one is needed, and writes
 your config file. Everything below is the same thing done from the shell.
+
+<Demo id="providers" />
 
 ## Local servers
 

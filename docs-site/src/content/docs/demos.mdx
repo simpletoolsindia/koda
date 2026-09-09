@@ -1,0 +1,52 @@
+---
+title: See it work
+description: Every screen and every feature of koda, recorded from the real binary and played back in your browser as a live terminal.
+---
+
+import DemoGallery from '../../components/DemoGallery.astro';
+
+Reading about an agent tells you what it claims. Below is every screen koda has,
+recorded from the real binary: its own rendering, its own diff, its own approval
+prompt, its own status bar.
+
+These are not videos. Each one is a terminal recording played back in the page —
+the text is real text, so you can pause it, scrub it, and select and copy any
+line out of it.
+
+<DemoGallery />
+
+## How these are made
+
+Every recording is produced by `demos/scripts/record.py` from a manifest, so the
+list above and the recordings behind it cannot drift apart:
+
+```bash
+demos/scripts/record.py            # all of them
+demos/scripts/record.py watch      # just one
+demos/scripts/record.py --check    # re-verify what is already recorded
+demos/scripts/record.py --list     # what is in the manifest
+```
+
+Each demo gets a throwaway git workspace, its own config, and a scripted model
+(`tests/mock_server.py`) that speaks the same OpenAI-shaped SSE a real server
+does. koda is driven through a pty by a script that types like a person, and
+[asciinema](https://asciinema.org/) records the terminal.
+
+That matters for honesty, so here is the exact line: **everything you see is
+koda.** Its markdown renderer, its diff, its approval path, its tool dispatch,
+its status bar, its code graph, its debugger — all real, and the tools really
+wrote to a real directory. Where a demo needs the outside world it gets the
+outside world: the web search demo really queries DuckDuckGo, the browser demo
+really drives Chromium, and the debugger demo is a real
+[debugpy](https://github.com/microsoft/debugpy) session reporting real values
+out of a stopped frame.
+
+The only thing scripted is what the *model* replies. A local model on a laptop
+emits around 33 tokens a second, which makes an honest recording of one both
+very long and different every time. Scripting the model is what lets these be
+short, and lets CI regenerate them when the UI changes.
+
+A recording that ran but painted the wrong screen looks exactly like a good one
+on disk, so nothing is published until it has been checked: every demo declares
+strings it must show, and `record.py` replays its own recording through a
+terminal emulator to find them before copying it to the site.

@@ -1,0 +1,53 @@
+---
+title: Code graph
+description: A symbol graph of the whole project, built on open, so the model asks where something lives instead of grepping for it.
+---
+
+import Demo from '../../components/Demo.astro';
+
+On open, koda scans the project into a symbol graph — definitions, references, imports —
+so the model can ask where something lives rather than searching for a string and hoping.
+
+<Demo id="codegraph" />
+
+## Three questions
+
+| Query | What it answers |
+| --- | --- |
+| `overview` | What this project is made of: the modules, and what each one defines. |
+| `symbol <name>` | Where `<name>` is defined, and every place that uses it. |
+| `file <path>` | What that file defines, and who depends on it. |
+
+It is regex-based rather than a full parser. That is a deliberate trade: accurate enough
+to point at the right file, which the model then reads properly. A parser per language
+would be more precise and would not survive the first file that does not compile.
+
+## Making the model actually use it
+
+A graph nothing consults is dead weight, and a model will reach for `search` by habit. Two
+things push against that.
+
+**The base rules name no locating tool at all.** A rule saying "use search to locate code"
+is the rule a small model follows, whatever a section further down asks for. So the
+codegraph block is the only answer in the prompt to "how do I find this".
+
+**A search that is really a name lookup answers with the call to make instead.** When the
+pattern is one models actually write — `fn build\(`, `impl Theme`, `\bTodoStatus\b` — the
+result comes back with the `codegraph` call spelled out. Prose like
+`error: connection reset` is left alone, because prose is what search is for.
+
+## Keeping it current
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `codegraph` | `true` | Scan the project into a symbol graph on open. |
+| `codegraph_refresh_ms` | `15000` | Re-index files changed outside koda this often. `0` disables the sweep. |
+
+Files koda edits itself are re-indexed immediately. The sweep exists for the ones your
+editor changed while koda was running.
+
+## What it costs
+
+Two passes over the project on open, not a parse per query. On a large repository that is
+a fraction of a second, and it is the reason `codegraph symbol` answers in single-digit
+milliseconds where a `search` across the same tree takes hundreds.

@@ -9,6 +9,25 @@ export default defineConfig({
   site: 'https://simpletoolsindia.github.io',
   base: '/koda',
   trailingSlash: 'always',
+
+  // Aliases for URLs people guess at. Every doc page here is plural (/demos/,
+  // /tools/) or has an obvious nickname (/docs/), and the singular guess used
+  // to hard 404 — /koda/demo was the one people actually hit.
+  redirects: {
+    '/demo': '/koda/demos/',
+    '/docs': '/koda/introduction/',
+    '/getting-started': '/koda/quickstart/',
+    '/command': '/koda/commands/',
+    '/feature': '/koda/features/',
+    '/image': '/koda/images/',
+    '/key': '/koda/keys/',
+    '/mode': '/koda/modes/',
+    '/provider': '/koda/providers/',
+    '/session': '/koda/sessions/',
+    '/skill': '/koda/skills/',
+    '/theme': '/koda/themes/',
+    '/tool': '/koda/tools/',
+  },
   integrations: [
     starlight({
       title: 'koda',

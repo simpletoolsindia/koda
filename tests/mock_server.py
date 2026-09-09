@@ -10,6 +10,15 @@ Modes (env MOCK_MODE):
   empty   - HTTP 200 with an empty stream (a broken chat template looks like this)
   thinky  - stream only `reasoning_content`, never any content
   deleg   - delegate to a subagent, then answer using its report
+  browse  - drive a real Chromium at a real page, then answer from it
+  chat    - answer in one short paragraph, no tools (an install smoke test)
+  verbose - long answers, fast: fills a context window so /compact has work
+  searched- web_search with the tool ENABLED, and an answer that used it
+            (`websearch` is the refused-because-disabled case the e2e asserts)
+  custom  - call a custom tool declared in the workspace's koda.toml
+  skill   - load a project skill, then answer from it
+  watch   - answer a file-trigger turn with one small edit
+  debugger- a real debugpy session: launch, breakpoint, continue, evaluate
 
 Scripted conversation, driven by how many tool results the request contains:
   0 -> call read_file(demo.txt)
@@ -70,11 +79,12 @@ def text_frames(text, finish="stop"):
     return frames
 
 
-def script(step, is_subagent=False):
+def script(step, is_subagent=False, last_user=""):
     """Frames for the given conversation step.
 
     Parent and subagent are told apart by their system prompt, because each has
-    its own fresh history and so both start at step 0.
+    its own fresh history and so both start at step 0. `last_user` is the most
+    recent user message, for the few modes whose second turn differs.
     """
     if MODE == "undo":
         if step == 0:
@@ -140,6 +150,83 @@ def script(step, is_subagent=False):
             "| check | before | after |\n|---|---|---|\n"
             "| add(2,3) | -1 | 5 |\n| tests | 1 failed | 3 passed |\n\n"
             "- [x] operator corrected\n- [x] suite green\n")
+    if MODE == "searched":
+        if step == 0:
+            return tool_call_frames("s1", "web_search",
+                {"query": "ratatui layout documentation"})
+        return text_frames(
+            "Layouts are built with `Layout::default()`, split by `Constraint`s "
+            "(`Length`, `Percentage`, `Min`, `Max`) into the rects you draw into. "
+            "The tutorials page is the fastest way in — these are search snippets, "
+            "so worth opening the real page before relying on them."
+        )
+    if MODE == "browse":
+        if step == 0:
+            return tool_call_frames("b1", "browse", {
+                "action": "navigate",
+                "url": "https://simpletoolsindia.github.io/koda/demos/",
+            })
+        return text_frames(
+            "That page is koda's own demo gallery — every recording on it is the "
+            "real binary driven through a pty against a scripted model."
+        )
+    if MODE == "verbose":
+        # Deliberately long, and streamed with no delay: some screens (the
+        # context gauge, /compact) only mean anything once a conversation has
+        # real weight behind it.
+        return text_frames(
+            "Here is the walkthrough you asked for.\n\nThe billing package splits into three layers. `calc.py` holds the pure arithmetic and knows nothing about orders, customers or currency; every function in it takes numbers and returns numbers, which is why it is the only module with exhaustive unit tests. `orders.py` sits on top and turns a cart into a sequence of those calls, applying the per-line discount before tax rather than after, because the tax authority requires the discounted price to be the taxable base. `invoice.py` renders the result and is the only place that formats money as a string.\n\nThe failure you saw came from the middle layer. `apply_discount` was being handed a percentage where it expected a fraction, so a ten percent discount multiplied the line by ten instead of by nine tenths. The unit tests did not catch it because they exercise `calc.py` directly with fractions, and the integration test that would have caught it was skipped when the fixture data moved.\n\nWhat I would change, in order: normalise at the boundary so a percentage never reaches the arithmetic layer; give `apply_discount` an assertion that its argument is between zero and one; un-skip the integration test and point it at the new fixture; and add a property test that a discount never increases a total. The first two are five minutes each. The last one is the one that keeps this from coming back.\n"
+        )
+    if MODE == "chat":
+        return text_frames(
+            "Yes — I am running against your local server, and I can see this "
+            "project. Ask me for a change and I will show you the diff first."
+        )
+    if MODE == "debugger":
+        # A real DAP session against debugpy; only the model's choices are
+        # scripted. The line is inside the loop, so `running` is partial.
+        if step == 0:
+            return tool_call_frames("d1", "debug",
+                {"action": "launch", "program": "cart.py"})
+        if step == 1:
+            return tool_call_frames("d2", "debug",
+                {"action": "set_breakpoint", "file": "cart.py", "line": 9})
+        if step == 2:
+            return tool_call_frames("d3", "debug", {"action": "continue"})
+        if step == 3:
+            return tool_call_frames("d4", "debug",
+                {"action": "evaluate", "expression": "running, price, DISCOUNT"})
+        # The session stays open after the answer, so the next turn can close
+        # it — which is also how a person uses it.
+        if "done" in last_user.lower() or "terminate" in last_user.lower():
+            if step == 5:
+                return text_frames("Session closed.")
+            return tool_call_frames("d5", "debug", {"action": "terminate"})
+        return text_frames(
+            "Stopped inside the loop on the first item: `running` is 0.0 before "
+            "the add, `price` is 1200 and `DISCOUNT` is 0.9 — so the discount is "
+            "applied per item, not to the order."
+        )
+    if MODE == "custom":
+        # A shell command declared in koda.toml, called like a built-in.
+        if step == 0:
+            return tool_call_frames("x1", "check", {})
+        return text_frames("The project gate passes: fmt, clippy and tests are clean.")
+    if MODE == "skill":
+        if step == 0:
+            return tool_call_frames("s1", "skill", {"name": "migrations"})
+        return text_frames(
+            "Following the project's `migrations` skill: reversible, one change "
+            "per file, and named with today's date."
+        )
+    if MODE == "watch":
+        if step == 0:
+            return tool_call_frames("w1", "edit_file", {
+                "path": "calc.py",
+                "old": "def mul(a, b):\n    return a * b",
+                "new": "def mul(a, b):\n    \"\"\"Multiply two numbers.\"\"\"\n    return a * b",
+            })
+        return text_frames("Added the docstring the AI! comment asked for.")
     if MODE == "deleg":
         if is_subagent:
             if step == 0:
@@ -265,6 +352,11 @@ class Handler(BaseHTTPRequestHandler):
             or (m.get("role") == "user" and str(m.get("content", "")).startswith("Tool result"))
         )
 
+        last_user = ""
+        for m in messages:
+            if m.get("role") == "user":
+                last_user = str(m.get("content", ""))
+
         is_sub = any(
             m.get("role") == "system" and "research subagent" in str(m.get("content", ""))
             for m in messages
@@ -289,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
         try:
-            for frame in script(step, is_sub):
+            for frame in script(step, is_sub, last_user):
                 if frame == "__CUT__":
                     # Abruptly drop the connection mid-stream: no [DONE], no
                     # terminating 0-length chunk. The client sees EOF while it

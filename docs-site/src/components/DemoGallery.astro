@@ -1,0 +1,142 @@
+---
+/**
+ * Every recorded demo, in one window.
+ *
+ * The list is generated from demos/manifest.json (via src/data/demos.json), so
+ * a demo cannot be recorded without appearing here, and nothing can be listed
+ * here without a recording behind it.
+ */
+import demos from '../data/demos.json';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const order = ['Start here', 'Using koda', 'Capabilities', 'How it works'];
+const groups = order
+  .map((name) => ({ name, items: demos.filter((d) => d.category === name) }))
+  .filter((g) => g.items.length > 0);
+
+const first = demos[0];
+const length = (d: (typeof demos)[number]) =>
+  `${Math.floor(d.duration / 60)}:${String(Math.round(d.duration % 60)).padStart(2, '0')}`;
+/** A frame from the middle of the recording, for the pre-play still. */
+const poster = (d: (typeof demos)[number]) =>
+  `0:${String(Math.round(d.duration * 0.55)).padStart(2, '0')}`;
+---
+
+<div class="koda-gallery not-content" data-base={base}>
+  <nav class="koda-gallery__list" aria-label="Demos">
+    {
+      groups.map((group) => (
+        <section>
+          <h3>{group.name}</h3>
+          <ul>
+            {group.items.map((d) => (
+              <li>
+                <button
+                  type="button"
+                  class="koda-gallery__pick"
+                  data-id={d.id}
+                  data-cols={d.cols}
+                  data-rows={d.rows}
+                  data-title={d.title}
+                  data-blurb={d.blurb}
+                  data-page={d.page}
+                  data-length={length(d)}
+                  data-poster={poster(d)}
+                  aria-current={d.id === first.id ? 'true' : 'false'}
+                >
+                  <span class="koda-gallery__title">{d.title}</span>
+                  <span class="koda-gallery__len">{length(d)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))
+    }
+  </nav>
+
+  <figure class="koda-demo koda-gallery__stage">
+    <div class="koda-demo__chrome">
+      <span class="koda-demo__lights" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="koda-demo__name" data-role="name">{first.title}</span>
+      <span class="koda-demo__meta" data-role="meta">{first.cols}×{first.rows} · {length(first)}</span>
+    </div>
+    <div
+      class="koda-demo__screen"
+      data-role="screen"
+      data-cast={`${base}/demos/${first.id}.cast`}
+      data-cols={first.cols}
+      data-rows={first.rows}
+      data-autoplay="no"
+      data-poster={poster(first)}
+    >
+    </div>
+    <figcaption>
+      <p data-role="blurb">{first.blurb}</p>
+        <a
+        data-role="link"
+        href={`${base}/${first.page}/`}
+        hidden={first.page === '' || first.page === 'demos'}
+      >
+        Read the page this is from →
+      </a>
+    </figcaption>
+  </figure>
+</div>
+
+<script>
+  import { mountDemo, swapDemo } from '../scripts/demo-player.ts';
+
+  const root = document.querySelector<HTMLElement>('.koda-gallery');
+  if (root) {
+    const base = root.dataset.base ?? '';
+    const screen = root.querySelector<HTMLElement>('[data-role="screen"]')!;
+    const name = root.querySelector<HTMLElement>('[data-role="name"]')!;
+    const meta = root.querySelector<HTMLElement>('[data-role="meta"]')!;
+    const blurb = root.querySelector<HTMLElement>('[data-role="blurb"]')!;
+    const link = root.querySelector<HTMLAnchorElement>('[data-role="link"]')!;
+    const picks = [...root.querySelectorAll<HTMLButtonElement>('.koda-gallery__pick')];
+
+    const show = (pick: HTMLButtonElement, play: boolean) => {
+      for (const other of picks) other.setAttribute('aria-current', String(other === pick));
+      name.textContent = pick.dataset.title ?? '';
+      meta.textContent = `${pick.dataset.cols}×${pick.dataset.rows} · ${pick.dataset.length}`;
+      blurb.textContent = pick.dataset.blurb ?? '';
+      const page = pick.dataset.page ?? '';
+      link.href = `${base}/${page}/`;
+      link.hidden = page === '' || page === 'demos';
+      const cast = `${base}/demos/${pick.dataset.id}.cast`;
+      screen.dataset.poster = pick.dataset.poster ?? '0:08';
+      if (play) {
+        swapDemo(screen, cast, Number(pick.dataset.cols), Number(pick.dataset.rows));
+      } else {
+        screen.dataset.cast = cast;
+        screen.dataset.cols = pick.dataset.cols ?? '100';
+        screen.dataset.rows = pick.dataset.rows ?? '30';
+      }
+      // A demo you can link someone straight to.
+      history.replaceState(null, '', `#${pick.dataset.id}`);
+    };
+
+    for (const pick of picks) {
+      pick.addEventListener('click', () => show(pick, true));
+    }
+
+    // Deep link: /demos/#watch opens on that recording.
+    const wanted = decodeURIComponent(location.hash.slice(1));
+    const start = picks.find((p) => p.dataset.id === wanted);
+    if (start) show(start, false);
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          io.disconnect();
+          mountDemo(screen);
+        }
+      },
+      { rootMargin: '200px' },
+    );
+    io.observe(screen);
+  }
+</script>

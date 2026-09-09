@@ -1,14 +1,80 @@
 ---
 title: Installation
-description: Install koda on macOS, Linux or Windows — one-liner, interactive menu, or a manual cargo build.
+description: Install koda on macOS, Linux or Windows — Homebrew, winget, a one-liner, an interactive menu, or a manual cargo build.
 sidebar:
   order: 3
 ---
 
+import Demo from '../../components/Demo.astro';
+
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-koda builds from source into a single static binary with no runtime dependencies. The
-installers do the build for you and will offer to install Rust first if it is missing.
+koda is a single static binary with no runtime dependencies. Install it from a
+package manager if you have one, or run the installer script, which builds from
+source and will offer to install Rust first if it is missing.
+
+<Demo id="install" />
+
+## Package managers
+
+<Tabs syncKey="os">
+<TabItem label="macOS / Linux">
+
+```sh
+brew tap simpletoolsindia/koda   # once, ever
+brew install koda
+```
+
+After the tap, the short name is all you need — `brew install koda`,
+`brew upgrade koda`, `brew uninstall koda`. The formula installs the prebuilt
+binary for your platform (macOS and Linux, Intel and ARM), so it is a download
+rather than a build, and it brings
+[ripgrep](https://github.com/BurntSushi/ripgrep) with it for the fast path in
+koda's `search`.
+
+On Homebrew 6 and newer, a third-party tap has to be trusted once before it can
+be loaded. If you see `Refusing to load formula ... from untrusted tap`:
+
+```sh
+brew trust simpletoolsindia/koda
+```
+
+Then tap and install as above. Older Homebrew does not ask.
+
+:::note[Why the tap, when `brew install redis` needs no such thing?]
+Because redis is in **homebrew-core**, the repository Homebrew ships with, and a
+bare name with no tap only resolves there. homebrew-core will not take a new
+formula until the project is *notable*: 30 forks, 30 watchers or 75 stars — and
+**90 forks, 90 watchers or 225 stars when the repository's own owner submits
+it** — plus a repository at least 30 days old. koda does not clear that bar yet.
+The formula name `koda` is unclaimed in homebrew-core, so nothing is lost by
+waiting; when the project qualifies, `brew install koda` works with no tap at
+all and this page will say so.
+:::
+
+</TabItem>
+<TabItem label="Windows">
+
+The manifest is [submitted to the winget community
+repository](https://github.com/microsoft/winget-pkgs/pull/432036) and under
+review. Once it is merged, this is the whole installation:
+
+```powershell
+winget install koda
+```
+
+koda is a portable package there: winget unpacks `koda.exe` into its own links
+directory and puts that on your `PATH`, so there is nothing to click through and
+`winget uninstall koda` removes it cleanly.
+
+Until it merges, take the binary straight from the
+[latest release](https://github.com/simpletoolsindia/koda/releases/latest) —
+`koda-<version>-x86_64-pc-windows-msvc.zip`, unzip it, and put `koda.exe`
+somewhere on your `PATH`. The installer script below does the same thing from
+source.
+
+</TabItem>
+</Tabs>
 
 ## The installers
 
@@ -26,11 +92,7 @@ git clone https://github.com/simpletoolsindia/koda.git && cd koda
 Or take the one-liner, which clones for you:
 
 ```sh
-# official edition
 curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
-
-# uncensored edition (stealth browsing)
-curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/uncensored/install.sh | bash
 ```
 
 It installs to `~/.local/bin`, so no `sudo` is needed. For a system-wide install:
@@ -97,16 +159,14 @@ of them to run.
 Both are a single `[Y/n]` prompt. When the installer is piped (`curl … | bash`) it has no
 terminal to ask at, so both are skipped without one.
 
-## Choosing an edition
+## Building a different branch
 
-The one-liners above pick the branch. To switch a checkout you already have:
+The installers build `master`. To build something else, either check it out and
+run the script from the checkout, or name it:
 
 ```sh
-git checkout master        # or: git checkout uncensored
-./install.sh
+KODA_BRANCH=my-branch ./install.sh
 ```
-
-Both installers honour `KODA_BRANCH` if you want a branch they do not name.
 
 ## Verify it worked
 

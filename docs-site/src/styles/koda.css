@@ -526,3 +526,166 @@ site-search button[data-open-modal] {
   .koda-fig { overflow-x: auto; }
   .koda-fig svg { width: 40rem; min-width: 40rem; }
 }
+
+/* ---------------------------------------------------------------- demos ---
+   Recorded sessions, played in a terminal window. The player is themed from
+   the same tokens as the rest of the site, so a demo re-tints with the page
+   instead of being a dark rectangle sitting on a light one. */
+
+.asciinema-player-theme-koda {
+  --term-color-foreground: var(--k-text);
+  --term-color-background: var(--k-bg);
+  --term-color-0: color-mix(in srgb, var(--k-bg) 80%, var(--k-text));
+  --term-color-1: var(--k-error);
+  --term-color-2: var(--k-success);
+  --term-color-3: var(--k-warning);
+  --term-color-4: var(--k-info);
+  --term-color-5: var(--k-accent-alt);
+  --term-color-6: var(--k-accent);
+  --term-color-7: var(--k-text);
+  --term-color-8: var(--k-muted);
+  --term-color-9: color-mix(in srgb, var(--k-error) 80%, white);
+  --term-color-10: color-mix(in srgb, var(--k-success) 80%, white);
+  --term-color-11: color-mix(in srgb, var(--k-warning) 80%, white);
+  --term-color-12: color-mix(in srgb, var(--k-info) 80%, white);
+  --term-color-13: color-mix(in srgb, var(--k-accent-alt) 80%, white);
+  --term-color-14: color-mix(in srgb, var(--k-accent) 80%, white);
+  --term-color-15: #ffffff;
+}
+
+.koda-demo {
+  margin: 2rem 0;
+  border: 1px solid var(--k-border);
+  background: var(--k-bg);
+  overflow: hidden;
+}
+
+.koda-demo__chrome {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--k-border);
+  background: var(--k-surface);
+  font-family: var(--koda-mono);
+  font-size: 0.78rem;
+}
+
+.koda-demo__lights {
+  display: inline-flex;
+  gap: 0.35rem;
+  flex: none;
+}
+.koda-demo__lights i {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--k-border);
+}
+.koda-demo__lights i:first-child { background: color-mix(in srgb, var(--k-error) 70%, var(--k-border)); }
+.koda-demo__lights i:nth-child(2) { background: color-mix(in srgb, var(--k-warning) 70%, var(--k-border)); }
+.koda-demo__lights i:last-child { background: color-mix(in srgb, var(--k-success) 70%, var(--k-border)); }
+
+.koda-demo__name {
+  color: var(--k-text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.koda-demo__meta {
+  margin-left: auto;
+  color: var(--k-muted);
+  flex: none;
+}
+
+.koda-demo__screen {
+  min-height: 6rem;
+  background: var(--k-bg);
+}
+.koda-demo__screen .ap-player { border: 0; }
+
+.koda-demo figcaption {
+  padding: 0.75rem 0.9rem;
+  border-top: 1px solid var(--k-border);
+  background: var(--k-surface);
+  color: var(--sl-color-gray-2);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+.koda-demo figcaption p { margin: 0 0 0.4rem; }
+.koda-demo figcaption a { color: var(--k-accent); }
+
+/* On a wide screen a 100-column recording deserves more than the prose column.
+   Leftwards only: to the right is the "On this page" rail, and a demo that
+   breaks out both ways slides underneath it. */
+@media (min-width: 82rem) {
+  .koda-demo { margin-left: -6rem; }
+  .koda-gallery .koda-demo { margin-left: 0; }
+}
+
+/* ------------------------------------------------------------- gallery --- */
+
+.koda-gallery {
+  display: grid;
+  gap: 1.25rem;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 1.5rem 0 2rem;
+}
+
+@media (min-width: 60rem) {
+  .koda-gallery {
+    grid-template-columns: 15rem minmax(0, 1fr);
+    align-items: start;
+  }
+}
+@media (min-width: 82rem) {
+  .koda-gallery { margin-left: -8rem; }
+}
+
+.koda-gallery__list {
+  max-height: 34rem;
+  overflow-y: auto;
+  border: 1px solid var(--k-border);
+  background: var(--k-surface);
+  padding: 0.5rem;
+}
+.koda-gallery__list section + section { margin-top: 0.75rem; }
+.koda-gallery__list h3 {
+  margin: 0.35rem 0.4rem;
+  font-family: var(--koda-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--k-muted);
+}
+.koda-gallery__list ul { list-style: none; margin: 0; padding: 0; }
+
+.koda-gallery__pick {
+  display: flex;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.35rem 0.4rem;
+  border: 0;
+  background: transparent;
+  color: var(--sl-color-gray-2);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.koda-gallery__pick:hover { background: var(--k-fill-quiet); color: var(--k-text); }
+.koda-gallery__pick[aria-current='true'] {
+  background: var(--k-fill-accent);
+  color: var(--k-text);
+  box-shadow: inset 2px 0 0 var(--k-accent);
+}
+.koda-gallery__title { flex: 1; }
+.koda-gallery__len {
+  flex: none;
+  font-family: var(--koda-mono);
+  font-size: 0.75rem;
+  color: var(--k-muted);
+}
+
+.koda-gallery__stage { margin: 0; }

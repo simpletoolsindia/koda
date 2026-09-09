@@ -1,0 +1,67 @@
+---
+title: Keyboard shortcuts
+description: Every key koda binds, and what it does in each context.
+---
+
+import Demo from '../../components/Demo.astro';
+
+`/keys` and `/help` open the same panel inside koda.
+
+<Demo id="keys" />
+<Demo id="interrupt" />
+
+## Sending and stopping
+
+| Key | Action |
+| --- | --- |
+| <kbd>enter</kbd> | Send the message. |
+| <kbd>ctrl+j</kbd> (or <kbd>alt/ctrl+enter</kbd>) | Insert a newline. |
+| <kbd>ctrl+c</kbd> | Interrupt the current turn. Press twice to quit. |
+| <kbd>ctrl+d</kbd> | Quit. Deletes a character if the input is non-empty. |
+| <kbd>esc</kbd> | Interrupt if busy; otherwise clear the input. Closes an overlay. |
+
+## Moving around
+
+| Key | Action |
+| --- | --- |
+| <kbd>pgup</kbd> / <kbd>pgdn</kbd> | Scroll the transcript. The mouse wheel works too. |
+| <kbd>up</kbd> / <kbd>down</kbd> | Input history, or picker navigation. |
+| <kbd>ctrl+r</kbd> | Expand the last tool output. |
+| <kbd>ctrl+t</kbd> | Expand the last reasoning block. |
+| <kbd>ctrl+l</kbd> | Clear the screen. Press twice to confirm. |
+
+## Writing a message
+
+| Key | Action |
+| --- | --- |
+| <kbd>tab</kbd> | Complete a command, or pick a mentioned file. |
+| <kbd>@</kbd> | Mention a file, or attach an image or document. |
+| <kbd>#</kbd> | Open the text palette on what you have typed. |
+| <kbd>ctrl+a</kbd> / <kbd>ctrl+e</kbd> | Start / end of line. |
+| <kbd>ctrl+k</kbd> / <kbd>ctrl+u</kbd> / <kbd>ctrl+w</kbd> | Kill to end / to start / previous word. |
+| <kbd>alt+b</kbd> / <kbd>alt+f</kbd> (or <kbd>alt+←/→</kbd>) | Move by word. |
+
+## Switching modes
+
+| Key | Action |
+| --- | --- |
+| <kbd>ctrl+p</kbd> | Cycle mode: `plan → execute → vibe`. |
+
+## At an approval prompt
+
+| Key | Action |
+| --- | --- |
+| <kbd>y</kbd> | Approve this call. |
+| <kbd>a</kbd> | Approve this tool for the rest of the session. |
+| <kbd>n</kbd> | Deny, and tell the model to ask instead. |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Scroll the pending tool preview. |
+
+## In the `ask_user` dialog
+
+| Key | Action |
+| --- | --- |
+| <kbd>↑</kbd> / <kbd>↓</kbd>, <kbd>1</kbd>–<kbd>9</kbd> | Pick an option. |
+| any character | Start typing a free-text answer instead. |
+| <kbd>esc</kbd> | Go back to the options. |
+
+The answer is taken in the dialog, never in the composer underneath.

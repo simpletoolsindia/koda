@@ -1,0 +1,897 @@
+{
+  "demos": [
+    {
+      "id": "hero",
+      "title": "Fixing a bug, start to finish",
+      "category": "Start here",
+      "page": "demos",
+      "blurb": "One prompt: koda writes a plan, reads the file, shows the edit as a diff before it lands, marks the plan done, and reports what changed.",
+      "mode": "showcase",
+      "fixtures": [
+        "calc.py",
+        "test_calc.py"
+      ],
+      "steps": [
+        "type:the add function is subtracting - find it and fix it",
+        "key:enter",
+        "wait:18"
+      ],
+      "expect": [
+        "calc.py",
+        "return a + b"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "help",
+      "title": "/help",
+      "category": "Using koda",
+      "page": "commands",
+      "blurb": "Every command with an example of it in use, and the keys, in two panels.",
+      "steps": [
+        "type:/help",
+        "key:enter",
+        "wait:1.5",
+        "key:pgup",
+        "wait:1",
+        "key:pgup",
+        "wait:2.5"
+      ],
+      "expect": [
+        "Examples",
+        "switch to a specific model"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "keys",
+      "title": "Keyboard shortcuts",
+      "category": "Using koda",
+      "page": "keys",
+      "blurb": "The whole keymap, from inside koda, with /keys.",
+      "steps": [
+        "type:/keys",
+        "key:enter",
+        "wait:3"
+      ],
+      "expect": [
+        "ctrl+p",
+        "cycle mode"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "themes",
+      "title": "Eleven palettes, switched live",
+      "category": "Using koda",
+      "page": "themes",
+      "blurb": "The block fills, the context gauge and the mode chip re-tint together, because they are drawn from the palette rather than hard-coded.",
+      "steps": [
+        "type:/theme",
+        "key:enter",
+        "wait:2.5",
+        "type:/theme tokyo-night",
+        "key:enter",
+        "wait:2",
+        "type:/theme gruvbox-dark",
+        "key:enter",
+        "wait:2",
+        "type:/theme solarized-light",
+        "key:enter",
+        "wait:2.5"
+      ],
+      "expect": [
+        "tokyo-night",
+        "gruvbox-dark",
+        "solarized-light"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "modes",
+      "title": "Plan, execute, vibe",
+      "category": "Using koda",
+      "page": "modes",
+      "blurb": "ctrl+p cycles autonomy; /mode opens the picker. Plan mode cannot write, and says so instead of asking.",
+      "steps": [
+        "type:/mode",
+        "key:enter",
+        "wait:2",
+        "key:down",
+        "wait:0.6",
+        "key:down",
+        "wait:0.6",
+        "key:up",
+        "key:enter",
+        "wait:1.5",
+        "key:ctrl-p",
+        "wait:1.2",
+        "key:ctrl-p",
+        "wait:2"
+      ],
+      "expect": [
+        "plan",
+        "vibe",
+        "execute"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "approve",
+      "title": "Nothing is written without you",
+      "category": "Using koda",
+      "page": "tools",
+      "blurb": "The default tier shows the diff and waits: y allows once, a always allows this tool, n declines.",
+      "mode": "native",
+      "flags": [],
+      "files": {
+        "demo.txt": "hello world\n"
+      },
+      "steps": [
+        "type:change hello to goodbye in demo.txt",
+        "key:enter",
+        "wait:6",
+        "type:y",
+        "wait:6"
+      ],
+      "expect": [
+        "allow once",
+        "decline",
+        "demo.txt"
+      ],
+      "project": "notes"
+    },
+    {
+      "id": "undo",
+      "title": "Putting a file back",
+      "category": "Using koda",
+      "page": "commands",
+      "blurb": "/undo restores the last file the agent changed, from koda's own copy \u2014 not from git.",
+      "mode": "undo",
+      "files": {
+        "demo.txt": "hello world\n"
+      },
+      "steps": [
+        "type:replace hello with wrecked in demo.txt",
+        "key:enter",
+        "wait:7",
+        "type:/undo",
+        "key:enter",
+        "wait:3"
+      ],
+      "expect": [
+        "wrecked",
+        "demo.txt"
+      ],
+      "project": "notes"
+    },
+    {
+      "id": "delegate",
+      "title": "Delegating to a subagent",
+      "category": "Capabilities",
+      "page": "skills",
+      "blurb": "A wide search costs a paragraph of context instead of thirty files: the subagent reads, and reports back.",
+      "mode": "deleg",
+      "files": {
+        "demo.txt": "hello world\n"
+      },
+      "steps": [
+        "type:find where the greeting lives",
+        "key:enter",
+        "wait:12"
+      ],
+      "expect": [
+        "delegate",
+        "demo.txt"
+      ],
+      "project": "notes"
+    },
+    {
+      "id": "think",
+      "title": "Watching it think",
+      "category": "Using koda",
+      "page": "modes",
+      "blurb": "Reasoning tokens are shown separately from the answer, and ctrl+t expands the last block.",
+      "mode": "thinky",
+      "steps": [
+        "type:/think",
+        "key:enter",
+        "wait:1.5",
+        "type:what is this repo?",
+        "key:enter",
+        "wait:6",
+        "key:ctrl-t",
+        "wait:3"
+      ],
+      "expect": [
+        "thinking"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "ask",
+      "title": "When it needs a decision",
+      "category": "Using koda",
+      "page": "tools",
+      "blurb": "ask_user opens a dropdown in the middle of the screen \u2014 the answer goes where the question is.",
+      "mode": "askopts",
+      "steps": [
+        "type:set up storage for this service",
+        "key:enter",
+        "wait:5",
+        "key:down",
+        "wait:0.8",
+        "key:down",
+        "wait:0.8",
+        "key:up",
+        "key:enter",
+        "wait:4"
+      ],
+      "expect": [
+        "Which database",
+        "PostgreSQL",
+        "SQLite"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "interrupt",
+      "title": "Stopping a run",
+      "category": "Using koda",
+      "page": "keys",
+      "blurb": "ctrl+c stops the turn and keeps what streamed; twice quits.",
+      "mode": "slow",
+      "steps": [
+        "type:count to two hundred",
+        "key:enter",
+        "wait:5",
+        "key:ctrl-c",
+        "wait:3"
+      ],
+      "expect": [
+        "counting"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "tools",
+      "title": "Every tool it can call",
+      "category": "Using koda",
+      "page": "tools",
+      "blurb": "/tools lists what is wired in right now, including anything from your koda.toml.",
+      "steps": [
+        "type:/tools",
+        "key:enter",
+        "wait:3"
+      ],
+      "expect": [
+        "read_file",
+        "edit_file"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "commands",
+      "title": "The command palette",
+      "category": "Using koda",
+      "page": "commands",
+      "blurb": "Type / and the list filters as you go; tab completes.",
+      "steps": [
+        "type:/",
+        "wait:2",
+        "type:se",
+        "wait:2.5",
+        "key:ctrl-u",
+        "type:/th",
+        "wait:2.5",
+        "key:ctrl-u"
+      ],
+      "expect": [
+        "/settings",
+        "/search"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "mention",
+      "title": "Attaching a file with @",
+      "category": "Using koda",
+      "page": "images",
+      "blurb": "@ opens a fuzzy picker over the repo; the file is attached to the message, not pasted into it.",
+      "fixtures": [
+        "calc.py",
+        "test_calc.py"
+      ],
+      "steps": [
+        "type:look at ",
+        "type:@",
+        "wait:2",
+        "type:calc",
+        "wait:2.5",
+        "key:tab",
+        "wait:2"
+      ],
+      "expect": [
+        "calc.py"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "shell",
+      "title": "Running a command yourself",
+      "category": "Using koda",
+      "page": "cli",
+      "blurb": "! runs a shell command and $ runs Python, both without spending a turn on the model.",
+      "fixtures": [
+        "calc.py"
+      ],
+      "steps": [
+        "type:!git status --short --branch",
+        "key:enter",
+        "wait:3",
+        "type:$ print(2 ** 10)",
+        "key:enter",
+        "wait:3"
+      ],
+      "expect": [
+        "1024"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "logs",
+      "title": "What it has been doing",
+      "category": "Using koda",
+      "page": "troubleshooting",
+      "blurb": "/logs opens the activity log over the transcript: every tool call, with timings.",
+      "fixtures": [
+        "calc.py",
+        "test_calc.py"
+      ],
+      "steps": [
+        "type:the add function is subtracting - find it and fix it",
+        "key:enter",
+        "wait:14",
+        "type:/logs",
+        "key:enter",
+        "wait:3",
+        "key:esc",
+        "wait:1"
+      ],
+      "expect": [
+        "read_file"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "compact",
+      "title": "Compacting the context",
+      "category": "Using koda",
+      "page": "prompt",
+      "blurb": "/compact replaces the conversation so far with a summary of it, and hands the tokens back \u2014 the gauge on the status bar moves as it lands.",
+      "fixtures": [
+        "calc.py",
+        "test_calc.py"
+      ],
+      "steps": [
+        "type:walk me through how the billing package is laid out",
+        "key:enter",
+        "wait:5",
+        "type:and where did the failure actually come from?",
+        "key:enter",
+        "wait:5",
+        "type:what would you change first?",
+        "key:enter",
+        "wait:5",
+        "type:anything else worth knowing before I start?",
+        "key:enter",
+        "wait:5",
+        "type:/compact",
+        "key:enter",
+        "wait:7"
+      ],
+      "expect": [
+        "compacting context",
+        "compacted"
+      ],
+      "project": "billing",
+      "mode": "verbose",
+      "config": "context_tokens = 4000\n"
+    },
+    {
+      "id": "headless",
+      "title": "Headless: koda -p, in any mode",
+      "category": "Using koda",
+      "page": "cli",
+      "blurb": "No TUI: -p streams the answer to stdout and exits, and --mode picks how much it is allowed to do.",
+      "driver": "shell",
+      "project": "billing",
+      "ps1": "billing $ ",
+      "mode": "showcase",
+      "fixtures": [
+        "calc.py",
+        "test_calc.py"
+      ],
+      "config": "base_url = \"{url}\"\napi_key = \"local\"\nmodel = \"mock-coder\"\nauto_tier = \"ask\"\nmode = \"execute\"\n",
+      "intro": 1.0,
+      "steps": [
+        "type:koda -p --mode plan 'the add function is subtracting - what would you change?'",
+        "key:enter",
+        "wait:14",
+        "type:clear",
+        "key:enter",
+        "wait:0.5",
+        "type:koda -p -y --mode execute 'fix the add function'",
+        "key:enter",
+        "wait:16",
+        "type:git diff --stat",
+        "key:enter",
+        "wait:3"
+      ],
+      "expect": [
+        "calc.py"
+      ]
+    },
+    {
+      "id": "protocols",
+      "title": "When the server refuses native tool calls",
+      "category": "How it works",
+      "page": "protocols",
+      "blurb": "koda tries native tool calls, and falls back to <tool_call> text blocks on a 400 \u2014 the turn continues instead of failing.",
+      "mode": "reject",
+      "files": {
+        "demo.txt": "hello world\n"
+      },
+      "steps": [
+        "type:change hello to goodbye in demo.txt",
+        "key:enter",
+        "wait:14"
+      ],
+      "expect": [
+        "switched to text protocol",
+        "demo.txt"
+      ],
+      "project": "notes"
+    },
+    {
+      "id": "codegraph",
+      "title": "Finding a symbol without grepping",
+      "category": "Capabilities",
+      "page": "codegraph",
+      "blurb": "The code graph answers where a symbol is defined and who calls it, from an index koda keeps itself.",
+      "mode": "graph",
+      "project": "widgets",
+      "files": {
+        "src/lib.rs": "pub struct Widget {\n    pub label: String,\n}\n\n/// Build the widget the toolbar shows.\npub fn build_widget(label: &str) -> Widget {\n    Widget { label: label.to_string() }\n}\n\npub fn render(w: &Widget) -> String {\n    format!(\"[{}]\", w.label)\n}\n",
+        "src/main.rs": "use demo::{build_widget, render};\n\nfn main() {\n    let w = build_widget(\"save\");\n    println!(\"{}\", render(&w));\n}\n",
+        "Cargo.toml": "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n"
+      },
+      "steps": [
+        "type:where is build_widget defined, and who uses it?",
+        "key:enter",
+        "wait:14"
+      ],
+      "expect": [
+        "build_widget",
+        "src/lib.rs"
+      ]
+    },
+    {
+      "id": "memory",
+      "title": "Remembering how your project works",
+      "category": "Capabilities",
+      "page": "memory",
+      "blurb": "What it learns from a turn is written down, and carried into the next session.",
+      "mode": "learn",
+      "fixtures": [
+        "calc.py"
+      ],
+      "config": "memory = true\nlearning = true\n",
+      "steps": [
+        "type:how do I build this project?",
+        "key:enter",
+        "wait:12",
+        "type:/learn",
+        "key:enter",
+        "wait:4"
+      ],
+      "expect": [
+        "remember",
+        "build command"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "skills",
+      "title": "Project rules, loaded only when they apply",
+      "category": "Capabilities",
+      "page": "skills",
+      "blurb": "A skill costs about fifteen tokens until it is relevant; then the agent reads the whole thing.",
+      "mode": "skill",
+      "project": "billing",
+      "files": {
+        ".koda/skills/migrations.md": "---\nname: migrations\nwhen: Writing or reviewing a database migration\n---\nEvery migration is reversible, changes one thing, and is named with the date.\nNever edit a migration that has already shipped; add another one.\n"
+      },
+      "steps": [
+        "type:/skills",
+        "key:enter",
+        "wait:3",
+        "type:add a migration for the invoices table",
+        "key:enter",
+        "wait:12"
+      ],
+      "expect": [
+        "migrations",
+        "skill"
+      ]
+    },
+    {
+      "id": "customtools",
+      "title": "Your own commands as tools",
+      "category": "Capabilities",
+      "page": "customtools",
+      "blurb": "A shell command declared in koda.toml is called like a built-in \u2014 and shows up in /tools.",
+      "mode": "custom",
+      "project": "billing",
+      "fixtures": [
+        "calc.py"
+      ],
+      "files": {
+        "koda.toml": "# Custom tools are shell commands the agent can call like a built-in.\n[[tools]]\nname = \"check\"\ndescription = \"Run this project's gate: formatting, lint and the test suite, stopping at the first failure.\"\ncommand = \"echo 'fmt ok' && echo 'clippy ok' && echo '3 tests passed'\"\nmutating = false\n"
+      },
+      "steps": [
+        "type:/tools",
+        "key:enter",
+        "wait:3",
+        "type:does this project pass its checks?",
+        "key:enter",
+        "wait:12"
+      ],
+      "expect": [
+        "check",
+        "3 tests passed"
+      ]
+    },
+    {
+      "id": "documents",
+      "title": "Reading a spreadsheet with @",
+      "category": "Capabilities",
+      "page": "images",
+      "blurb": "CSV, PDF, Word and Excel are parsed to text on the way in, so @ works on more than source files.",
+      "mode": "docread",
+      "mock_env": {
+        "DOC_PATH": "revenue.csv"
+      },
+      "project": "billing",
+      "files": {
+        "revenue.csv": "region,quarter,revenue\nnorth,Q1,120400\nsouth,Q1,98300\nnorth,Q2,133900\nsouth,Q2,101250\n"
+      },
+      "steps": [
+        "type:summarise ",
+        "type:@",
+        "wait:1.5",
+        "type:reven",
+        "wait:1.5",
+        "key:tab",
+        "wait:1",
+        "key:enter",
+        "wait:12"
+      ],
+      "expect": [
+        "revenue.csv"
+      ]
+    },
+    {
+      "id": "watch",
+      "title": "Acting on an AI! comment",
+      "category": "Capabilities",
+      "page": "watch",
+      "blurb": "With watch on, koda picks up an AI! comment the moment you save the file \u2014 no prompt typed.",
+      "mode": "watch",
+      "project": "billing",
+      "fixtures": [
+        "calc.py"
+      ],
+      "config": "watch = false\n",
+      "steps": [
+        "type:/watch",
+        "key:enter",
+        "wait:3",
+        "sh:printf '\\n# give mul a docstring  AI!\\n' >> calc.py",
+        "wait:18"
+      ],
+      "expect": [
+        "watch on",
+        "calc.py"
+      ]
+    },
+    {
+      "id": "sessions",
+      "title": "Every past conversation",
+      "category": "Capabilities",
+      "page": "sessions",
+      "blurb": "/resume reopens one, /search finds one by what was said in it, /fork branches it.",
+      "project": "billing",
+      "fixtures": [
+        "calc.py",
+        "test_calc.py"
+      ],
+      "config": "base_url = \"{url}\"\napi_key = \"local\"\nmodel = \"mock-coder\"\nsessions = true\n",
+      "pre_sh": [
+        "koda -p -y 'the add function is subtracting - find it and fix it' >/dev/null 2>&1",
+        "koda -p -y 'what does mul do?' >/dev/null 2>&1"
+      ],
+      "steps": [
+        "type:/resume",
+        "key:enter",
+        "wait:3.5",
+        "key:down",
+        "wait:1",
+        "key:esc",
+        "wait:1",
+        "type:/search mul",
+        "key:enter",
+        "wait:3.5",
+        "type:/name billing operator fix",
+        "key:enter",
+        "wait:2.5"
+      ],
+      "expect": [
+        "saved session",
+        "what does mul do?"
+      ]
+    },
+    {
+      "id": "settings",
+      "title": "Everything, editable in place",
+      "category": "Using koda",
+      "page": "config",
+      "blurb": "/settings is the whole config file as a screen: arrows move, space toggles, ctrl+s saves.",
+      "steps": [
+        "type:/settings",
+        "key:enter",
+        "wait:3",
+        "key:down",
+        "wait:0.5",
+        "key:down",
+        "wait:0.5",
+        "key:down",
+        "wait:1.5",
+        "key:esc",
+        "wait:1.5"
+      ],
+      "expect": [
+        "settings"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "providers",
+      "title": "Pointing it at a model",
+      "category": "Start here",
+      "page": "providers",
+      "blurb": "/models lists what the server actually has; /model switches, and /setup changes the endpoint.",
+      "steps": [
+        "type:/models",
+        "key:enter",
+        "wait:4",
+        "type:/model",
+        "key:enter",
+        "wait:4",
+        "key:esc",
+        "wait:1.5"
+      ],
+      "expect": [
+        "mock-coder"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "autonomy",
+      "title": "How much it may do unasked",
+      "category": "Using koda",
+      "page": "modes",
+      "blurb": "/auto cycles ask \u2192 auto-write \u2192 full-auto, and the tier is on the status bar the whole time.",
+      "flags": [],
+      "fixtures": [
+        "calc.py"
+      ],
+      "steps": [
+        "type:/auto",
+        "key:enter",
+        "wait:2",
+        "type:/auto",
+        "key:enter",
+        "wait:2",
+        "type:/auto",
+        "key:enter",
+        "wait:2.5"
+      ],
+      "expect": [
+        "auto"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "reason",
+      "title": "How hard it thinks",
+      "category": "Using koda",
+      "page": "modes",
+      "blurb": "/reason sets the effort a reasoning model spends before it answers.",
+      "steps": [
+        "type:/reason",
+        "key:enter",
+        "wait:2.5",
+        "key:down",
+        "wait:0.8",
+        "key:down",
+        "wait:0.8",
+        "key:enter",
+        "wait:2.5"
+      ],
+      "expect": [
+        "reason"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "debugger",
+      "title": "A real debugger, driven by the agent",
+      "category": "Capabilities",
+      "page": "debugger",
+      "blurb": "Breakpoints, stepping and live variables over the Debug Adapter Protocol \u2014 this is a real debugpy session, not a print statement.",
+      "mode": "debugger",
+      "project": "checkout",
+      "fixtures": [
+        "cart.py"
+      ],
+      "steps": [
+        "type:why is the total wrong? break inside the loop and look at the numbers",
+        "key:enter",
+        "wait:26",
+        "key:ctrl-r",
+        "wait:5",
+        "type:that explains it - we're done, close the session",
+        "key:enter",
+        "wait:8"
+      ],
+      "expect": [
+        "debug: evaluate",
+        "1200",
+        "0.9"
+      ],
+      "home": "real"
+    },
+    {
+      "id": "setup",
+      "title": "Pointing koda at your server",
+      "category": "Start here",
+      "page": "quickstart",
+      "blurb": "/setup walks the endpoint, the model and the key, and writes the config for you.",
+      "steps": [
+        "type:/setup",
+        "key:enter",
+        "wait:4",
+        "key:down",
+        "wait:1",
+        "key:down",
+        "wait:2",
+        "key:esc",
+        "wait:2"
+      ],
+      "expect": [
+        "setup"
+      ],
+      "project": "billing"
+    },
+    {
+      "id": "install",
+      "title": "First run, from the shell",
+      "category": "Start here",
+      "page": "install",
+      "blurb": "The three commands that tell you the install worked: the version, the models your server reports, and one real answer.",
+      "driver": "shell",
+      "project": "billing",
+      "ps1": "billing $ ",
+      "fixtures": [
+        "calc.py"
+      ],
+      "config": "base_url = \"{url}\"\napi_key = \"local\"\nmodel = \"mock-coder\"\n",
+      "intro": 1.0,
+      "steps": [
+        "type:koda --version",
+        "key:enter",
+        "wait:2",
+        "type:koda models",
+        "key:enter",
+        "wait:3",
+        "type:koda -p 'hello, are you there?'",
+        "key:enter",
+        "wait:6"
+      ],
+      "expect": [
+        "mock-coder",
+        "local server"
+      ],
+      "mode": "chat"
+    },
+    {
+      "id": "websearch",
+      "title": "Searching the web",
+      "category": "Capabilities",
+      "page": "web",
+      "blurb": "Off by default; on, the query really goes to DuckDuckGo (or your SearXNG) and the results come back as a tool result you can read.",
+      "mode": "searched",
+      "project": "billing",
+      "fixtures": [
+        "calc.py"
+      ],
+      "config": "web_search = true\nsearch_results = 5\n",
+      "steps": [
+        "type:what does the ratatui crate document about layouts?",
+        "key:enter",
+        "wait:20",
+        "key:ctrl-r",
+        "wait:4"
+      ],
+      "expect": [
+        "duckduckgo",
+        "ratatui",
+        "Constraint"
+      ]
+    },
+    {
+      "id": "browse",
+      "title": "Driving a real browser",
+      "category": "Capabilities",
+      "page": "browse",
+      "blurb": "For pages that only exist after JavaScript runs: a real Chromium, with the page's interactive elements indexed so the agent can click them.",
+      "mode": "browse",
+      "project": "billing",
+      "home": "real",
+      "fixtures": [
+        "calc.py"
+      ],
+      "config": "browser = true\n",
+      "steps": [
+        "type:open koda's demo page and tell me what is on it",
+        "key:enter",
+        "wait:40",
+        "key:ctrl-r",
+        "wait:5"
+      ],
+      "expect": [
+        "browse",
+        "koda"
+      ]
+    },
+    {
+      "id": "webui",
+      "title": "Serving the web control center",
+      "category": "Capabilities",
+      "page": "webui",
+      "project": "billing",
+      "blurb": "web_ui = true makes koda serve its trace waterfall and prompt inspector on 127.0.0.1 \u2014 loopback only, and only alongside the TUI: a headless `-p` run starts no server, as this shows.",
+      "driver": "shell",
+      "ps1": "billing $ ",
+      "mode": "chat",
+      "fixtures": [
+        "calc.py"
+      ],
+      "config": "base_url = \"{url}\"\napi_key = \"local\"\nmodel = \"mock-coder\"\nweb_ui = true\nweb_ui_port = 7717\n",
+      "intro": 1.0,
+      "steps": [
+        "type:koda config | grep web_ui",
+        "key:enter",
+        "wait:3",
+        "type:koda -p 'are you there?'",
+        "key:enter",
+        "wait:7"
+      ],
+      "expect": [
+        "web_ui",
+        "7717"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+---
+/**
+ * One recorded koda session, played in a terminal window.
+ *
+ * The recordings are asciicasts of the real binary (see demos/manifest.json and
+ * demos/scripts/record.py), so this is text — selectable, scrubbable, and a
+ * fraction of the weight of the GIFs it replaces. The player is only built when
+ * the window scrolls into view, because a page can hold several.
+ */
+import demos from '../data/demos.json';
+
+interface Props {
+  /** Demo id, as listed in demos/manifest.json. */
+  id: string;
+  /** Override the recorded title. */
+  title?: string;
+  /** Override the caption; pass an empty string for none. */
+  blurb?: string;
+  /** Start playing as soon as it is on screen. */
+  autoplay?: boolean;
+}
+
+const { id, title, blurb, autoplay = false } = Astro.props;
+const demo = demos.find((d) => d.id === id);
+if (!demo) {
+  throw new Error(
+    `<Demo id="${id}"> — no such demo. Known: ${demos.map((d) => d.id).join(', ')}`,
+  );
+}
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const caption = blurb === undefined ? demo.blurb : blurb;
+const mins = Math.floor(demo.duration / 60);
+const secs = Math.round(demo.duration % 60);
+const length = `${mins}:${String(secs).padStart(2, '0')}`;
+const poster = `0:${String(Math.round(demo.duration * 0.55)).padStart(2, '0')}`;
+---
+
+<figure class="koda-demo not-content" id={`demo-${demo.id}`}>
+  <div class="koda-demo__chrome">
+    <span class="koda-demo__lights" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="koda-demo__name">{title ?? demo.title}</span>
+    <span class="koda-demo__meta">{demo.cols}×{demo.rows} · {length}</span>
+  </div>
+  <div
+    class="koda-demo__screen"
+    data-cast={`${base}/demos/${demo.id}.cast`}
+    data-cols={demo.cols}
+    data-rows={demo.rows}
+    data-autoplay={autoplay ? 'yes' : 'no'}
+    data-poster={poster}
+  >
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  import { mountDemo } from '../scripts/demo-player.ts';
+
+  const seen = new WeakSet<Element>();
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting || seen.has(entry.target)) continue;
+        seen.add(entry.target);
+        io.unobserve(entry.target);
+        mountDemo(entry.target as HTMLElement);
+      }
+    },
+    { rootMargin: '200px' },
+  );
+
+  for (const el of document.querySelectorAll<HTMLElement>('.koda-demo__screen')) {
+    io.observe(el);
+  }
+</script>
