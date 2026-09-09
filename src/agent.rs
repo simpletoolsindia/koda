@@ -135,6 +135,8 @@ pub enum Command {
     /// Load a saved session in place of the current one.
     Resume(std::path::PathBuf),
     WhichSession,
+    /// Name the running conversation, or clear the name with an empty string.
+    NameSession(String),
     Undo,
     ReloadSkills,
     SetModel(String),
@@ -310,6 +312,10 @@ pub struct Agent {
     /// and common imports into candidate rules — done once, not every turn.
     mined_idioms: bool,
     session: Option<crate::session::Store>,
+    /// A name given before the session file exists. The file is only created on
+    /// the first persist, so `/name` on a fresh session has nothing to write to
+    /// yet — hold the name and apply it when the file appears.
+    pending_name: Option<String>,
     /// File contents captured before each write, newest last.
     undo: Vec<UndoEntry>,
     /// Which turn we are on, so undo can revert a whole turn's edits at once
@@ -593,6 +599,7 @@ impl Agent {
             // Created on first persist: an eagerly-created file would be left
             // orphaned by `resume`, and a session with no exchange is noise.
             session: None,
+            pending_name: None,
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
@@ -630,11 +637,14 @@ impl Agent {
             return;
         }
         if self.session.is_none() {
-            self.session = Some(crate::session::Store::create(
-                &self.ctx.root,
-                &self.model,
-                &self.endpoint,
-            ));
+            let mut store =
+                crate::session::Store::create(&self.ctx.root, &self.model, &self.endpoint);
+            if let Some(name) = self.pending_name.take() {
+                if let Err(e) = store.rename(&name) {
+                    crate::tel_warn!("session", format!("cannot apply held name: {e}"));
+                }
+            }
+            self.session = Some(store);
         }
         if let Some(s) = self.session.as_mut() {
             s.append(&self.history);
@@ -680,6 +690,7 @@ impl Agent {
             learning: crate::learning::Learning::default(),
             mined_idioms: true,
             session: None,
+            pending_name: None,
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
@@ -890,8 +901,35 @@ impl Agent {
             }
             Command::WhichSession => {
                 let msg = match self.session.as_ref() {
-                    Some(s) => format!("session {}", s.id()),
+                    Some(s) => match s.name() {
+                        Some(n) => format!("session {} — \"{n}\"", s.id()),
+                        None => format!("session {}", s.id()),
+                    },
                     None => "sessions are off (sessions = false)".to_string(),
+                };
+                let _ = tx.send(Event::Notice(msg));
+            }
+            Command::NameSession(name) => {
+                let named = |n: Option<&str>| match n {
+                    Some(n) => format!("this conversation is now \"{n}\""),
+                    None => "name cleared — the picker shows the first prompt again".to_string(),
+                };
+                let msg = match self.session.as_mut() {
+                    Some(s) => match s.rename(&name) {
+                        Ok(()) => named(s.name()),
+                        Err(e) => format!("could not rename the session: {e}"),
+                    },
+                    // The file is written on the first turn, so a name given
+                    // before then is held rather than refused.
+                    None if self.cfg.sessions => {
+                        let name = name.trim().to_string();
+                        let held = (!name.is_empty()).then_some(name);
+                        let msg = named(held.as_deref());
+                        self.pending_name = held;
+                        msg
+                    }
+                    None => "sessions are off (sessions = false), so there is nothing to name"
+                        .to_string(),
                 };
                 let _ = tx.send(Event::Notice(msg));
             }

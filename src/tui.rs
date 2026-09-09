@@ -221,6 +221,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/resume", "reopen an earlier conversation"),
     ("/search", "search saved conversations by text"),
     ("/fork", "branch this conversation into a copy"),
+    ("/name", "name this conversation so the picker shows it"),
     ("/undo", "put back the last file the agent changed"),
     ("/theme", "switch palette"),
     ("/url", "change the API base URL"),
@@ -2394,6 +2395,16 @@ impl App {
             },
             "undo" => self.send(Command::Undo),
             "session" => self.send(Command::WhichSession),
+            "name" | "rename" => {
+                // No argument is a question ("what is this called?"), not a
+                // mistake, so answer it rather than printing usage.
+                if arg.is_empty() {
+                    self.send(Command::WhichSession);
+                } else {
+                    let name = arg.trim().chars().take(60).collect::<String>();
+                    self.send(Command::NameSession(name));
+                }
+            }
             "resume" | "sessions" => {
                 let list = session::list(&self.root);
                 if list.is_empty() {
@@ -4816,7 +4827,9 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
                 g.sep
             );
             let room = inner_w.saturating_sub(meta.chars().count() + 3);
-            let title: String = s.title.chars().take(room.max(8)).collect();
+            // A named session shows its name; an unnamed one still shows the
+            // prompt it opened with.
+            let title: String = s.label().chars().take(room.max(8)).collect();
             // A tinted selection reads better than reverse video where the
             // theme knows its own colours; reverse video is the fallback.
             let style = match (selected, t.bg_selected) {

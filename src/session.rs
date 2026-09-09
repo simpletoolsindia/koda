@@ -24,6 +24,11 @@ pub struct Header {
     pub model: String,
     pub endpoint: String,
     pub cwd: String,
+    /// A name the user gave this conversation, shown in the picker instead of
+    /// the first prompt. `default` so session files written before names
+    /// existed still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// One line of the file: either the header or a message.
@@ -43,6 +48,17 @@ pub struct Summary {
     /// First user message, for recognising the session.
     pub title: String,
     pub modified: u64,
+}
+
+impl Summary {
+    /// What to call this session on screen: the name if it has one, otherwise
+    /// the opening prompt.
+    pub fn label(&self) -> &str {
+        match self.header.name.as_deref() {
+            Some(n) if !n.trim().is_empty() => n,
+            _ => &self.title,
+        }
+    }
 }
 
 pub fn dir(root: &Path) -> PathBuf {
@@ -89,6 +105,7 @@ impl Store {
             model: model.to_string(),
             endpoint: endpoint.to_string(),
             cwd: root.display().to_string(),
+            name: None,
         };
         let path = dir(root).join(format!("{}.jsonl", header.id));
         let mut store = Self {
@@ -116,6 +133,43 @@ impl Store {
 
     pub fn id(&self) -> &str {
         &self.header.id
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.header.name.as_deref()
+    }
+
+    /// Give this conversation a name, or clear it with an empty string.
+    ///
+    /// The header is the file's first line, so renaming means rewriting the
+    /// file. It is written to a sibling temp file and renamed over the original
+    /// so an interrupted rename cannot leave a half-written session behind —
+    /// the transcript is the one thing here that cannot be regenerated.
+    pub fn rename(&mut self, name: &str) -> Result<()> {
+        let name = name.trim();
+        self.header.name = (!name.is_empty()).then(|| name.to_string());
+        if !self.enabled {
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(&self.path)
+            .with_context(|| format!("reading {}", self.path.display()))?;
+        let rest = text.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        let header = serde_json::to_string(&Record::Header(self.header.clone()))?;
+
+        let tmp = self
+            .path
+            .with_extension(format!("jsonl.{}", std::process::id()));
+        std::fs::write(
+            &tmp,
+            format!(
+                "{header}
+{rest}"
+            ),
+        )
+        .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("replacing {}", self.path.display()))?;
+        Ok(())
     }
 
     fn write_header(&mut self) -> Result<()> {
@@ -301,6 +355,13 @@ pub fn fork(src: &Path, root: &Path) -> Result<PathBuf> {
     let (mut header, messages) = read(src)?;
     let new = new_id();
     header.id = new.clone();
+    // A fork inherits the name, which would leave two identical-looking rows in
+    // the picker. Mark it once — forking a fork does not stack the suffix.
+    if let Some(n) = header.name.as_ref() {
+        if !n.ends_with("(fork)") {
+            header.name = Some(format!("{n} (fork)"));
+        }
+    }
     let dest = dir(root).join(format!("{new}.jsonl"));
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -432,6 +493,7 @@ mod tests {
                     model: "m".into(),
                     endpoint: "e".into(),
                     cwd: "/r".into(),
+                    name: None,
                 }))
                 .unwrap(),
             );
@@ -579,6 +641,57 @@ mod tests {
         assert_eq!(ago(now().saturating_sub(120)), "2m ago");
         assert_eq!(ago(now().saturating_sub(7200)), "2h ago");
         assert_eq!(ago(now().saturating_sub(200_000)), "2d ago");
+    }
+
+    /// A name is written into the header, survives a reopen, shows up in the
+    /// picker, and can be cleared again.
+    #[test]
+    fn a_session_can_be_named_and_renamed() {
+        let root = std::env::temp_dir().join(format!("koda-name-{}", std::process::id()));
+        std::fs::create_dir_all(dir(&root)).unwrap();
+
+        let mut store = Store::create(&root, "m", "http://x");
+        store.append(&[Message::user("first prompt here")]);
+        assert_eq!(store.name(), None);
+
+        store.rename("the retrieval work").unwrap();
+        assert_eq!(store.name(), Some("the retrieval work"));
+
+        // It is on disk, in the header, and the history is untouched.
+        let (header, msgs) = read(&store.path).unwrap();
+        assert_eq!(header.name.as_deref(), Some("the retrieval work"));
+        assert_eq!(msgs.len(), 1, "renaming must not lose messages");
+
+        // The picker shows the name rather than the opening prompt.
+        let listed = list(&root);
+        let found = listed
+            .iter()
+            .find(|s| s.header.id == header.id)
+            .expect("session is listed");
+        assert_eq!(found.label(), "the retrieval work");
+        assert_eq!(found.title, "first prompt here", "the prompt is still kept");
+
+        // A fork is distinguishable from its original, and does not stack.
+        let forked = fork(&store.path, &root).unwrap();
+        let (fh, _) = read(&forked).unwrap();
+        assert_eq!(fh.name.as_deref(), Some("the retrieval work (fork)"));
+        let twice = fork(&forked, &root).unwrap();
+        assert_eq!(
+            read(&twice).unwrap().0.name.as_deref(),
+            Some("the retrieval work (fork)")
+        );
+
+        // Clearing falls back to the opening prompt.
+        store.rename("   ").unwrap();
+        assert_eq!(store.name(), None);
+        let cleared = list(&root);
+        let found = cleared
+            .iter()
+            .find(|s| s.header.id == header.id)
+            .expect("still listed");
+        assert_eq!(found.label(), "first prompt here");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
