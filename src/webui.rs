@@ -549,6 +549,21 @@ async fn route(
             let json = save_settings(&ctx.root, body);
             ("200 OK", "application/json", json.into_bytes())
         }
+        ("GET", "/api/tools") => (
+            "200 OK",
+            "application/json",
+            tools_json(&ctx.root).into_bytes(),
+        ),
+        ("POST", "/api/tools") => (
+            "200 OK",
+            "application/json",
+            save_tool(&ctx.root, body).into_bytes(),
+        ),
+        ("POST", "/api/tools/test") => (
+            "200 OK",
+            "application/json",
+            test_tool(&ctx.root, body).into_bytes(),
+        ),
         ("GET", "/api/config") => (
             "200 OK",
             "application/json",
@@ -1442,6 +1457,234 @@ fn settings_json(root: &Path) -> String {
 /// Update the system prompt from `{ "system_prompt": "..." }`. Saving the
 /// built-in text verbatim (or empty) resets to the built-in. Persisted to the
 /// user config; a running koda picks it up on next start (the UI notes this).
+/// The custom tools this project can use, plus the names already taken.
+///
+/// Built-in names are sent so the editor can say "that name is taken" while
+/// you type rather than after you save.
+fn tools_json(root: &Path) -> String {
+    let cfg = crate::config::Config::load(root).unwrap_or_default();
+    let tools: Vec<serde_json::Value> = cfg
+        .custom_tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "command": t.command,
+                "args": t.args,
+                "mutating": t.mutating,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "tools": tools,
+        "builtin": crate::tools::specs().iter().map(|s| s.name).collect::<Vec<_>>(),
+        "path": crate::config::config_path().display().to_string(),
+    })
+    .to_string()
+}
+
+/// A name koda can actually dispatch: what the model types has to match the
+/// spec exactly, so anything but `[a-z0-9_]` is rejected here rather than
+/// silently never being called.
+fn valid_tool_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("give the tool a name".into());
+    }
+    if name.len() > 40 {
+        return Err("that name is too long — keep it under 40 characters".into());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err("use lower-case letters, numbers and underscores only".into());
+    }
+    if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return Err("start the name with a letter".into());
+    }
+    if crate::tools::spec(name).is_some() {
+        return Err(format!(
+            "`{name}` is one of koda's own tools — pick another name"
+        ));
+    }
+    Ok(())
+}
+
+/// Everything a saved tool has to satisfy, as messages a person can act on.
+fn validate_tool(v: &serde_json::Value) -> Result<crate::config::CustomTool, String> {
+    let get = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let name = get("name");
+    valid_tool_name(&name)?;
+
+    let description = get("description");
+    if description.is_empty() {
+        return Err("say when koda should use this — it is all the model sees".into());
+    }
+    let command = get("command");
+    if command.is_empty() {
+        return Err("give the command to run".into());
+    }
+
+    let args: Vec<String> = v
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for a in &args {
+        if !a
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(format!(
+                "input `{a}`: lower-case letters, numbers and underscores only"
+            ));
+        }
+        // An input the command never uses is silently ignored at run time, which
+        // looks like the tool ignoring you. Say so now instead.
+        if !command.contains(&format!("{{{a}}}")) {
+            return Err(format!(
+                "the command never uses {{{a}}} — add it, or remove the input"
+            ));
+        }
+    }
+
+    Ok(crate::config::CustomTool {
+        name,
+        description,
+        command,
+        args,
+        mutating: v.get("mutating").and_then(|x| x.as_bool()).unwrap_or(true),
+    })
+}
+
+/// Create, update or delete one custom tool.
+///
+/// `{ "delete": "name" }` removes; anything else is an upsert keyed on name, so
+/// the editor does not need a separate create and update path.
+fn save_tool(root: &Path, body: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
+        }
+    };
+    let mut cfg = match crate::config::Config::load(root) {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("load config: {e}") })
+                .to_string()
+        }
+    };
+
+    if let Some(name) = v.get("delete").and_then(|x| x.as_str()) {
+        let before = cfg.custom_tools.len();
+        cfg.custom_tools.retain(|t| t.name != name);
+        if cfg.custom_tools.len() == before {
+            return serde_json::json!({ "ok": false, "error": format!("no tool named `{name}`") })
+                .to_string();
+        }
+    } else {
+        let tool = match validate_tool(&v) {
+            Ok(t) => t,
+            Err(e) => return serde_json::json!({ "ok": false, "error": e }).to_string(),
+        };
+        // Renaming is an edit, not a duplicate: drop the row it replaces.
+        if let Some(was) = v.get("was").and_then(|x| x.as_str()) {
+            cfg.custom_tools.retain(|t| t.name != was);
+        }
+        match cfg.custom_tools.iter_mut().find(|t| t.name == tool.name) {
+            Some(slot) => *slot = tool,
+            None => cfg.custom_tools.push(tool),
+        }
+    }
+
+    match crate::config::save(&cfg) {
+        Ok(path) => serde_json::json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "tools": cfg.custom_tools.len(),
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("save: {e}") }).to_string(),
+    }
+}
+
+/// Run a draft tool once and hand back exactly what it printed.
+///
+/// This is the part that makes the editor usable by someone who does not write
+/// shell: you see the real command and its real output before anything is
+/// saved, instead of finding out mid-conversation.
+fn test_tool(root: &Path, body: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("bad json: {e}") })
+                .to_string()
+        }
+    };
+    let tool = match validate_tool(&v) {
+        Ok(t) => t,
+        Err(e) => return serde_json::json!({ "ok": false, "error": e }).to_string(),
+    };
+    let sample = v
+        .get("values")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let command = crate::tools::expand_custom_command(&tool.command, &tool.args, &sample);
+
+    let cfg = crate::config::Config::load(root).unwrap_or_default();
+    let out = std::process::Command::new(&cfg.shell)
+        .arg(crate::config::shell_flag(&cfg.shell))
+        .arg(&command)
+        .current_dir(root)
+        .env("KODA", "1")
+        .env("NO_COLOR", "1")
+        .output();
+
+    match out {
+        Ok(o) => {
+            let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+            let err = String::from_utf8_lossy(&o.stderr);
+            if !err.trim().is_empty() {
+                text.push_str(&err);
+            }
+            // Long output is the tool's problem to fix, not something to scroll.
+            let clipped = text.chars().count() > 4000;
+            if clipped {
+                text = text.chars().take(4000).collect();
+            }
+            serde_json::json!({
+                "ok": true,
+                "command": command,
+                "exit": o.status.code().unwrap_or(-1),
+                "output": text,
+                "clipped": clipped,
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "command": command,
+            "error": format!("could not run it: {e}"),
+        })
+        .to_string(),
+    }
+}
+
 fn save_settings(root: &Path, body: &str) -> String {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -2168,6 +2411,70 @@ mod tests {
         // A fresh project uses the built-in prompt and exposes it to the UI.
         assert_eq!(v["using_builtin"], serde_json::Value::Bool(true));
         assert!(!v["builtin_prompt"].as_str().unwrap().is_empty());
+    }
+
+    /// Every rejection a person can hit, in the words they will read. These
+    /// are the guard rails that let a non-technical user drive the editor: a
+    /// tool that never gets called because its name collided, or an input the
+    /// command ignores, are both silent failures at conversation time.
+    #[test]
+    fn a_custom_tool_is_validated_before_it_can_be_saved() {
+        let err = |v: serde_json::Value| validate_tool(&v).unwrap_err();
+
+        // A name koda cannot dispatch.
+        assert!(
+            err(serde_json::json!({ "name": "", "description": "d", "command": "c" }))
+                .contains("give the tool a name")
+        );
+        assert!(
+            err(serde_json::json!({ "name": "My Tool", "description": "d", "command": "c" }))
+                .contains("lower-case")
+        );
+        assert!(
+            err(serde_json::json!({ "name": "9lives", "description": "d", "command": "c" }))
+                .contains("start the name with a letter")
+        );
+
+        // A name that shadows a built-in would never reach the custom path.
+        assert!(err(
+            serde_json::json!({ "name": "read_file", "description": "d", "command": "c" })
+        )
+        .contains("koda's own tools"));
+
+        // The description is the whole interface to the model.
+        assert!(
+            err(serde_json::json!({ "name": "ok", "description": " ", "command": "c" }))
+                .contains("when koda should use this")
+        );
+        assert!(
+            err(serde_json::json!({ "name": "ok", "description": "d", "command": "" }))
+                .contains("give the command")
+        );
+
+        // An input the command never uses is dropped at run time, which reads
+        // as the tool ignoring you. Catch it while it can still be fixed.
+        assert!(err(serde_json::json!({
+            "name": "ok", "description": "d", "command": "echo hi", "args": ["who"]
+        }))
+        .contains("never uses {who}"));
+
+        // The shape that should pass, with defaults applied.
+        let ok = validate_tool(&serde_json::json!({
+            "name": "greet", "description": "say hello", "command": "echo hi {who}",
+            "args": ["who"], "mutating": false
+        }))
+        .expect("valid");
+        assert_eq!(ok.name, "greet");
+        assert_eq!(ok.args, vec!["who".to_string()]);
+        assert!(!ok.mutating);
+
+        // Unstated approval defaults to asking: a tool that runs a command the
+        // author did not think about should not run unattended.
+        let d = validate_tool(&serde_json::json!({
+            "name": "g2", "description": "d", "command": "echo hi"
+        }))
+        .expect("valid");
+        assert!(d.mutating, "approval must default to asking");
     }
 
     #[test]

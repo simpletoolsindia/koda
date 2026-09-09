@@ -26,6 +26,7 @@ async function postJson(path, body) {
 const MANAGE_TABS = [
   { id: 'graph', label: 'Code Graph' },
   { id: 'skills', label: 'Agents & Skills' },
+  { id: 'tools', label: 'Tools' },
   { id: 'prompt', label: 'System Prompt' },
   { id: 'debug', label: 'Raw Captures' },
 ];
@@ -519,6 +520,7 @@ function App() {
             <div className="flex-1 min-h-0 overflow-hidden">
               {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} onRefresh={refreshGraph} />}
               {manage === 'skills' && <AgentsSkills skills={skills} loading={skillsState.loading} error={skillsState.error} onRefresh={reloadSkills} pushToast={pushToast} />}
+              {manage === 'tools' && <CustomTools pushToast={pushToast} />}
               {manage === 'prompt' && <SystemPrompt data={settings} loading={settingsState.loading} error={settingsState.error} onRefresh={reloadSettings} pushToast={pushToast} />}
               {manage === 'debug' && <LlmDebug debug={debugData} loading={debugState.loading} error={debugState.error} />}
             </div>

@@ -27,6 +27,7 @@ cat \
   src/components/LiveLogs.jsx \
   src/components/SessionStatus.jsx \
   src/components/LlmDebug.jsx \
+  src/components/CustomTools.jsx \
   src/components/CodeGraph.jsx \
   src/components/AgentsSkills.jsx \
   src/components/SystemPrompt.jsx \
