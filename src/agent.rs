@@ -645,6 +645,7 @@ impl Agent {
     pub fn resume(&mut self, path: std::path::PathBuf, messages: Vec<Message>) {
         let written = messages.len();
         self.history = messages;
+        self.last_compact_after = None;
         self.session = crate::session::read(&path)
             .ok()
             .map(|(header, _)| crate::session::Store::reopen(path, header, written));
@@ -854,6 +855,10 @@ impl Agent {
 
     pub fn clear(&mut self) {
         self.history.clear();
+        // Forget the last compaction too: it describes a conversation that no
+        // longer exists, and auto-compaction uses it to decide whether another
+        // pass could help.
+        self.last_compact_after = None;
     }
 
     fn cancelled(&self) -> bool {
@@ -870,6 +875,13 @@ impl Agent {
                     s.rewrite(&[]);
                 }
                 let _ = tx.send(Event::Notice("context cleared".into()));
+                // The status bar's token count and context gauge are driven
+                // only by Event::Tokens. Without this the conversation was
+                // gone but the gauge kept showing the old fill until the next
+                // turn happened to send one -- the clear looked like it had
+                // not worked. `/compact` has always reported its new size
+                // (Event::Compacted); this is the same courtesy.
+                let _ = tx.send(Event::Tokens(self.history_tokens()));
             }
             Command::Bang(cmd) => {
                 // Run the shell command directly and render it as a tool block.
@@ -5289,6 +5301,50 @@ fn absorb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/clear` empties the conversation, but the status bar's token count and
+    /// context gauge are fed only by `Event::Tokens`. Without one the numbers
+    /// kept the pre-clear fill until some later turn happened to send it, so a
+    /// clear that had worked looked like a clear that had not.
+    #[tokio::test]
+    async fn clear_reports_the_new_token_count() {
+        let dir = std::env::temp_dir().join("koda-clear-gauge-test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cfg = Arc::new(crate::config::Config::default());
+        let mut agent = Agent::new(
+            cfg,
+            dir.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+        )
+        .unwrap();
+
+        agent.history.push(Message::user("x".repeat(8_000)));
+        let before = agent.history_tokens();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        agent.handle(Command::Clear, &tx).await;
+        drop(tx);
+
+        let mut reported = None;
+        while let Some(ev) = rx.recv().await {
+            if let Event::Tokens(n) = ev {
+                reported = Some(n);
+            }
+        }
+
+        let after = reported.expect("/clear must report the new token count");
+        assert!(agent.history.is_empty(), "the history should be gone");
+        assert!(
+            after < before,
+            "the reported count must drop: {before} -> {after}"
+        );
+        assert_eq!(after, agent.history_tokens(), "and must be the real count");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// A tail that ignores its budget is a compaction that frees nothing. The
     /// case that matters is the common one: the context filled up *because* a
