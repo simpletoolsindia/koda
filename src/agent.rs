@@ -263,9 +263,10 @@ struct StepAcc {
     /// The model spent the whole server-chosen budget thinking and produced no
     /// answer, so koda should name a budget from here on.
     starved: bool,
-    /// index -> arguments length at the last draft report, so a status update
-    /// costs one event per few hundred bytes rather than one per token.
-    drafted: BTreeMap<usize, usize>,
+    /// index -> (arguments length at the last draft report, resolved target),
+    /// so a status update costs one event per few hundred bytes rather than one
+    /// per token, and the target is scanned for once rather than every time.
+    drafted: BTreeMap<usize, (usize, String)>,
 }
 
 struct StreamResult {
@@ -5122,13 +5123,21 @@ fn absorb(
             slot.2.push_str(&args);
             // Tell the UI something is being written. Throttled by size: the
             // point is a number that visibly moves, not one that is exact.
-            let seen = acc.drafted.entry(index).or_default();
+            let (seen, target) = acc.drafted.entry(index).or_default();
             let grown = slot.2.len().saturating_sub(*seen);
             if !slot.1.is_empty() && (*seen == 0 || grown >= DRAFT_STEP) {
                 *seen = slot.2.len();
+                // Resolve the target once. `draft_target` scans the whole
+                // accumulated buffer for every key it does not find, so at one
+                // report per DRAFT_STEP bytes this was re-scanning a growing
+                // string on each event — quadratic in the size of the file
+                // being written, which is exactly the case it reports on.
+                if target.is_empty() {
+                    *target = draft_target(&slot.2).unwrap_or_default();
+                }
                 let _ = tx.send(Event::ToolDraft {
                     name: slot.1.clone(),
-                    target: draft_target(&slot.2).unwrap_or_default(),
+                    target: target.clone(),
                     bytes: slot.2.len(),
                     depth,
                 });

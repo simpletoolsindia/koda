@@ -450,15 +450,15 @@ pub struct App {
     /// tests"), from the latest tool start — shown in the working status so the
     /// user sees live activity, not a generic spinner.
     activity: Option<String>,
-    /// When the stream last produced anything. Some servers buffer a whole
-    /// tool call and flush it in one delta, so there are genuinely no bytes
-    /// to count during a long write — elapsed time is then the only honest
-    /// sign that the connection is alive rather than hung.
-    last_delta: Option<Instant>,
-    /// True while the next thing to arrive would come from the model, false
-    /// while a tool is running. A silent model and a slow tool look identical
-    /// from the status row, and they need different words.
-    awaiting_model: bool,
+    /// When the stream last produced anything, and whether what koda is waiting
+    /// on is the model (`true`) or a tool that is already running (`false`).
+    ///
+    /// Some servers buffer a whole tool call and flush it in one delta, so
+    /// there are genuinely no bytes to count during a long write — elapsed
+    /// time is then the only honest sign the connection is alive. The two facts
+    /// share a field because they are always learned together: kept apart, a
+    /// new event handler can set one and leave the other stale.
+    last_delta: Option<(Instant, bool)>,
     /// Turns this session, which is the costume's die.
     turn_count: u64,
     /// A turn wrote or edited a file, which is one of the two ways a turn
@@ -861,14 +861,12 @@ impl App {
                 self.draft_seen = 0;
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
-                self.awaiting_model = true;
-                self.last_delta = Some(Instant::now());
+                self.last_delta = Some((Instant::now(), true));
             }
             Event::Text(chunk) => {
                 // The model is producing the reply — say so, so the status row
                 // isn't stuck on a stale tool label or a generic quip.
-                self.last_delta = Some(Instant::now());
-                self.awaiting_model = true;
+                self.last_delta = Some((Instant::now(), true));
                 self.activity = Some("writing the reply".into());
                 self.received += chunk.len();
                 self.transcript.assistant_delta(&chunk);
@@ -876,8 +874,7 @@ impl App {
             Event::Reasoning(chunk) => {
                 // Reasoning can run for many seconds before any visible output;
                 // surface it so a thinking model never reads as a frozen app.
-                self.last_delta = Some(Instant::now());
-                self.awaiting_model = true;
+                self.last_delta = Some((Instant::now(), true));
                 self.activity = Some("thinking".into());
                 self.received += chunk.len();
                 self.transcript.reasoning_delta(&chunk);
@@ -901,9 +898,7 @@ impl App {
                     self.dance_call = Some(id.clone());
                 }
                 let phrase = activity_label(&name, &label);
-                self.last_delta = Some(Instant::now());
-                // A tool is running now; the model is not the one being waited on.
-                self.awaiting_model = false;
+                self.last_delta = Some((Instant::now(), false));
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
                 } else {
@@ -939,8 +934,7 @@ impl App {
                 } else {
                     phrase
                 };
-                self.last_delta = Some(Instant::now());
-                self.awaiting_model = true;
+                self.last_delta = Some((Instant::now(), true));
                 self.activity = Some(if depth > 0 {
                     format!("↳ subagent: {phrase}")
                 } else {
@@ -967,8 +961,7 @@ impl App {
                 // Done with this tool — the model now decides the next step,
                 // which can take a few seconds. Say so rather than dropping to a
                 // generic quip that reads as idle.
-                self.last_delta = Some(Instant::now());
-                self.awaiting_model = true;
+                self.last_delta = Some((Instant::now(), true));
                 self.activity = Some("thinking about the next step".into());
                 // A write may have created a file, so `@` completion is stale.
                 if summary.starts_with("created") || summary.starts_with("wrote") {
@@ -1322,21 +1315,22 @@ impl App {
         lines.push(Line::default());
         // Quick-start tips: the few things a new user most needs, one per line,
         // key highlighted in the accent, description dimmed.
-        let mut tips: Vec<(&str, String)> = vec![
-            (
-                "type a task",
-                "and press enter — e.g. \"fix the failing test\"".into(),
-            ),
-            ("@", "attach a file to your message".into()),
-            ("/help", "see all commands".into()),
-            ("ctrl+p", "switch mode (plan · execute · vibe)".into()),
-        ];
         // The web UI binds before the TUI takes the screen, so the address it
         // printed to stderr is gone by the time anyone could read it. Show it
         // as one more row, and only when a socket actually came up — the port
         // it settled on is not always the configured one.
-        if let Some(addr) = crate::webui::address() {
-            tips.push(("web ui", format!("http://{addr}")));
+        let web = crate::webui::address().map(|addr| format!("http://{addr}"));
+        let mut tips: Vec<(&str, &str)> = vec![
+            (
+                "type a task",
+                "and press enter — e.g. \"fix the failing test\"",
+            ),
+            ("@", "attach a file to your message"),
+            ("/help", "see all commands"),
+            ("ctrl+p", "switch mode (plan · execute · vibe)"),
+        ];
+        if let Some(web) = &web {
+            tips.push(("web ui", web));
         }
         for (key, desc) in tips {
             lines.push(Line::from(vec![
@@ -4053,13 +4047,12 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
             // write looks exactly like a stall. "generating" is what is
             // actually known. A running tool is not relabelled: it is the tool
             // taking the time, not the model.
-            let quiet = app.last_delta.map(|t| t.elapsed()).unwrap_or_default();
+            let (quiet, on_model) = app
+                .last_delta
+                .map(|(t, on)| (t.elapsed(), on))
+                .unwrap_or_default();
             let text = if quiet.as_secs() >= QUIET_AFTER_SECS && !m.tiny {
-                let verb = if app.awaiting_model {
-                    "generating"
-                } else {
-                    &text
-                };
+                let verb = if on_model { "generating" } else { &text };
                 format!("{verb} · {}", anim::short_elapsed(quiet))
             } else {
                 text
@@ -5341,7 +5334,6 @@ pub async fn run(
         compacting: None,
         activity: None,
         last_delta: None,
-        awaiting_model: false,
         turn_count: 0,
         wrote_this_turn: false,
         visitor_at: None,
