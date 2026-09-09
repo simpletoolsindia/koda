@@ -119,6 +119,13 @@ function TraceWaterfall({ turn, selectedSeq, onSelect }) {
               }`}>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-mono text-subtle tabular-nums w-5 shrink-0">{step.seq}</span>
+                {/* A subagent's steps sit under the delegate call that started
+                    them. Without the indent an 11-second delegate looks like a
+                    gap followed by an answer. */}
+                {step.depth > 0 && (
+                  <span className="shrink-0 text-[10px] text-subtle font-mono" aria-label={`nested ${step.depth} deep`}
+                    style={{ paddingLeft: `${(step.depth - 1) * 10}px` }}>↳</span>
+                )}
                 <span className={`shrink-0 inline-flex items-center rounded border px-1.5 py-[1px] text-[9.5px] font-semibold uppercase tracking-wide ${style.chip}`}>
                   {style.kind}
                 </span>

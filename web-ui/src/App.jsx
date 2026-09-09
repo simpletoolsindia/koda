@@ -27,6 +27,7 @@ const MANAGE_TABS = [
   { id: 'graph', label: 'Code Graph' },
   { id: 'skills', label: 'Agents & Skills' },
   { id: 'tools', label: 'Tools' },
+  { id: 'analytics', label: 'Analytics' },
   { id: 'prompt', label: 'System Prompt' },
   { id: 'debug', label: 'Raw Captures' },
 ];
@@ -168,11 +169,13 @@ function App() {
     else if (selectedId == null && turns.length > 0) setSelectedId(turns[0].id);
   }, [pinLive, live, turns, selectedId]);
 
-  // Detail for the selected turn: the live turn already arrives in full, so only
-  // a finished turn needs fetching.
+  // Detail for the selected turn. The live turn arrives on the event stream
+  // without its request bodies and raw SSE -- re-sending those on every
+  // reconnect cost more than fetching them once here -- so anything selected
+  // is fetched by id, live or finished.
   React.useEffect(() => {
     if (selectedId == null) { setDetail(null); return; }
-    if (live && live.id === selectedId) { setDetail(live); return; }
+    if (live && live.id === selectedId && trace && trace.payloads) { setDetail(live); return; }
     let alive = true;
     (async () => {
       try {
@@ -183,7 +186,7 @@ function App() {
       }
     })();
     return () => { alive = false; };
-  }, [selectedId, live, pushToast]);
+  }, [selectedId, live, trace, pushToast]);
 
   // Re-index what changed on disk. The agent sweeps on its own, but someone
   // looking at the graph after a rebase wants it now, and wants to be told what
@@ -521,6 +524,7 @@ function App() {
               {manage === 'graph' && <CodeGraph graph={graph} loading={graphState.loading} error={graphState.error} onRefresh={refreshGraph} />}
               {manage === 'skills' && <AgentsSkills skills={skills} loading={skillsState.loading} error={skillsState.error} onRefresh={reloadSkills} pushToast={pushToast} />}
               {manage === 'tools' && <CustomTools pushToast={pushToast} />}
+              {manage === 'analytics' && <Analytics pushToast={pushToast} />}
               {manage === 'prompt' && <SystemPrompt data={settings} loading={settingsState.loading} error={settingsState.error} onRefresh={reloadSettings} pushToast={pushToast} />}
               {manage === 'debug' && <LlmDebug debug={debugData} loading={debugState.loading} error={debugState.error} />}
             </div>

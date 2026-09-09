@@ -97,6 +97,8 @@ pub struct ModelCall {
     pub retries: u32,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    /// True when the server reported these, false when koda estimated them.
+    pub measured: bool,
     /// Names of the tools this call asked for, in order.
     pub tool_calls: Vec<String>,
     pub error: Option<String>,
@@ -132,6 +134,15 @@ pub struct Step {
     /// Compaction outcome, e.g. "18400 → 4200 tokens".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// 0 for the main agent, 1+ for a subagent's own steps. The waterfall
+    /// indents by this, so delegated work reads as work rather than as a gap
+    /// between the delegate call and its result.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub depth: u8,
+}
+
+fn is_zero(d: &u8) -> bool {
+    *d == 0
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,6 +158,11 @@ pub struct Turn {
     pub steps: Vec<Step>,
     pub reply: String,
     pub tokens: usize,
+    /// The saved conversation this turn belongs to, so a session in the rail
+    /// can be opened at what actually happened in it. Empty until a session
+    /// file exists — it is created on the first turn, not at startup.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session: String,
 }
 
 impl Turn {
@@ -172,6 +188,105 @@ pub struct TurnSummary {
     pub tokens: usize,
     pub reply: String,
     pub running: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session: String,
+}
+
+/// Aggregates over the turns still in the ring.
+///
+/// Everything here is derived from what the trace already records — this asks
+/// the questions the rail cannot: where the time actually goes, which tools get
+/// used, and whether the token counts are the server's or koda's own guess.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Analytics {
+    pub turns: usize,
+    pub ok: usize,
+    pub errored: usize,
+    pub cancelled: usize,
+    pub total_ms: u64,
+    pub median_ms: u64,
+    pub slowest_ms: u64,
+    /// Of that wall-clock, how much was spent waiting on the model and how much
+    /// running tools. The rest is koda's own work.
+    pub model_ms: u64,
+    pub tool_ms: u64,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    /// True when every model call in the window reported its own usage, so the
+    /// counts above are the server's rather than four-bytes-a-token.
+    pub tokens_measured: bool,
+    pub model_calls: usize,
+    pub tools: Vec<ToolStat>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolStat {
+    pub name: String,
+    pub calls: usize,
+    pub ms: u64,
+    pub failures: usize,
+}
+
+/// Summarise the turns held in the ring.
+pub fn analytics() -> Analytics {
+    let Ok(ring) = ring().lock() else {
+        return Analytics::default();
+    };
+    let mut a = Analytics::default();
+    let mut durations: Vec<u64> = Vec::new();
+    let mut tools: std::collections::BTreeMap<String, ToolStat> = Default::default();
+    let mut measured = 0usize;
+
+    for t in ring.iter() {
+        a.turns += 1;
+        match t.status {
+            Status::Ok => a.ok += 1,
+            Status::Error => a.errored += 1,
+            Status::Cancelled => a.cancelled += 1,
+            Status::Running => {}
+        }
+        if t.status != Status::Running {
+            let ms = t.ms();
+            a.total_ms += ms;
+            a.slowest_ms = a.slowest_ms.max(ms);
+            durations.push(ms);
+        }
+        for s in &t.steps {
+            if let Some(m) = &s.model {
+                a.model_calls += 1;
+                a.model_ms += s.ms;
+                a.prompt_tokens += m.prompt_tokens;
+                a.completion_tokens += m.completion_tokens;
+                if m.measured {
+                    measured += 1;
+                }
+            }
+            if let Some(tool) = &s.tool {
+                a.tool_ms += s.ms;
+                let e = tools.entry(tool.name.clone()).or_insert(ToolStat {
+                    name: tool.name.clone(),
+                    calls: 0,
+                    ms: 0,
+                    failures: 0,
+                });
+                e.calls += 1;
+                e.ms += s.ms;
+                if !tool.ok {
+                    e.failures += 1;
+                }
+            }
+        }
+    }
+
+    durations.sort_unstable();
+    a.median_ms = durations.get(durations.len() / 2).copied().unwrap_or(0);
+    // "Measured" only if nothing in the window was estimated: a mixed window
+    // would let a guess masquerade as a reading.
+    a.tokens_measured = a.model_calls > 0 && measured == a.model_calls;
+    a.tools = tools.into_values().collect();
+    a.tools
+        .sort_by(|x, y| y.calls.cmp(&x.calls).then(y.ms.cmp(&x.ms)));
+    a
 }
 
 /// A handle to an open step. Copy and payload-free, so it can be handed to the
@@ -222,6 +337,7 @@ pub fn begin_turn(mode: &str, model: &str, endpoint: &str, input: &str) -> Optio
         steps: Vec::new(),
         reply: String::new(),
         tokens: 0,
+        session: String::new(),
     };
     let mut ring = ring().lock().ok()?;
     if ring.len() >= MAX_TURNS {
@@ -251,7 +367,24 @@ pub fn end_turn(id: Option<u64>, status: Status, reply: &str, tokens: usize) {
 
 /// Open a step inside a turn. The step is visible (and marked running) at once,
 /// so a live turn streams into the UI rather than appearing when it finishes.
+/// Attach the saved conversation this turn is part of.
+pub fn set_session(turn: Option<u64>, id: &str) {
+    let (Some(turn), false) = (turn, id.is_empty()) else {
+        return;
+    };
+    with_turn(turn, |t| {
+        if t.session.is_empty() {
+            t.session = id.to_string();
+        }
+    });
+}
+
 pub fn open_step(turn: Option<u64>, kind: StepKind, label: &str) -> Option<StepRef> {
+    open_step_at(turn, kind, label, 0)
+}
+
+/// `open_step`, recording how deep the agent that opened it is.
+pub fn open_step_at(turn: Option<u64>, kind: StepKind, label: &str, depth: u8) -> Option<StepRef> {
     let id = turn?;
     let mut out = None;
     with_turn(id, |t| {
@@ -276,6 +409,7 @@ pub fn open_step(turn: Option<u64>, kind: StepKind, label: &str) -> Option<StepR
                     model: None,
                     tool: None,
                     note: None,
+                    depth: 0,
                 },
             );
         }
@@ -289,6 +423,7 @@ pub fn open_step(turn: Option<u64>, kind: StepKind, label: &str) -> Option<StepR
             model: None,
             tool: None,
             note: None,
+            depth,
         });
         out = Some(StepRef { turn: id, seq });
     });
@@ -424,6 +559,7 @@ pub fn summaries() -> Vec<TurnSummary> {
             tokens: t.tokens,
             reply: first_line(&t.reply, 160),
             running: t.status == Status::Running,
+            session: t.session.clone(),
         })
         .collect()
 }
@@ -476,6 +612,81 @@ fn cap(s: &mut String, max: usize) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Analytics answers what the rail cannot: where the time went, which
+    /// tools ran, and whether the token numbers are the server's or a guess.
+    #[test]
+    fn analytics_separates_measured_counts_from_estimates() {
+        set_enabled(true);
+        clear();
+
+        let turn = begin_turn("execute", "m", "e", "do a thing");
+        let step = open_step(turn, StepKind::Model, "m");
+        finish_model(
+            step,
+            ModelCall {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                measured: true,
+                ..Default::default()
+            },
+        );
+        let t1 = open_step(turn, StepKind::Tool, "read_file");
+        finish_tool(
+            t1,
+            ToolStep {
+                name: "read_file".into(),
+                ok: true,
+                ..Default::default()
+            },
+        );
+        let t2 = open_step(turn, StepKind::Tool, "read_file");
+        finish_tool(
+            t2,
+            ToolStep {
+                name: "read_file".into(),
+                ok: false,
+                ..Default::default()
+            },
+        );
+        set_session(turn, "sess-1");
+        end_turn(turn, Status::Ok, "done", 120);
+
+        let a = analytics();
+        assert_eq!(a.turns, 1);
+        assert_eq!(a.ok, 1);
+        assert_eq!(a.model_calls, 1);
+        assert_eq!(a.prompt_tokens, 100);
+        assert_eq!(a.completion_tokens, 20);
+        assert!(a.tokens_measured, "the server reported these, so say so");
+
+        // Tools are grouped, counted, and their failures kept.
+        assert_eq!(a.tools.len(), 1);
+        assert_eq!(a.tools[0].name, "read_file");
+        assert_eq!(a.tools[0].calls, 2);
+        assert_eq!(a.tools[0].failures, 1);
+
+        // The turn knows which conversation it belongs to.
+        assert_eq!(summaries()[0].session, "sess-1");
+
+        // One estimated call in the window makes the whole window an estimate:
+        // a mixed total must not be presented as a reading.
+        let t2 = begin_turn("execute", "m", "e", "another");
+        let s2 = open_step(t2, StepKind::Model, "m");
+        finish_model(
+            s2,
+            ModelCall {
+                completion_tokens: 9,
+                measured: false,
+                ..Default::default()
+            },
+        );
+        end_turn(t2, Status::Ok, "", 9);
+        assert!(!analytics().tokens_measured);
+
+        clear();
+    }
+
     use super::*;
     use std::sync::MutexGuard;
 

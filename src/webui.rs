@@ -461,11 +461,18 @@ async fn route(
             // follows. The client reconnects/polls; keeping the connection
             // stateless avoids a long-lived task per tab.
             let logs = logs_json(query, &ctx.detail);
-            let trace = trace_json();
+            let trace = trace_json(false);
             let framed = format!("event: logs\ndata: {logs}\n\nevent: trace\ndata: {trace}\n\n");
             ("200 OK", "text/event-stream", framed.into_bytes())
         }
-        ("GET", "/api/trace") => ("200 OK", "application/json", trace_json().into_bytes()),
+        ("GET", "/api/trace") => ("200 OK", "application/json", trace_json(true).into_bytes()),
+        ("GET", "/api/analytics") => (
+            "200 OK",
+            "application/json",
+            serde_json::to_string(&crate::trace::analytics())
+                .unwrap_or_else(|_| "{}".into())
+                .into_bytes(),
+        ),
         ("DELETE", "/api/trace") => {
             crate::trace::clear();
             ("200 OK", "application/json", br#"{"ok":true}"#.to_vec())
@@ -644,14 +651,32 @@ fn logs_json(query: &str, detail: &str) -> String {
 
 /// The turn rail plus the live turn in full, so a browser that polls this one
 /// endpoint can render the whole console without a second request.
-fn trace_json() -> String {
+/// The trace list, and the running turn.
+///
+/// `payloads` decides whether the live turn carries its request bodies and raw
+/// SSE. `/api/events` is a one-shot snapshot the client reconnects to every few
+/// seconds, so sending them there re-sent the same hundreds of kilobytes for
+/// the life of a long turn. The shape is identical either way; only the two
+/// heavy strings are emptied, and `/api/trace/<id>` still serves them in full.
+fn trace_json(payloads: bool) -> String {
     let turns = crate::trace::summaries();
-    let live = crate::trace::live();
+    let mut live = crate::trace::live();
+    if !payloads {
+        if let Some(t) = live.as_mut() {
+            for step in t.steps.iter_mut() {
+                if let Some(m) = step.model.as_mut() {
+                    m.request.clear();
+                    m.response.clear();
+                }
+            }
+        }
+    }
     serde_json::json!({
         "enabled": crate::trace::enabled(),
         "version": crate::trace::version(),
         "turns": turns,
         "live": live,
+        "payloads": payloads,
     })
     .to_string()
 }

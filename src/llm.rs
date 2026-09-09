@@ -292,6 +292,14 @@ impl ChatRequest {
         if self.max_tokens > 0 {
             body["max_tokens"] = self.max_tokens.into();
         }
+        // Ask the server to report what the turn actually cost. Without this
+        // koda counts bytes and divides by four, which is a guess it then
+        // displays as a number. Servers that do not know the field ignore it;
+        // the rare one that rejects it turns the flag off for the process
+        // (see `classify_status`) and the retry goes out without it.
+        if stream_usage() {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
         // Thinking-model effort hint. "off" (the default) omits it so servers
         // that don't understand the field see an unchanged request.
         let effort = self.reasoning_effort.trim().to_ascii_lowercase();
@@ -308,6 +316,16 @@ impl ChatRequest {
     }
 }
 
+/// Whether to ask for `usage` on streaming responses.
+///
+/// On by default and only ever turned off, once, by a server that rejects the
+/// field — so one strict endpoint cannot cost every other one its real counts.
+static STREAM_USAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn stream_usage() -> bool {
+    STREAM_USAGE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Text(String),
@@ -320,6 +338,11 @@ pub enum StreamEvent {
         args: String,
     },
     Finish(Option<String>),
+    /// What the server says the call actually cost. Only some send it.
+    Usage {
+        prompt: usize,
+        completion: usize,
+    },
 }
 
 /// Whether another attempt could plausibly succeed.
@@ -407,6 +430,15 @@ fn classify_status(status: reqwest::StatusCode, body: &str, model: &str) -> ApiE
             "the request was too large for the server — try /compact",
             detail,
         ),
+        // A server that refuses `stream_options` should cost us the counts, not
+        // the conversation: drop the field and let the retry succeed.
+        400 | 422 if body.contains("stream_options") => {
+            STREAM_USAGE.store(false, std::sync::atomic::Ordering::Relaxed);
+            ApiError::transient(
+                "this server does not accept stream_options; retrying without it",
+                detail,
+            )
+        }
         400 | 422 => ApiError::permanent(
             if msg.is_empty() {
                 "the server rejected the request".to_string()
@@ -829,6 +861,15 @@ fn emit(v: &Value, tx: &UnboundedSender<StreamEvent>) {
             .unwrap_or_else(|| err.to_string());
         let _ = tx.send(StreamEvent::Text(format!("\n[server error] {msg}\n")));
         return;
+    }
+    // Usage arrives in its own chunk, and OpenAI sends it with `choices: []`
+    // — so it has to be read before the check below gives up on the chunk.
+    if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
+        let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        let (prompt, completion) = (n("prompt_tokens"), n("completion_tokens"));
+        if prompt > 0 || completion > 0 {
+            let _ = tx.send(StreamEvent::Usage { prompt, completion });
+        }
     }
     let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
         return;

@@ -269,6 +269,9 @@ struct StepAcc {
     /// so a status update costs one event per few hundred bytes rather than one
     /// per token, and the target is scanned for once rather than every time.
     drafted: BTreeMap<usize, (usize, String)>,
+    /// What the server said the call cost, when it says. Preferred over koda's
+    /// own estimate, which is bytes divided by four.
+    usage: Option<(usize, usize)>,
 }
 
 struct StreamResult {
@@ -649,6 +652,12 @@ impl Agent {
         if let Some(s) = self.session.as_mut() {
             s.append(&self.history);
         }
+        // Now that the file exists, the running turn can point at it — this is
+        // the only join between a saved conversation and the trace of what
+        // actually happened in it.
+        if let Some(s) = self.session.as_ref() {
+            crate::trace::set_session(self.trace_turn, s.id());
+        }
     }
 
     /// Name the session before it exists, for `--name` at launch. The file is
@@ -720,9 +729,11 @@ impl Agent {
             quiet: true,
             allow: Some(tools::SUBAGENT_TOOLS),
             mode: self.mode,
-            // A subagent's work is attributed to the parent turn's tool step;
-            // it never opens a turn of its own.
-            trace_turn: None,
+            // A subagent's work is attributed to the parent's turn: it never
+            // opens one of its own, but its steps are recorded there, indented
+            // by depth. Left as None its model and tool calls vanished, so a
+            // delegate step showed a long gap and then an answer.
+            trace_turn: self.trace_turn,
             last_approval: None,
         }
     }
@@ -1785,8 +1796,12 @@ impl Agent {
         // Trace this call: the request goes in now (so a stalled call is
         // visible), the raw SSE streams in from the HTTP layer, and the parsed
         // result is attached when the step closes.
-        let step =
-            crate::trace::open_step(self.trace_turn, crate::trace::StepKind::Model, &self.model);
+        let step = crate::trace::open_step_at(
+            self.trace_turn,
+            crate::trace::StepKind::Model,
+            &self.model,
+            self.depth,
+        );
         // Attach the request to the step now rather than when the call closes:
         // a trace watching a slow call should show what was asked while it is
         // still being answered.
@@ -1848,6 +1863,7 @@ impl Agent {
             text_calls,
             starved,
             drafted: _,
+            usage,
         } = acc;
         if starved {
             self.starved_of_output = true;
@@ -1907,8 +1923,13 @@ impl Agent {
                 reasoning,
                 text: text.clone(),
                 finish_reason,
-                prompt_tokens,
-                completion_tokens: (text.len() + reasoning_len) / 4,
+                // The server's own numbers when it reports them; otherwise the
+                // four-bytes-a-token estimate, which is all koda can know.
+                prompt_tokens: usage.map(|(p, _)| p).unwrap_or(prompt_tokens),
+                completion_tokens: usage
+                    .map(|(_, c)| c)
+                    .unwrap_or((text.len() + reasoning_len) / 4),
+                measured: usage.is_some(),
                 tool_calls: calls.iter().map(|c| c.function.name.clone()).collect(),
                 error: stream_error,
                 ..Default::default()
@@ -2067,10 +2088,11 @@ impl Agent {
         call: &ToolCall,
         tx: &mpsc::UnboundedSender<Event>,
     ) -> tools::Outcome {
-        let step = crate::trace::open_step(
+        let step = crate::trace::open_step_at(
             self.trace_turn,
             crate::trace::StepKind::Tool,
             &call.function.name,
+            self.depth,
         );
         self.last_approval = None;
         // The preview is the same diff the approval prompt shows. Only computed
@@ -5187,6 +5209,9 @@ fn absorb(
                     depth,
                 });
             }
+        }
+        StreamEvent::Usage { prompt, completion } => {
+            acc.usage = Some((prompt, completion));
         }
         StreamEvent::Finish(reason) => {
             acc.finish_reason = reason.clone();
