@@ -456,12 +456,25 @@ pub fn names() -> Vec<&'static str> {
 /// per the no-color.org convention: an explicit user environment choice is not
 /// something an app should override.
 pub fn resolve(configured: &str) -> Theme {
-    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+    if colour_is_unwelcome() {
         return MONO;
     }
-    if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
-        return MONO;
-    }
+    named(configured)
+}
+
+/// Whether the environment has asked for no colour at all.
+///
+/// Split out from `named` so the palette lookup can be tested without the
+/// ambient environment deciding the answer — koda runs child commands with
+/// `NO_COLOR=1` and `TERM=dumb`, so its own suite used to fail when run from
+/// inside koda, and would fail in any CI that sets either.
+fn colour_is_unwelcome() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
+        || std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false)
+}
+
+/// The configured palette, ignoring the environment.
+pub fn named(configured: &str) -> Theme {
     match configured.trim() {
         // Default to the vibrant NEON palette: the block fills that give the
         // transcript its shape need colours we can predict, and a colourful
@@ -676,11 +689,13 @@ mod tests {
 
     #[test]
     fn unknown_theme_falls_back_to_the_default() {
-        assert_eq!(resolve("nonexistent").name, "neon");
-        assert_eq!(resolve("").name, "neon");
-        assert_eq!(resolve("auto").name, "neon");
-        assert_eq!(resolve("nord").name, "nord");
-        assert_eq!(resolve("ansi").name, "ansi");
+        // `named`, not `resolve`: the latter answers MONO whenever NO_COLOR or
+        // TERM=dumb is set, which is true of every command koda itself runs.
+        assert_eq!(named("nonexistent").name, "neon");
+        assert_eq!(named("").name, "neon");
+        assert_eq!(named("auto").name, "neon");
+        assert_eq!(named("nord").name, "nord");
+        assert_eq!(named("ansi").name, "ansi");
     }
 
     #[test]

@@ -32,6 +32,31 @@ pub enum Motion {
     Off,
 }
 
+/// What the environment says about motion, before config or tty are consulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvMotion {
+    /// Nothing set: config decides.
+    Unset,
+    /// A standing accessibility preference for less movement.
+    Reduced,
+    /// A terminal that cannot animate at all.
+    Off,
+}
+
+impl EnvMotion {
+    fn current() -> Self {
+        for key in ["KODA_REDUCED_MOTION", "NO_MOTION", "REDUCED_MOTION"] {
+            if std::env::var_os(key).is_some_and(|v| !v.is_empty() && v != "0") {
+                return EnvMotion::Reduced;
+            }
+        }
+        if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
+            return EnvMotion::Off;
+        }
+        EnvMotion::Unset
+    }
+}
+
 impl Motion {
     /// Resolve motion from config and environment, honouring the conventions
     /// that already exist rather than inventing a new one.
@@ -39,18 +64,25 @@ impl Motion {
     /// Environment wins over config because it is how a user expresses a
     /// standing accessibility preference across every tool they run.
     pub fn resolve(configured: bool, tty: bool) -> Self {
+        Self::decide(configured, tty, EnvMotion::current())
+    }
+
+    /// `resolve` with the environment passed in rather than read.
+    ///
+    /// Split out so the decision can be tested deterministically: koda runs
+    /// every child command with `TERM=dumb`, so a test calling `resolve` got a
+    /// different answer inside koda than outside it — and would differ again
+    /// under any CI that sets a reduced-motion variable.
+    pub fn decide(configured: bool, tty: bool, env: EnvMotion) -> Self {
         // A pipe or a file cannot animate, and writing frames into one would
         // corrupt the output.
         if !tty {
             return Motion::Off;
         }
-        for key in ["KODA_REDUCED_MOTION", "NO_MOTION", "REDUCED_MOTION"] {
-            if std::env::var_os(key).is_some_and(|v| !v.is_empty() && v != "0") {
-                return Motion::Reduced;
-            }
-        }
-        if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
-            return Motion::Off;
+        match env {
+            EnvMotion::Reduced => return Motion::Reduced,
+            EnvMotion::Off => return Motion::Off,
+            EnvMotion::Unset => {}
         }
         if !configured {
             return Motion::Reduced;
@@ -547,7 +579,19 @@ mod tests {
 
     #[test]
     fn config_off_still_updates_state() {
-        assert_eq!(Motion::resolve(false, true), Motion::Reduced);
+        // `decide`, not `resolve`: the latter reads TERM, which koda sets to
+        // "dumb" for every command it runs, including its own test suite.
+        assert_eq!(
+            Motion::decide(false, true, EnvMotion::Unset),
+            Motion::Reduced
+        );
+        // And the environment still wins where it should.
+        assert_eq!(
+            Motion::decide(true, true, EnvMotion::Reduced),
+            Motion::Reduced
+        );
+        assert_eq!(Motion::decide(true, true, EnvMotion::Off), Motion::Off);
+        assert_eq!(Motion::decide(true, false, EnvMotion::Unset), Motion::Off);
     }
 
     #[test]

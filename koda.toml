@@ -1,0 +1,26 @@
+# Project-local koda config. Overrides ~/.config/koda/config.toml for this
+# repo only; everything not set here is inherited.
+#
+# Custom tools are shell commands the agent can call like a built-in. Each one
+# costs its schema on every request, so this file stays deliberately short —
+# only the checks a contributor runs constantly and would otherwise assemble by
+# hand every time. See docs/extensions.md, and docs/adding-a-builtin-tool.md if
+# a shell command is not enough.
+
+# The gate every change has to pass before it is committed. Run as one tool so
+# the agent cannot report "tests pass" having skipped fmt or clippy — and so a
+# failure anywhere stops the chain rather than being buried under later output.
+[[tools]]
+name = "check"
+description = "Run the full pre-commit gate for this repo: rustfmt, clippy (all targets, warnings denied) and the test suite, in that order, stopping at the first failure. Use before committing, and to verify a change did not break anything."
+command = "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
+mutating = false
+
+# The live browser tests are #[ignore]d because they need a real agent-browser
+# binary, so a plain `cargo test` silently skips them. This is how to actually
+# exercise the browse tool's twenty-one actions.
+[[tools]]
+name = "check_browser"
+description = "Run the live browser tests, which a normal test run skips because they are #[ignore]d. Use after changing anything under the browse tool or its engine."
+command = "cargo test --bin koda -- --ignored --test-threads=1 browse"
+mutating = false
