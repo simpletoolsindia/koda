@@ -292,6 +292,12 @@ pub struct Agent {
     ctx: ToolCtx,
     system: String,
     history: Vec<Message>,
+    /// What the last compaction left behind, in tokens. Auto-compaction uses it
+    /// to tell "the context is full again" from "the context was already as
+    /// small as compaction can make it" — the second one cannot be fixed by
+    /// compacting again, and trying every turn is what made a small window
+    /// spend most of its turns summarizing.
+    last_compact_after: Option<usize>,
     /// True once we've committed to the `<tool_call>` text protocol.
     text_mode: bool,
     always: HashSet<String>,
@@ -595,6 +601,7 @@ impl Agent {
             ctx,
             system,
             history: Vec::new(),
+            last_compact_after: None,
             text_mode,
             always: HashSet::new(),
             cancel,
@@ -704,6 +711,7 @@ impl Agent {
             ctx: self.ctx.clone(),
             system: prompt::subagent(&self.ctx.root),
             history: Vec::new(),
+            last_compact_after: None,
             text_mode: self.text_mode,
             always: HashSet::new(),
             cancel: self.cancel.clone(),
@@ -4483,8 +4491,19 @@ impl Agent {
             return;
         }
         let limit = (self.cfg.context_tokens as f64 * frac) as usize;
-        if self.history_tokens() < limit {
+        let tokens = self.history_tokens();
+        if tokens < limit {
             return;
+        }
+        // A second pass cannot shrink what the first one left: the system prompt
+        // is immovable and the hand-off note is already a summary. Without this,
+        // a small `context_tokens` (where the system prompt alone is most of the
+        // window) spent a model call compacting before *every* turn and freed
+        // nothing each time. Wait for the history to have really grown again.
+        if let Some(after) = self.last_compact_after {
+            if tokens <= after.saturating_add(limit / 5) {
+                return;
+            }
         }
         crate::tel_info!("agent", "auto-compacting", "tokens" => self.history_tokens());
         let _ = tx.send(Event::Notice("context nearly full — compacting".into()));
@@ -4592,30 +4611,17 @@ impl Agent {
                 // Keep the recent tail of the conversation after the summary, so
                 // the agent retains its immediate working context (the last user
                 // request and the latest tool results) rather than resetting to a
-                // bare summary. Bounded by ~1/5 of the budget so we still free
-                // most of the space. Start the tail at a user turn to keep the
+                // bare summary. Start the tail at a user turn to keep the
                 // request/response structure coherent.
-                let tail_budget = (self.cfg.context_tokens / 5).max(1024);
-                let mut tail: Vec<Message> = Vec::new();
-                let mut used = 0usize;
-                for m in self.history.iter().rev() {
-                    let cost = m.approx_tokens();
-                    if used + cost > tail_budget && !tail.is_empty() {
-                        break;
-                    }
-                    used += cost;
-                    tail.push(m.clone());
-                }
-                tail.reverse();
-                // Trim leading tool/assistant messages so the tail opens on a
-                // user turn (a dangling tool result with no matching call
-                // confuses some servers).
-                while matches!(
-                    tail.first().map(|m| m.role),
-                    Some(Role::Tool) | Some(Role::Assistant)
-                ) {
-                    tail.remove(0);
-                }
+                //
+                // The bound is a share of what can actually be *sent*, not of the
+                // raw window: `context_tokens / 5` with a 1024-token floor meant
+                // that on a 4k context the tail alone was a quarter of the window
+                // and on a 2k context it was half of it, so compaction freed
+                // almost nothing and (with auto-compaction on) ran again on the
+                // very next turn. `send_budget` already excludes the system
+                // prompt, which compaction can never shrink.
+                let tail = compaction_tail(&self.history, self.send_budget() / TAIL_SHARE);
 
                 let mut new_history = vec![
                     Message::user(format!(
@@ -4635,6 +4641,7 @@ impl Agent {
                     s.rewrite(&self.history);
                 }
                 let after = self.history_tokens();
+                self.last_compact_after = Some(after);
                 let _ = tx.send(Event::Notice(format!(
                     "compacted {before} → {after} tokens"
                 )));
@@ -4902,6 +4909,41 @@ fn plan_reminder(plan: &[tools::Todo], steps_since: usize) -> Option<String> {
 /// it and sends what fits, so the only cost of keeping more is memory, and the
 /// only cost of keeping less is detail curation could have used.
 const RETAINED_WINDOWS: usize = 4;
+
+/// What share of the send budget a compaction may leave behind verbatim.
+/// A share, never an absolute floor: a floor larger than the window is what
+/// made `/compact` free ~10% on a small context.
+const TAIL_SHARE: usize = 5;
+
+/// The newest run of messages that fits in `budget`, opening on a user turn.
+///
+/// Kept verbatim after the hand-off note so the agent still has its immediate
+/// working context. Returns nothing when even the newest message does not fit,
+/// which is the case that matters: a context is usually full *because* one huge
+/// tool result landed, and keeping that one message regardless of budget — as
+/// this used to — is what made compaction free almost nothing.
+fn compaction_tail(history: &[Message], budget: usize) -> Vec<Message> {
+    let mut tail: Vec<Message> = Vec::new();
+    let mut used = 0usize;
+    for m in history.iter().rev() {
+        let cost = m.approx_tokens();
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        tail.push(m.clone());
+    }
+    tail.reverse();
+    // Open on a user turn: a dangling tool result with no matching call
+    // confuses some servers.
+    while matches!(
+        tail.first().map(|m| m.role),
+        Some(Role::Tool) | Some(Role::Assistant)
+    ) {
+        tail.remove(0);
+    }
+    tail
+}
 
 /// The first few non-blank lines of a chunk, so a ranking can be judged without
 /// opening every hit.
@@ -5247,6 +5289,62 @@ fn absorb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tail that ignores its budget is a compaction that frees nothing. The
+    /// case that matters is the common one: the context filled up *because* a
+    /// huge tool result landed, so that result is the newest message — and it
+    /// used to be kept whatever it cost.
+    #[test]
+    fn compaction_drops_a_tail_message_too_big_for_the_budget() {
+        let huge = Message::tool("call_1", "read_file", "x".repeat(40_000));
+        let history = vec![
+            Message::user("read the config and tell me what is wrong"),
+            Message::assistant("Reading it now."),
+            huge,
+        ];
+        assert!(
+            history[2].approx_tokens() > 500,
+            "the fixture must actually be oversized"
+        );
+        let tail = compaction_tail(&history, 500);
+        assert!(
+            tail.iter().all(|m| m.role != Role::Tool),
+            "the oversized tool result must not survive: {tail:?}"
+        );
+        let kept: usize = tail.iter().map(|m| m.approx_tokens()).sum();
+        assert!(kept <= 500, "the tail must fit its budget, got {kept}");
+    }
+
+    /// The whole point of the tail is the immediate working context, so when it
+    /// does fit it must be kept — and must open on a user turn, because a tool
+    /// result with no matching call confuses some servers.
+    #[test]
+    fn compaction_keeps_what_fits_and_opens_on_a_user_turn() {
+        let history = vec![
+            Message::user("first question"),
+            Message::assistant("first answer"),
+            Message::user("second question"),
+            Message::assistant("second answer"),
+        ];
+        let tail = compaction_tail(&history, 10_000);
+        assert_eq!(tail.len(), 4, "everything fits, so everything is kept");
+
+        // A budget that only reaches back into the middle of a turn: the
+        // dangling assistant message is trimmed rather than led with.
+        let tail = compaction_tail(&history, history[3].approx_tokens());
+        assert!(
+            tail.first().map(|m| m.role) != Some(Role::Assistant),
+            "a tail may not open on an assistant turn: {tail:?}"
+        );
+    }
+
+    /// An empty tail is a valid answer — better than blowing the budget — and
+    /// the caller still has the hand-off note.
+    #[test]
+    fn compaction_tail_can_be_empty() {
+        let history = vec![Message::tool("c1", "read_file", "y".repeat(8_000))];
+        assert!(compaction_tail(&history, 100).is_empty());
+    }
 
     /// The step check decides whether a turn keeps running, so an ambiguous
     /// or failed answer must fall back to the old hard stop.
