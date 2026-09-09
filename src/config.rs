@@ -343,7 +343,8 @@ pub struct Config {
     /// "auto" | "unicode" | "ascii" — glyph set for icons and box drawing.
     pub icons: String,
 
-    /// Record each session to <project>/.koda/sessions so it can be resumed.
+    /// Record each session so it can be resumed. Transcripts live in koda's
+    /// data directory, keyed by project — not in the project itself.
     pub sessions: bool,
 
     /// Carry notes and command outcomes between sessions in
@@ -352,7 +353,7 @@ pub struct Config {
 
     /// Self-improvement (Phase 1): watch how you work — the edits you make to
     /// koda's output, command outcomes — and distil deterministic, inspectable
-    /// rules into <project>/.koda/learning/rules.md. Candidates await `/learn`
+    /// rules into koda's data directory for this project. Candidates await `/learn`
     /// before they enter the prompt. Off by default while it settles. No model,
     /// no network.
     #[serde(default)]
@@ -380,7 +381,7 @@ pub struct Config {
     /// Separate from `codegraph` because it is a different cost with a different
     /// shape. The graph is symbols; this is an inverted index plus, when an
     /// embedding endpoint is available, a vector per chunk. Both are cached in
-    /// `.koda/index/` and both are off in one switch here for anyone who would
+    /// koda's data directory, and both are off in one switch here for anyone who would
     /// rather koda kept nothing on disk, or who is working on a machine where
     /// the ~1 MB and the second of first-run indexing are not worth it.
     ///
@@ -701,6 +702,94 @@ pub fn shell_flag(shell: &str) -> &'static str {
 /// Where the config lives. Honours `$XDG_CONFIG_HOME` first (Linux/macOS
 /// convention); on unix falls back to `~/.config/koda`; on Windows uses the
 /// platform config dir (`%APPDATA%\koda`) via the `dirs` crate.
+/// Where koda keeps machine-local state that is *not* part of a project:
+/// transcripts and anything else a user would be annoyed to find in `git
+/// status`. Falls back to the config directory when the platform has no data
+/// directory, which keeps a single writable location rather than none.
+pub fn data_dir() -> PathBuf {
+    dirs::data_dir()
+        .map(|d| d.join("koda"))
+        .unwrap_or_else(config_dir)
+}
+
+/// A stable, readable, filesystem-safe key for a project directory.
+///
+/// The last path component keeps it recognisable when browsing the directory
+/// by hand; the FNV-1a hex of the whole path keeps two projects with the same
+/// basename apart. FNV rather than `DefaultHasher`, whose output is explicitly
+/// not stable across Rust releases — a toolchain upgrade would silently orphan
+/// everything filed under the old name.
+pub fn project_key(root: &Path) -> String {
+    let full = root.to_string_lossy();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in full.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let base: String = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "root".into())
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .take(32)
+        .collect();
+    let base = if base.is_empty() { "root".into() } else { base };
+    format!("{base}-{h:016x}")
+}
+
+/// Where a project's machine-local state of one `kind` lives, migrating it out
+/// of the project on first use.
+///
+/// `<project>/.koda/<kind>` moves to `<data>/koda/<kind>/<project key>`. Only
+/// state that is rebuildable or private belongs here — an index is a cache, a
+/// transcript is a record of what you did. Things meant to be committed
+/// (`skills/`, `memory.md`) stay in the project, so `.koda/` appears in a repo
+/// only when it holds something worth committing.
+pub fn project_state_dir(root: &Path, kind: &str) -> PathBuf {
+    let global = data_dir().join(kind).join(project_key(root));
+    migrate_out_of_project(&root.join(".koda").join(kind), &global);
+    global
+}
+
+/// Move `legacy` to `global`, once, if it is still there.
+///
+/// A directory rename is atomic and keeps everything inside, so the common case
+/// is one syscall and cannot half-finish. Renaming across filesystems fails, so
+/// that falls back to copying the entries and deleting the originals — moved,
+/// not copied, because leaving them behind means `git status` never gets
+/// quieter, which is the entire point.
+fn migrate_out_of_project(legacy: &Path, global: &Path) {
+    if !legacy.is_dir() || global.exists() {
+        return;
+    }
+    if let Some(parent) = global.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    if std::fs::rename(legacy, global).is_ok() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(legacy) else {
+        return;
+    };
+    if std::fs::create_dir_all(global).is_err() {
+        return;
+    }
+    for e in entries.flatten() {
+        let (from, to) = (e.path(), global.join(e.file_name()));
+        if from.is_dir() || to.exists() {
+            continue; // nested state is rare; leave it rather than half-move it
+        }
+        if std::fs::copy(&from, &to).is_ok() {
+            let _ = std::fs::remove_file(&from);
+        }
+    }
+    // Only succeeds when empty, which is exactly when it should.
+    let _ = std::fs::remove_dir(legacy);
+}
+
 pub fn config_dir() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         if !x.is_empty() {
@@ -969,7 +1058,8 @@ theme = "auto"
 # Glyphs: auto (unicode when your locale is UTF-8), unicode, ascii.
 icons = "auto"
 
-# Save each conversation to <project>/.koda/sessions as JSONL so /resume works.
+# Save each conversation as JSONL so /resume works. Transcripts are kept in
+# koda's data directory, keyed by project, so they never show up in git status.
 sessions = true
 
 # Remember facts and command outcomes between sessions, in
@@ -977,7 +1067,7 @@ sessions = true
 memory = true
 
 # Self-improvement: watch how you work (edits to koda's output, command
-# outcomes) and distil inspectable rules into .koda/learning/rules.md. Review
+# outcomes) and distil inspectable rules into koda's data dir. Review
 # and accept candidates with /learn. Off by default. Fully local, no model.
 learning = false
 # Once a day, koda consolidates what it saw: candidates that keep recurring
@@ -992,7 +1082,7 @@ learning_retire_days = 30
 # imports) and expose it to the model via the `codegraph` tool.
 codegraph = true
 # Index the project for meaning-shaped search ("where is retry handled"), on top
-# of the symbol graph above. Kept in .koda/index/, which is a cache: deleting it
+# of the symbol graph above. Kept in koda's data dir, which is a cache: deleting it
 # costs a rebuild and nothing else. Off, `codegraph query="search"` is
 # unavailable and koda writes nothing there.
 codegraph_search = true
@@ -1115,6 +1205,34 @@ watch_interval_ms = 1500
 
 #[cfg(test)]
 mod tests {
+
+    /// The key must stay put across releases and tell two same-named projects
+    /// apart — everything filed under it is orphaned if it ever changes.
+    #[test]
+    fn a_project_key_is_stable_readable_and_unique() {
+        use std::path::Path;
+        let a = project_key(Path::new("/Users/x/code/koda"));
+        let b = project_key(Path::new("/Users/x/other/koda"));
+
+        assert!(a.starts_with("koda-"), "keeps the basename: {a}");
+        assert_ne!(a, b, "same basename, different path, different key");
+        assert_eq!(a, project_key(Path::new("/Users/x/code/koda")), "stable");
+
+        // Pinned: a change here strands every existing session directory.
+        assert_eq!(a, "koda-903cfbfbdb0b1511");
+
+        // Awkward paths still produce a usable directory name.
+        for p in ["/", "/a b/c!d", "/tmp/☃"] {
+            let k = project_key(Path::new(p));
+            assert!(!k.is_empty());
+            assert!(
+                k.chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+                "{p} -> {k} is not filesystem-safe"
+            );
+        }
+    }
+
     use super::*;
 
     /// TLS trust is per-endpoint on purpose: relaxing it for an internal host

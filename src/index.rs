@@ -1150,7 +1150,7 @@ pub fn build(root: &Path) -> Index {
 /// are deliberately not stored, so a hit always shows the file as it is now
 /// rather than as it was when indexed.
 pub fn cache_dir(root: &Path) -> std::path::PathBuf {
-    root.join(".koda").join("index")
+    crate::config::project_state_dir(root, "index")
 }
 
 /// Bumped whenever the on-disk layout, the tokeniser, or the ranking's inputs

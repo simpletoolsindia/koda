@@ -9,16 +9,17 @@ tests/visual/shots/
 tests/visual/test-results/
 tests/visual/playwright-report/
 
-# Local session data (per-project, not source)
+# koda keeps transcripts, learned rules and the search index in its own data
+# directory now, keyed by project, so none of them land here any more. These
+# entries stay for checkouts that still have the old in-project directories —
+# koda moves them out on first run, and these keep them quiet until it does.
 .koda/sessions/
-.koda/memory.md
-# Learned-rule candidates are mined from however this checkout is used; they are
-# local state, not part of the project.
 .koda/learning/
-# The search index. A cache, derived entirely from the working tree, and
-# machine-specific (it records each file's mtime): committing it would only ever
-# be a merge conflict that resolves to a rebuild.
 .koda/index/
+# Project memory does still live here. It is knowledge about this project, so
+# it is a reasonable thing to commit; ignored by default because it is written
+# by the agent rather than by a person.
+.koda/memory.md
 
 # Built docs-site output
 docs-site/dist/

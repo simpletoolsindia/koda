@@ -141,7 +141,7 @@ impl Row {
             Row::Mouse => "on: wheel scrolls and drag selects · off: terminal does both",
             Row::Vision => "auto (guess from name) · on · off — set on behind a router",
             Row::Sandbox => "confine file tools to the workspace",
-            Row::Sessions => "record conversations to .koda/sessions",
+            Row::Sessions => "record conversations (kept outside the project)",
             Row::Memory => "carry facts between sessions in .koda/memory.md",
             Row::WebSearch => "1) enable, then pick a backend below",
             Row::SearchBackend => "2) duckduckgo (no setup) or searxng",

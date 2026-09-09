@@ -113,20 +113,23 @@ rm -rf "$WS"
 echo "== sessions are saved and can be resumed =="
 run_case native -p -y "replace hello with goodbye in demo.txt"
 check "exit status 0" "$RC"
-ls "$WS"/.koda/sessions/*.jsonl >/dev/null 2>&1; check "session file written" $?
-head -1 "$WS"/.koda/sessions/*.jsonl | grep -q '"t":"header"'; check "header line first" $?
-grep -q '"role":"user"' "$WS"/.koda/sessions/*.jsonl; check "user message saved" $?
-grep -q '"role":"tool"' "$WS"/.koda/sessions/*.jsonl; check "tool results saved" $?
-SESS=$(ls "$WS"/.koda/sessions/*.jsonl | head -1)
+# Transcripts live in koda's data directory now, keyed by project, so ask koda
+# where rather than hardcoding a path the product no longer uses.
+SDIR=$("$BIN" -C "$WS" config --paths | awk '/^sessions /{ $1=""; sub(/^ +/,""); print }')
+ls "$SDIR"/*.jsonl >/dev/null 2>&1; check "session file written" $?
+head -1 "$SDIR"/*.jsonl | grep -q '"t":"header"'; check "header line first" $?
+grep -q '"role":"user"' "$SDIR"/*.jsonl; check "user message saved" $?
+grep -q '"role":"tool"' "$SDIR"/*.jsonl; check "tool results saved" $?
+SESS=$(ls "$SDIR"/*.jsonl | head -1)
 BEFORE=$(wc -l < "$SESS")
 # Resuming must extend the same file, not start a new one.
 start_server native
 "$BIN" -C "$WS" -u "http://127.0.0.1:$PORT/v1" -m mock-coder --continue -y -p "again" \
   >/dev/null 2>/tmp/koda-err.log
 stop_server
-COUNT=$(ls "$WS"/.koda/sessions/*.jsonl | wc -l | tr -d ' ')
+COUNT=$(ls "$SDIR"/*.jsonl | wc -l | tr -d ' ')
 [ "$COUNT" = "1" ]; check "resume reuses one file" $?
-AFTER=$(wc -l < "$(ls "$WS"/.koda/sessions/*.jsonl | head -1)")
+AFTER=$(wc -l < "$(ls "$SDIR"/*.jsonl | head -1)")
 [ "$AFTER" -gt "$BEFORE" ]; check "resume appended to it" $?
 grep -q "resumed" /tmp/koda-err.log; check "resume reported" $?
 rm -rf "$WS"

@@ -61,7 +61,20 @@ impl Summary {
     }
 }
 
+/// Where this project's transcripts live: under koda's own data directory,
+/// keyed by project, **not** inside the project.
+///
+/// They used to sit in `<project>/.koda/sessions`, which put a growing pile of
+/// untracked files in every repo koda was ever run in — visible in `git
+/// status`, easy to commit by accident, and one more thing to clean up. A
+/// transcript is a record of what you did, not a part of the project.
 pub fn dir(root: &Path) -> PathBuf {
+    crate::config::project_state_dir(root, "sessions")
+}
+
+/// The pre-move location, kept only so the migration test can name it.
+#[cfg(test)]
+fn legacy_dir(root: &Path) -> PathBuf {
     root.join(".koda").join("sessions")
 }
 
@@ -547,6 +560,10 @@ mod tests {
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("koda-session-{tag}"));
         std::fs::remove_dir_all(&d).ok();
+        // Transcripts live outside the project now, so clearing the project
+        // directory no longer clears them: without this the fixtures pile up
+        // across runs and every count assertion drifts.
+        std::fs::remove_dir_all(dir(&d)).ok();
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -641,6 +658,55 @@ mod tests {
         assert_eq!(ago(now().saturating_sub(120)), "2m ago");
         assert_eq!(ago(now().saturating_sub(7200)), "2h ago");
         assert_eq!(ago(now().saturating_sub(200_000)), "2d ago");
+    }
+
+    /// Transcripts left in `<project>/.koda/sessions` are moved out, and the
+    /// empty directory goes with them — the whole point is that `git status`
+    /// stops mentioning it.
+    #[test]
+    fn transcripts_move_out_of_the_project() {
+        let root = std::env::temp_dir().join(format!("koda-mig-{}", std::process::id()));
+        let legacy = legacy_dir(&root);
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        let header = Header {
+            id: "old-1".into(),
+            started: 1,
+            model: "m".into(),
+            endpoint: "e".into(),
+            cwd: root.display().to_string(),
+            name: Some("work worth keeping".into()),
+        };
+        let body = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&Record::Header(header)).unwrap(),
+            serde_json::to_string(&Record::Msg(Message::user("an old prompt"))).unwrap(),
+        );
+        std::fs::write(legacy.join("old-1.jsonl"), &body).unwrap();
+
+        let global = dir(&root);
+        assert!(
+            global.join("old-1.jsonl").is_file(),
+            "the transcript should have moved to {}",
+            global.display()
+        );
+        assert!(
+            !legacy.join("old-1.jsonl").exists(),
+            "and should not still be in the project"
+        );
+        assert!(
+            !legacy.exists(),
+            "the empty directory should go too — that is the point"
+        );
+
+        // It is readable, named, and listed from the new home.
+        let (h, msgs) = read(&global.join("old-1.jsonl")).unwrap();
+        assert_eq!(h.name.as_deref(), Some("work worth keeping"));
+        assert_eq!(msgs.len(), 1);
+        assert!(list(&root).iter().any(|s| s.header.id == "old-1"));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&global).ok();
     }
 
     /// A name is written into the header, survives a reopen, shows up in the

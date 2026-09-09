@@ -111,6 +111,10 @@ struct Cli {
     #[arg(short = 'c', long = "continue", visible_alias = "resume")]
     resume: bool,
 
+    /// Name this conversation, so /resume shows it instead of the first prompt.
+    #[arg(long)]
+    name: Option<String>,
+
     #[command(subcommand)]
     cmd: Option<Sub>,
 }
@@ -130,6 +134,9 @@ enum Sub {
         /// Write a starter config file if none exists.
         #[arg(long)]
         init: bool,
+        /// Print where koda keeps this project's files instead of the config.
+        #[arg(long)]
+        paths: bool,
     },
     /// Manage the browse tool's engine, which koda ships and installs itself.
     Browser {
@@ -218,7 +225,12 @@ async fn async_main(cli: Cli) -> Result<()> {
     match cli.cmd {
         Some(Sub::Models) => return list_models(&cfg).await,
         Some(Sub::Skills { init }) => return show_skills(&root, init),
-        Some(Sub::Config { init }) => return show_config(&cfg, init),
+        Some(Sub::Config { init, paths }) => {
+            if paths {
+                return show_paths(&root);
+            }
+            return show_config(&cfg, init);
+        }
         Some(Sub::Browser { cmd }) => return browser_cmd(&cfg, cmd).await,
         None => {}
     }
@@ -278,10 +290,10 @@ async fn async_main(cli: Cli) -> Result<()> {
         if prompt.trim().is_empty() {
             bail!("-p needs a prompt: koda -p \"your question\"");
         }
-        return headless(cfg, root, prompt, resume).await;
+        return headless(cfg, root, prompt, resume, cli.name).await;
     }
 
-    tui::run(cfg, root, Some(prompt), resume).await
+    tui::run(cfg, root, Some(prompt), resume, cli.name).await
 }
 
 async fn resolve_model(cfg: &Config) -> Result<String> {
@@ -372,6 +384,32 @@ fn show_skills(root: &Path, init: bool) -> Result<()> {
     Ok(())
 }
 
+/// Where this project's files live. Transcripts, the index and learned rules
+/// moved out of `<project>/.koda` into koda's data directory, so "where did my
+/// sessions go?" needs an answer that is not "read the source".
+fn show_paths(root: &Path) -> Result<()> {
+    println!("project    {}", root.display());
+    println!("key        {}", config::project_key(root));
+    println!("config     {}", config::config_path().display());
+    println!("sessions   {}", session::dir(root).display());
+    println!(
+        "index      {}",
+        config::project_state_dir(root, "index").display()
+    );
+    println!(
+        "learning   {}",
+        config::project_state_dir(root, "learning").display()
+    );
+    println!();
+    println!("in the project (they are project content, and yours to commit):");
+    println!("  skills   {}", root.join(".koda").join("skills").display());
+    println!(
+        "  memory   {}",
+        root.join(".koda").join("memory.md").display()
+    );
+    Ok(())
+}
+
 fn show_config(cfg: &Config, init: bool) -> Result<()> {
     if init {
         let path = Config::write_default_file()?;
@@ -388,11 +426,15 @@ async fn headless(
     root: PathBuf,
     prompt: String,
     resume: Option<session::Summary>,
+    name: Option<String>,
 ) -> Result<()> {
     let cancel = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
     let auto = cfg.auto_approve;
     let mut agent = Agent::new(cfg, root, cancel, notify)?;
+    if let Some(name) = name {
+        agent.set_session_name(name);
+    }
     if let Some(s) = resume {
         match session::read(&s.path) {
             Ok((_, messages)) => {

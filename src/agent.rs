@@ -651,6 +651,13 @@ impl Agent {
         }
     }
 
+    /// Name the session before it exists, for `--name` at launch. The file is
+    /// written on the first turn and picks the name up then.
+    pub fn set_session_name(&mut self, name: String) {
+        let name = name.trim().to_string();
+        self.pending_name = (!name.is_empty()).then_some(name);
+    }
+
     /// Re-read skill files from disk. Cheap, so `/skills` can hot-reload.
     pub fn reload_skills(&mut self) -> usize {
         self.skills = crate::skills::load(&self.ctx.root);

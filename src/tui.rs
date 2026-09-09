@@ -5305,10 +5305,14 @@ pub async fn run(
     root: PathBuf,
     seed: Option<String>,
     resume: Option<Summary>,
+    name: Option<String>,
 ) -> Result<()> {
     let cancel = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
     let mut agent = Agent::new(cfg.clone(), root.clone(), cancel.clone(), notify.clone())?;
+    if let Some(name) = name {
+        agent.set_session_name(name);
+    }
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Event>();

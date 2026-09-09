@@ -6,8 +6,8 @@
 //! model, nothing leaves the machine, and every artifact is a plain file you can
 //! read, edit, or delete:
 //!
-//! - `.koda/learning/observations.jsonl` — an append-only log of raw signals.
-//! - `.koda/learning/rules.md` — candidate and accepted rules. You promote a
+//! - `observations.jsonl` — an append-only log of raw signals.
+//! - `rules.md` — candidate and accepted rules. You promote a
 //!   candidate to accepted with `/learn`; only accepted rules enter the prompt.
 //!
 //! The design mirrors `memory.rs`: narrow scope, verifiable facts, no hidden
@@ -93,7 +93,7 @@ impl DailyReport {
             parts.push(format!("retired {} stale one(s)", self.retired.len()));
         }
         Some(format!(
-            "daily learning: {} — see /learn or .koda/learning/journal.md",
+            "daily learning: {} — see /learn for the journal",
             parts.join(", ")
         ))
     }
@@ -165,7 +165,7 @@ fn obsolete_generic_idiom(key: &str) -> bool {
 }
 
 fn dir(root: &Path) -> PathBuf {
-    root.join(".koda").join("learning")
+    crate::config::project_state_dir(root, "learning")
 }
 fn rules_path(root: &Path) -> PathBuf {
     dir(root).join("rules.md")
@@ -1495,6 +1495,9 @@ mod tests {
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("koda-learn-{tag}"));
         std::fs::remove_dir_all(&d).ok();
+        // Learning state lives outside the project now, so clearing the project
+        // no longer clears it: without this a fixture survives into the next run.
+        std::fs::remove_dir_all(dir(&d)).ok();
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -1563,8 +1566,13 @@ mod tests {
     /// observations, which one busy afternoon produces on its own.
     #[test]
     fn a_rule_is_promoted_only_after_several_distinct_days() {
-        let dir = std::env::temp_dir().join("koda-daily-test");
+        // Process-unique, like the other fixtures here. A fixed name was fine
+        // while this state lived inside the project and was deleted with it;
+        // now it lives in koda's data directory and outlives the test run, so
+        // a shared name means yesterday's `last-pass` marker fails today's run.
+        let dir = std::env::temp_dir().join(format!("koda-daily-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(super::dir(&dir)).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let mut l = Learning::load(&dir);
         // Evidence that a habit exists: the same command failing, its fix
@@ -1614,7 +1622,7 @@ mod tests {
             l.brief()
         );
         // The journal records it in a form a person can read.
-        let journal = std::fs::read_to_string(dir.join(".koda/learning/journal.md")).unwrap();
+        let journal = std::fs::read_to_string(journal_path(&dir)).unwrap();
         assert!(journal.contains("learned:"), "{journal}");
 
         // Going quiet retires it — back to a candidate, never deleted. "Quiet"
