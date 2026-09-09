@@ -1,0 +1,47 @@
+# Labelled retrieval queries for `codegraph query="search"`, run against koda's
+# own source by `index::tests::retrieval_quality_holds`.
+#
+# Format:  <query> TAB <path>[,<path>...]
+# A hit counts as correct when its path ends with any of the listed paths. The
+# labels are the file a competent answer has to reach, not the only file that
+# mentions the words -- that distinction is the whole point of the measurement.
+#
+# Reported: Recall@10 (did a correct file appear at all) and MRR@10 (how high).
+# Adding a query is cheap and welcome; changing a label to make a run pass is
+# how this harness stops being evidence.
+
+where is retry handled	src/llm.rs
+exponential backoff between attempts	src/llm.rs
+how are transient errors told apart from permanent ones	src/llm.rs
+parsing a streamed server-sent event	src/llm.rs
+how is the context window trimmed	src/context.rs,src/agent.rs
+how many tokens does a message cost	src/context.rs
+dropping the oldest turns when the budget is exceeded	src/context.rs
+how does approval work before running a command	src/agent.rs,src/tools.rs
+where do we write the session file	src/session.rs
+resume an earlier conversation	src/session.rs
+undo a file write	src/agent.rs
+confine file tools to the workspace directory	src/tools.rs
+reading a spreadsheet	src/tools.rs
+extracting text from an image with ocr	src/tools.rs,src/agent.rs
+running a shell command with a timeout	src/tools.rs
+how is markdown rendered to the terminal	src/md.rs
+syntax highlighting inside a fenced code block	src/md.rs
+where does the colour palette come from	src/theme.rs
+spinner while the model is thinking	src/anim.rs
+scrolling the transcript with the mouse wheel	src/tui.rs
+the settings page rows	src/settings.rs
+where is the config file loaded from	src/config.rs
+carrying facts between sessions	src/memory.rs
+promoting a learned rule after several days	src/learning.rs
+watching files for trigger comments	src/watch.rs
+fuzzy matching a filename	src/fuzzy.rs
+serving the browser ui over http	src/webui.rs,src/web.rs
+fetching a web page as text	src/web.rs,src/tools.rs
+setting a breakpoint in the debugger	src/dap.rs
+discovering skills on disk	src/skills.rs
+how the system prompt is assembled	src/prompt.rs
+finding definitions per language	src/graph.rs
+ranking chunks by relevance	src/index.rs
+recording a step for the trace view	src/trace.rs
+which files import a module	src/graph.rs

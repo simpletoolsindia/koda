@@ -43,6 +43,7 @@ pub enum Row {
     Ocr,
     OcrModel,
     Codegraph,
+    CodeSearch,
     Debug,
     WebUi,
     UiDetail,
@@ -53,7 +54,7 @@ pub enum Row {
 
 impl Row {
     /// Display order, top to bottom.
-    pub const ALL: [Row; 32] = [
+    pub const ALL: [Row; 33] = [
         Row::Provider,
         Row::InsecureTls,
         Row::Mode,
@@ -80,6 +81,7 @@ impl Row {
         Row::Ocr,
         Row::OcrModel,
         Row::Codegraph,
+        Row::CodeSearch,
         Row::Debug,
         Row::WebUi,
         Row::UiDetail,
@@ -116,6 +118,7 @@ impl Row {
             Row::Ocr => "image ocr",
             Row::OcrModel => "ocr vision model",
             Row::Codegraph => "code graph",
+            Row::CodeSearch => "code search",
             Row::Debug => "debug capture",
             Row::WebUi => "web ui",
             Row::UiDetail => "ui detail",
@@ -157,6 +160,7 @@ impl Row {
                 "enter a vision model to try before tesseract · empty = tesseract only"
             }
             Row::Codegraph => "scan the project into a symbol graph on open",
+            Row::CodeSearch => "index the project so questions find code · cached in .koda/index",
             Row::Debug => "dump raw requests/responses to the debug dir",
             Row::WebUi => "serve the React log/debug UI on 127.0.0.1 (restart to apply)",
             Row::UiDetail => "web ui log detail: simple · medium · high",
@@ -351,6 +355,7 @@ impl Settings {
             Row::BrowserSession => self.cfg.browser_session = !self.cfg.browser_session,
             Row::Ocr => self.cfg.ocr = !self.cfg.ocr,
             Row::Codegraph => self.cfg.codegraph = !self.cfg.codegraph,
+            Row::CodeSearch => self.cfg.codegraph_search = !self.cfg.codegraph_search,
             Row::Debug => {
                 self.cfg.debug = !self.cfg.debug;
                 crate::debug::set_enabled(self.cfg.debug);
@@ -521,6 +526,7 @@ impl Settings {
                 }
             }
             Row::Codegraph => on(self.cfg.codegraph),
+            Row::CodeSearch => on(self.cfg.codegraph_search),
             Row::Debug => on(self.cfg.debug),
             Row::WebUi => {
                 if self.cfg.web_ui {

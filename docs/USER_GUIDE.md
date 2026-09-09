@@ -164,6 +164,7 @@ its default:
 | `sessions` | `true` | Record each session to `<project>/.koda/sessions`. |
 | `memory` | `true` | Carry notes and command outcomes in `<project>/.koda/memory.md`. |
 | `codegraph` | `true` | Scan the project into a symbol graph on open. |
+| `codegraph_search` | `true` | Index the project for meaning-shaped search (`codegraph query="search"`), cached in `.koda/index/`. |
 | `codegraph_refresh_ms` | `15000` | Re-index files changed outside koda this often; 0 disables the sweep. |
 | `web_search` | `false` | Allow the `web_search` tool. |
 | `searx_url` | `""` | Base URL of a SearXNG instance with JSON output enabled. |
@@ -919,6 +920,47 @@ tool so it can ask where something lives instead of grepping. Three questions:
 
 It is regex-based rather than a full parser: accurate enough to point at the
 right file, which the model then reads properly.
+
+### Searching by meaning
+
+The graph answers questions that name a symbol. `codegraph query="search"`
+answers the ones that do not — *where is retry handled*, *how is the context
+window trimmed* — by ranking the project's own definitions against the question.
+It runs on three signals at once and fuses them:
+
+- **Words.** BM25F over each definition and its doc comment, with the file path,
+  the symbol name and the prose weighted above the body. Identifiers are indexed
+  whole *and* split, so `stream_with_retry` is found by its own name and by
+  "retry".
+- **Structure.** A second, much thinner index over definition names and paths
+  only, which answers "which file *is* this about" rather than "which file
+  mentions it". It abstains when the question names nothing it knows.
+- **Meaning**, when available. If the endpoint serving your chat model also
+  serves an embedding model, koda finds it by itself and embeds each chunk in
+  the background. Nothing to configure; `embed_model` overrides the choice.
+
+Everything except the last works with no server, no network and no
+configuration. Set `codegraph_search = false`, or turn **code search** off on
+the `/settings` page, to disable all of it.
+
+### The index cache
+
+The index lives in `<project>/.koda/index/` — about 1 MB for a project this
+size, or 3 MB with embeddings. It is a **cache**: everything in it is derived
+from your working tree, deleting it costs one rebuild and nothing else, and
+chunk *bodies* are deliberately not stored, so a result always shows the file as
+it is now.
+
+Why it exists: building the index is well under a second, but embedding a
+project can take minutes on a machine without a GPU, and paying that on every
+start is the difference between a feature you leave on and one you turn off.
+Cached, a second session is ready in milliseconds with its embeddings intact.
+
+It stays current on its own. Files koda writes are re-indexed immediately; files
+changed outside koda — your editor, `git checkout`, a code generator — are
+caught by the same `codegraph_refresh_ms` sweep the graph uses, and only the
+files that actually changed are read. Turn code search off and the directory is
+removed on the next start.
 
 ---
 

@@ -373,6 +373,21 @@ pub struct Config {
     /// Scan the project into a symbol graph on open, so the model can ask where
     /// something lives instead of grepping for it.
     pub codegraph: bool,
+    /// Build a searchable index of the project alongside the symbol graph, so
+    /// `codegraph query="search"` can answer a question that names no symbol —
+    /// "where is retry handled" rather than "where is `stream_with_retry`".
+    ///
+    /// Separate from `codegraph` because it is a different cost with a different
+    /// shape. The graph is symbols; this is an inverted index plus, when an
+    /// embedding endpoint is available, a vector per chunk. Both are cached in
+    /// `.koda/index/` and both are off in one switch here for anyone who would
+    /// rather koda kept nothing on disk, or who is working on a machine where
+    /// the ~1 MB and the second of first-run indexing are not worth it.
+    ///
+    /// Turning it off is safe at any moment: `search` and `find_files` still
+    /// work, and the cache is deleted on the next start.
+    #[serde(default = "default_true")]
+    pub codegraph_search: bool,
     /// How often (ms) to sweep the working tree and re-index what changed
     /// outside koda — your editor, `git checkout`, a build step. 0 disables the
     /// sweep; koda's own writes are re-indexed either way. The sweep backs off
@@ -611,6 +626,7 @@ impl Default for Config {
             learning_promote_days: 3,
             learning_retire_days: 30,
             codegraph: true,
+            codegraph_search: true,
             codegraph_refresh_ms: 15_000,
             web_search: false,
             search_backend: default_backend(),
@@ -975,6 +991,11 @@ learning_retire_days = 30
 # Scan the project on open into a symbol graph (definitions, references,
 # imports) and expose it to the model via the `codegraph` tool.
 codegraph = true
+# Index the project for meaning-shaped search ("where is retry handled"), on top
+# of the symbol graph above. Kept in .koda/index/, which is a cache: deleting it
+# costs a rebuild and nothing else. Off, `codegraph query="search"` is
+# unavailable and koda writes nothing there.
+codegraph_search = true
 # Re-index files changed outside koda (your editor, git checkout, codegen) every
 # this many ms. 0 turns the sweep off. Only changed files are read, and the
 # interval backs off automatically on a large tree.
@@ -1295,6 +1316,38 @@ mod tests {
     #[test]
     fn default_shell_is_nonempty() {
         assert!(!default_shell().is_empty());
+    }
+
+    /// A config file written before `codegraph_search` existed must keep
+    /// working, and must get the feature rather than silently losing search.
+    ///
+    /// This is the whole backward-compatibility surface of the change: one new
+    /// key in a struct every installed copy of koda deserialises on start.
+    #[test]
+    fn a_config_without_the_new_key_still_loads() {
+        let old = r#"
+model = "qwen2.5-coder"
+codegraph = true
+codegraph_refresh_ms = 15000
+sessions = true
+memory = true
+"#;
+        let cfg: Config = toml::from_str(old).expect("an older config must still parse");
+        assert!(cfg.codegraph_search, "the feature defaults on");
+        assert!(cfg.codegraph);
+        assert_eq!(cfg.codegraph_refresh_ms, 15_000);
+
+        // And an explicit `false` is honoured, so turning it off survives a
+        // restart rather than being reset by the default.
+        let off: Config =
+            toml::from_str("codegraph_search = false\n").expect("explicit off must parse");
+        assert!(!off.codegraph_search);
+
+        // A round-trip through the writer keeps it, which is what `/settings`
+        // relies on when it persists a toggle.
+        let back: Config =
+            toml::from_str(&toml::to_string(&off).expect("serialise")).expect("re-parse");
+        assert!(!back.codegraph_search);
     }
 
     /// The one key that turns hybrid search on has to survive the merge from a

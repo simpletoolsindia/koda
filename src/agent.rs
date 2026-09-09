@@ -453,6 +453,99 @@ impl Agent {
                 }
             });
         }
+        // The search index, off-thread for the same reason the graph is: a
+        // large repository must not delay the first prompt.
+        //
+        // Ordered load-then-verify-then-repair rather than build-every-time.
+        // Building is ~80 ms here and a second or two on a large tree, but the
+        // cost that actually matters is the embeddings: a corpus takes minutes
+        // to embed on a machine without a GPU, and paying that again on every
+        // start is the difference between a feature people leave on and one
+        // they turn off. Cached, a warm start is a couple of milliseconds and
+        // the vectors are already there.
+        let lexical: Arc<std::sync::RwLock<Option<crate::index::Index>>> =
+            Arc::new(std::sync::RwLock::new(None));
+        if cfg.codegraph_search {
+            let slot = lexical.clone();
+            let idx_root = root.clone();
+            let every = cfg.codegraph_refresh_ms;
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let (mut idx, how) = match crate::index::Index::load(&idx_root) {
+                    Some(cached) => (cached, "cache"),
+                    None => (crate::index::build(&idx_root), "build"),
+                };
+                // Whatever the source, the tree is swept once before the index
+                // is published: a cache is only ever as good as its last save,
+                // and an index that is confidently wrong about a file the user
+                // edited between sessions is worse than one that is missing.
+                let changed = idx.refresh(&idx_root);
+                crate::tel_info!(
+                    "index",
+                    "search index ready",
+                    "from" => how,
+                    "chunks" => idx.chunks.len(),
+                    "embedded" => idx.vectors.as_ref().map(|v| v.rows()).unwrap_or(0),
+                    "changed" => changed,
+                    "ms" => t0.elapsed().as_millis()
+                );
+                // Published before it is saved. The index is usable the moment
+                // it exists, and writing a megabyte to disk first would hold a
+                // search that is already answerable behind an errand.
+                let write_back = changed > 0 || how == "build";
+                if let Ok(mut w) = slot.write() {
+                    *w = Some(idx);
+                }
+                // Written back only when there is something new to write. A
+                // cache that was already correct does not need rewriting, and on
+                // a laptop or a synced folder an unnecessary file write every
+                // start is a cost the user can see.
+                if write_back {
+                    if let Ok(w) = slot.read() {
+                        if let Some(idx) = w.as_ref() {
+                            let _ = idx.save(&idx_root);
+                        }
+                    }
+                }
+                if every == 0 {
+                    return;
+                }
+                // Then keep it current, on the same sweep the graph uses and
+                // with the same back-off: never spend more than ~5% of the time
+                // walking.
+                let base = std::time::Duration::from_millis(every.max(1_000));
+                loop {
+                    std::thread::sleep(base);
+                    let t = std::time::Instant::now();
+                    let changed = {
+                        let Ok(mut w) = slot.write() else { return };
+                        let Some(idx) = w.as_mut() else { continue };
+                        idx.refresh(&idx_root)
+                    };
+                    // Saved only when something moved. A save is milliseconds,
+                    // but a write every fifteen seconds to a file nobody
+                    // changed is a thing users notice on a laptop battery and a
+                    // synced folder.
+                    if changed > 0 {
+                        if let Ok(w) = slot.read() {
+                            if let Some(idx) = w.as_ref() {
+                                let _ = idx.save(&idx_root);
+                            }
+                        }
+                    }
+                    let cost = t.elapsed() * 20;
+                    if cost > base {
+                        std::thread::sleep(cost - base);
+                    }
+                }
+            });
+        } else {
+            // Off means off: the cache is this feature's only footprint, and
+            // leaving it behind after the user turned the feature off would be
+            // a file they did not ask for and cannot explain.
+            let _ = std::fs::remove_dir_all(crate::index::cache_dir(&root));
+        }
+
         let system = prompt::build_with_skills(
             &cfg,
             &root,
@@ -507,7 +600,7 @@ impl Agent {
             steps_since_plan: 0,
             reads_this_turn: 0,
             hinted: std::collections::HashSet::new(),
-            lexical: Arc::default(),
+            lexical,
             embed_failed: Arc::default(),
             embed_model: Arc::default(),
             loaded_groups: std::collections::HashSet::new(),
@@ -594,9 +687,12 @@ impl Agent {
             steps_since_plan: 0,
             reads_this_turn: 0,
             hinted: std::collections::HashSet::new(),
-            lexical: Arc::default(),
-            embed_failed: Arc::default(),
-            embed_model: Arc::default(),
+            // Shared with the parent, like the graph: a subagent that rebuilt
+            // the index would pay for it twice and, with embeddings, pay
+            // minutes for it.
+            lexical: self.lexical.clone(),
+            embed_failed: self.embed_failed.clone(),
+            embed_model: self.embed_model.clone(),
             loaded_groups: std::collections::HashSet::new(),
             no_reasoning: false,
             starved_of_output: false,
@@ -2360,16 +2456,32 @@ impl Agent {
         // Keep the code graph current without a full rescan: re-index just the
         // file koda changed. Cheap (one file), so codegraph answers stay fresh
         // as the agent works.
-        if matches!(name.as_str(), "write_file" | "edit_file") && outcome.ok && self.cfg.codegraph {
+        if matches!(name.as_str(), "write_file" | "edit_file")
+            && outcome.ok
+            && (self.cfg.codegraph || self.cfg.codegraph_search)
+        {
             if let Some(p) = args_for_memory.get("path").and_then(|c| c.as_str()) {
                 let abs = if std::path::Path::new(p).is_absolute() {
                     std::path::PathBuf::from(p)
                 } else {
                     self.ctx.root.join(p)
                 };
-                if let Ok(mut guard) = self.graph.write() {
-                    if let Some(g) = guard.as_mut() {
-                        g.update_file(&self.ctx.root, &abs);
+                if self.cfg.codegraph {
+                    if let Ok(mut guard) = self.graph.write() {
+                        if let Some(g) = guard.as_mut() {
+                            g.update_file(&self.ctx.root, &abs);
+                        }
+                    }
+                }
+                // And the search index beside it. Without this, a file the
+                // model just wrote is findable by `search` and invisible to
+                // `codegraph query="search"` until the next sweep — the kind of
+                // inconsistency that reads as the tool being broken.
+                if self.cfg.codegraph_search {
+                    if let Ok(mut guard) = self.lexical.write() {
+                        if let Some(idx) = guard.as_mut() {
+                            idx.update_file(&self.ctx.root, &abs);
+                        }
                     }
                 }
             }
@@ -3143,7 +3255,10 @@ impl Agent {
     /// fused in degraded. A hybrid ranking is only as good as its worst input,
     /// so half-working vectors are worse than none.
     fn spawn_embedding_fill(&self, model: String) {
-        if model.is_empty() || self.embed_failed.load(Ordering::Relaxed) {
+        if model.is_empty()
+            || !self.cfg.codegraph_search
+            || self.embed_failed.load(Ordering::Relaxed)
+        {
             return;
         }
         let slot = self.lexical.clone();
@@ -3151,19 +3266,52 @@ impl Agent {
         let client = self.client.clone();
         let root = self.ctx.root.clone();
         tokio::spawn(async move {
-            let chunks = {
-                let Ok(guard) = slot.read() else { return };
-                match guard.as_ref() {
-                    Some(idx) if idx.vectors.is_none() => idx.chunks.clone(),
-                    _ => return,
+            // What still needs embedding, and enough of each chunk's identity to
+            // notice later that it is no longer the same chunk. Embedding a
+            // corpus takes minutes on a CPU, and the tree keeps moving while it
+            // runs; a row written back against a recycled id would be a wrong
+            // answer with no symptom.
+            let job: Vec<(usize, String, usize)> = {
+                let Ok(mut guard) = slot.write() else { return };
+                let Some(idx) = guard.as_mut() else { return };
+                // A different model invalidates the vectors and nothing else.
+                if idx.vectors.as_ref().is_some_and(|v| v.model != model) {
+                    crate::tel_info!("index", "embedding model changed, vectors dropped");
+                    idx.vectors = None;
                 }
+                let want: Vec<usize> = match idx.vectors {
+                    Some(_) => idx.unembedded(),
+                    None => (0..idx.chunks.len()).collect(),
+                };
+                want.into_iter()
+                    .map(|c| (c, idx.chunks[c].path.clone(), idx.chunks[c].start))
+                    .collect()
             };
-            let mut rows: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
-            for batch in chunks.chunks(crate::index::EMBED_BATCH) {
-                let texts: Vec<String> = batch
-                    .iter()
-                    .map(|c| crate::index::embed_text(&root, c).unwrap_or_default())
-                    .collect();
+            if job.is_empty() {
+                return;
+            }
+            let first_fill = job.len()
+                == slot
+                    .read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|i| i.chunks.len()))
+                    .unwrap_or(0);
+
+            let mut rows: Vec<Vec<f32>> = Vec::with_capacity(job.len());
+            for batch in job.chunks(crate::index::EMBED_BATCH) {
+                let texts: Vec<String> = {
+                    let Ok(guard) = slot.read() else { return };
+                    let Some(idx) = guard.as_ref() else { return };
+                    batch
+                        .iter()
+                        .map(|(c, _, _)| {
+                            idx.chunks
+                                .get(*c)
+                                .and_then(|ch| crate::index::embed_text(&root, ch))
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                };
                 match client.embeddings(&model, &texts).await {
                     Ok(mut got) if got.len() == texts.len() => rows.append(&mut got),
                     Ok(_) => {
@@ -3178,19 +3326,55 @@ impl Agent {
                     }
                 }
             }
+
             let Ok(mut guard) = slot.write() else { return };
             let Some(idx) = guard.as_mut() else { return };
-            match crate::index::attach_vectors(idx, &model, rows) {
-                Ok(()) => crate::tel_info!(
-                    "index",
-                    "vectors ready",
-                    "chunks" => idx.chunks.len(),
-                    "model" => model
-                ),
-                Err(why) => {
-                    crate::tel_warn!("index", "vectors rejected", "why" => why);
-                    failed.store(true, Ordering::Relaxed);
+            if first_fill && idx.vectors.is_none() && rows.len() == idx.chunks.len() {
+                // The whole corpus in one go: keep the all-or-nothing path, which
+                // refuses a set that does not cover it rather than ranking an
+                // embedded half above the rest.
+                match crate::index::attach_vectors(idx, &model, rows) {
+                    Ok(()) => crate::tel_info!(
+                        "index",
+                        "vectors ready",
+                        "chunks" => idx.chunks.len(),
+                        "model" => model.clone()
+                    ),
+                    Err(why) => {
+                        crate::tel_warn!("index", "vectors rejected", "why" => why);
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                 }
+            } else {
+                // A top-up. Each row is written back only if its chunk is still
+                // the same chunk — the tree may have moved under us.
+                let Some(v) = idx.vectors.as_mut() else {
+                    return;
+                };
+                let mut applied = 0usize;
+                for ((cid, path, start), row) in job.iter().zip(&rows) {
+                    let still = idx
+                        .chunks
+                        .get(*cid)
+                        .is_some_and(|c| c.path == *path && c.start == *start);
+                    if still {
+                        v.upsert(*cid as u32, row);
+                        applied += 1;
+                    }
+                }
+                crate::tel_info!(
+                    "index",
+                    "vectors topped up",
+                    "applied" => applied,
+                    "asked" => job.len()
+                );
+            }
+            // Persist immediately. This is the expensive artefact — minutes of
+            // a CPU-only endpoint's time — and the next session should never
+            // have to earn it again.
+            if let Err(e) = idx.save(&root) {
+                crate::tel_warn!("index", "index cache not written", "detail" => e.to_string());
             }
         });
     }
@@ -3202,6 +3386,15 @@ impl Agent {
     /// model decides what to `read_file` from here, and a page of full bodies
     /// would spend the context this tool exists to save.
     async fn lexical_search(&self, text: &str, k: usize) -> String {
+        if !self.cfg.codegraph_search {
+            return "ERROR: project search is off (codegraph_search = false). Use `search` for \
+                    an exact string, or turn it on in /settings."
+                .into();
+        }
+        // Normally the startup thread has already published an index and this
+        // does nothing. It still exists for the case where the first search
+        // arrives before that finished — a fresh clone, a cold disk — where
+        // waiting for the real thing beats answering from nothing.
         if self.lexical.read().map(|i| i.is_none()).unwrap_or(true) {
             let slot = self.lexical.clone();
             let root = self.ctx.root.clone();
@@ -3209,7 +3402,14 @@ impl Agent {
                 if slot.read().map(|i| i.is_some()).unwrap_or(false) {
                     return;
                 }
-                let idx = crate::index::build(&root);
+                let idx = match crate::index::Index::load(&root) {
+                    Some(mut cached) => {
+                        cached.refresh(&root);
+                        cached
+                    }
+                    None => crate::index::build(&root),
+                };
+                let _ = idx.save(&root);
                 let _ = slot.write().map(|mut w| *w = Some(idx));
             })
             .await;
@@ -5518,6 +5718,140 @@ mod tests {
             Arc::new(Notify::new()),
         )
         .unwrap()
+    }
+
+    /// The wiring, end to end: a workspace with code in it gets an index built
+    /// on a background thread and a cache written next to the other `.koda/`
+    /// residents, and a second agent over the same tree loads that cache
+    /// instead of building again.
+    #[tokio::test]
+    async fn the_search_index_is_built_once_and_cached() {
+        let cfg = crate::config::Config {
+            codegraph_search: true,
+            ..Default::default()
+        };
+        let agent = agent_with(cfg.clone());
+        let root = agent.ctx.root.clone();
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(
+            root.join("src/net.rs"),
+            "//! Network client.\n/// Retry a request with backoff.\npub fn stream_with_retry() {}\n",
+        )
+        .expect("write");
+
+        // The build is off-thread, so this waits for it rather than assuming.
+        let meta = crate::index::cache_dir(&root).join("meta.json");
+        let agent = {
+            drop(agent);
+            Agent::new(
+                Arc::new(cfg.clone()),
+                root.clone(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Notify::new()),
+            )
+            .expect("agent")
+        };
+        for _ in 0..200 {
+            if agent.lexical.read().map(|i| i.is_some()).unwrap_or(false) && meta.is_file() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            agent.lexical.read().map(|i| i.is_some()).unwrap_or(false),
+            "the index was never published to the agent"
+        );
+        assert!(meta.is_file(), "no cache was written to {}", meta.display());
+
+        // A second agent over the same tree reads it back and can answer.
+        let again = Agent::new(
+            Arc::new(cfg),
+            root.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+        )
+        .expect("agent");
+        for _ in 0..200 {
+            if again.lexical.read().map(|i| i.is_some()).unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let guard = again.lexical.read().expect("lock");
+        let idx = guard.as_ref().expect("index");
+        let hits = idx.hybrid_search("retry with backoff", None, 5);
+        assert!(!hits.is_empty(), "the reloaded index answers nothing");
+        assert_eq!(idx.chunks[hits[0].chunk].path, "src/net.rs");
+    }
+
+    /// Off means off: no index, no cache directory, and a `search` that says so
+    /// rather than failing in a way the model has to guess about.
+    #[tokio::test]
+    async fn code_search_off_leaves_nothing_behind() {
+        let cfg = crate::config::Config {
+            codegraph_search: false,
+            ..Default::default()
+        };
+        let agent = agent_with(cfg);
+        let root = agent.ctx.root.clone();
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(root.join("src/a.rs"), "pub fn alpha() {}\n").expect("write");
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !crate::index::cache_dir(&root).exists(),
+            "a disabled feature wrote to .koda/index"
+        );
+        let out = agent.lexical_search("alpha", 5).await;
+        assert!(out.starts_with("ERROR:"), "{out}");
+        assert!(out.contains("codegraph_search"), "{out}");
+    }
+
+    /// A stale cache from an older layout must be discarded rather than
+    /// half-read. The version is the only thing standing between a format
+    /// change and a confident wrong answer.
+    #[tokio::test]
+    async fn a_cache_from_another_version_is_ignored() {
+        let cfg = crate::config::Config {
+            codegraph_search: true,
+            ..Default::default()
+        };
+        let agent = agent_with(cfg.clone());
+        let root = agent.ctx.root.clone();
+        std::fs::create_dir_all(crate::index::cache_dir(&root)).expect("dir");
+        std::fs::write(
+            crate::index::cache_dir(&root).join("meta.json"),
+            b"{ not json",
+        )
+        .expect("write");
+        std::fs::write(crate::index::cache_dir(&root).join("index.bin"), b"garbage")
+            .expect("write");
+        std::fs::create_dir_all(root.join("src")).expect("src");
+        std::fs::write(
+            root.join("src/a.rs"),
+            "/// Distinctive alpaca marker.\npub fn alpha() {}\n",
+        )
+        .expect("write");
+
+        let again = Agent::new(
+            Arc::new(cfg),
+            root.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+        )
+        .expect("agent");
+        for _ in 0..200 {
+            if again.lexical.read().map(|i| i.is_some()).unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let guard = again.lexical.read().expect("lock");
+        let idx = guard.as_ref().expect("index");
+        assert!(
+            !idx.hybrid_search("distinctive alpaca", None, 5).is_empty(),
+            "the rebuild after a bad cache did not happen"
+        );
     }
 
     /// Balanced-object extraction ignores braces inside strings and returns

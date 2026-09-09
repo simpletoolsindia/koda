@@ -478,8 +478,25 @@ word "handles" above the retry code. Results are capped at two spans per file,
 because a file that merely *lists* the query's words — a stopword table, a match
 arm full of names — otherwise takes most of the page.
 
-It builds on first use (150 ms over this repo: 1,620 chunks, 69 files) and
-queries in 65 µs, so there is no index to configure, persist or invalidate.
+Three signals are fused, not one. **Words** — BM25F over the body, with the file
+path, the symbol name and the doc prose weighted above it. **Structure** — a
+second, much thinner index over definition names and paths only, which answers
+"which file *is* this about" rather than "which file mentions it", and which
+abstains when the question names nothing it recognises. **Meaning** — vectors,
+when your endpoint has an embedding model (below). Measured over 35 labelled
+queries in `tests/retrieval_gold.txt`, adding the first two took P@1 from 0.429
+to 0.600 and MRR@10 from 0.617 to 0.709; `docs/research-hybrid-retrieval.md` §11
+has the full table, including the two things that were tried and made it worse.
+
+It builds in 66 ms over this repo (1,738 chunks, 68 files) across your cores, and
+queries in 58 µs. The result is cached in `.koda/index/` — about 1 MB — so a
+second session starts in **2.6 ms** with its embeddings intact rather than
+re-earning them. It stays current by itself: files koda writes are re-indexed on
+the spot, files changed by your editor or a `git checkout` are caught by the same
+sweep the graph uses, and only what changed is read. The directory is a cache in
+the strict sense — deleting it costs a rebuild and nothing else. `codegraph_search
+= false`, or **code search** on the `/settings` page, turns all of it off and
+removes it.
 
 **It also ranks by meaning, if your endpoint can.** Word matching alone cannot
 tell "rate limiting" from a frame *rate* — measured, and reproducible: on a
@@ -885,6 +902,7 @@ subagent_review_rounds = 1 # vibe-mode re-prompts of a bad report
 max_subagent_depth = 1
 
 codegraph = true
+codegraph_search = true    # index the project for meaning-shaped search
 sessions = true            # save conversations for /resume, /search, /fork
 memory = true
 web_search = false         # falls back to DuckDuckGo when searx_url is unset

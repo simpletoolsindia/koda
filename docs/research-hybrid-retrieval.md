@@ -1,9 +1,13 @@
 # Hybrid retrieval for koda — BM25 + dense vectors over the symbol graph
 
-Status: research + design. Nothing here has landed. Every number is tagged
-**[measured]** (run here, in this repo, commands in §9), **[reported]** (from a
-cited paper — link in §10), or **[estimated]** (arithmetic from the two, marked
-as such). Untagged sentences are argument, not evidence.
+Status: **landed**, with §11 recording what shipped, what it measured, and what
+was tried and rejected. §§1–10 are the research and design as written before the
+work, kept as they were — a design document edited after the fact to agree with
+the outcome stops being evidence of anything.
+
+Every number is tagged **[measured]** (run here, in this repo, commands in §9),
+**[reported]** (from a cited paper — link in §10), or **[estimated]** (arithmetic
+from the two, marked as such). Untagged sentences are argument, not evidence.
 
 This supersedes the retrieval half of `docs/spec-rag.md`, which is otherwise
 still the right shape; §8 lists exactly where the two disagree and why.
@@ -761,3 +765,145 @@ vibe.
 - Build-time and embedding-throughput figures marked **[estimated]** are
   arithmetic on measured per-unit costs, not end-to-end timings of a system that
   does not exist yet. They are the numbers most likely to be wrong.
+
+---
+
+## 11. What landed, and what it measured
+
+Written after implementation. Everything here is **[measured]** on koda's own
+source (68 files, 1,738 chunks, 7,509 terms, 94,803 postings) on an Apple M-series
+laptop, 10 cores, release build. The harness is
+`index::tests::retrieval_quality_holds` over the 35 labelled queries in
+`tests/retrieval_gold.txt`; the sweeps are the two `#[ignore]` diagnostics beside
+it. §7 asked for exactly this and it now exists, so the constants below are
+measurements rather than assertions.
+
+### 11.1 Accuracy
+
+| | P@1 | R@3 | R@10 | MRR@10 |
+| --- | --- | --- | --- | --- |
+| Before (BM25 over raw chunk text) | 0.429 | 0.800 | 0.971 | 0.617 |
+| + string literals dropped | 0.486 | 0.771 | 0.971 | 0.643 |
+| + BM25F field weights | 0.543 | 0.829 | 0.943 | 0.695 |
+| + structural channel, abstaining | **0.600** | 0.743 | 0.971 | **0.709** |
+
+**+40% P@1 and +15% MRR@10.** R@10 — whether the right file reaches the model at
+all, which is what the tool actually returns — is unchanged at 0.971. R@3 is
+down 0.057; the mid-ranks shuffle in exchange for the top rank being right more
+often, which is the trade worth making for a reader that starts at the top.
+
+Three changes, in order of how much they bought:
+
+1. **String literals are now dropped from the indexed text** — which §3.3 always
+   said happened, and which the code never did. `chunk_text` joined the raw
+   lines. The cost was specific and funny: this module's own diagnostic test
+   holds the sentences `"where is retry handled"` and `"rate limiting throttle"`
+   as `&str`, and was therefore rank 1 for three of five sample queries, above
+   the code implementing them. A string in a program is what it *says*, not what
+   the code *does*.
+2. **BM25F field weights**, 3/2/2/1 over symbol names, path, doc prose and body,
+   combined into one frequency *before* saturation as Robertson et al. specify —
+   scoring fields separately and adding lets a term that appears once in three
+   fields saturate three times.
+3. **A structural channel** over definition names and paths only, fused by RRF.
+   This is the offline stand-in for the dense half, and the cheap form of the
+   lexically-anchored graph retrieval in RepoGraph and LARGER.
+
+### 11.2 The structural channel, and why it abstains
+
+The first version of it made retrieval **worse at every weight and depth tried** —
+a 30-point grid, all of it at or below the lexical-only baseline on MRR. The
+per-channel diagnostic (`show_channels`) explained it: the channel is excellent
+when the query names something real (`src/session.rs` at rank 0 for "where do we
+write the session file"; `src/context.rs` at ranks 0–2 for "how is the context
+window trimmed" — both of which the lexical channel missed entirely) and returns
+arbitrary ties when it does not. RRF weighs by rank alone, so its fiftieth guess
+votes nearly as loudly as its first, and it had no way to say "I have nothing".
+
+Three fixes turned it positive, each measured:
+
+- **Test files are excluded from it.** A test's name is a sentence —
+  `a_plain_file_mention_is_left_for_the_model_to_fetch` — not a symbol. Admitting
+  them filled the channel's top ranks with assertions on unrelated queries.
+- **Terms in more than 10% of chunks are ignored**, and the file extension is not
+  indexed at all. Without this, `src` and `rs` matched every chunk in the project.
+- **It abstains below a coverage threshold**: a chunk must be named for about a
+  third of the query's *nameable* words, not merely one of them. This is the
+  change that flipped the sign.
+
+### 11.3 What was tried and rejected
+
+- **BM25+ (Lv & Zhai's δ lower bound), δ = 1.0.** P@1 0.571 → 0.514, MRR 0.697 →
+  0.666. Rewarding a document merely for containing a term is wrong here: a
+  chunk that mentions `retry` once is not evidence about retry.
+- **Fusing the structural channel without abstention**, at weights 0.2–2.0 and
+  depths 3–50. Best MRR 0.686 against a 0.695 baseline. Recorded because it is
+  the intuitive design and it does not work.
+
+### 11.4 Performance
+
+Medians of five runs on an idle machine (Apple M1 Max, 10 cores, 32 GB,
+rustc 1.98.0, release + thin LTO). The right-hand column is `MAX_FILES = 4000`
+worth of crates.io sources — koda's own hard ceiling — via `bench_large`.
+
+| | koda · 68 files | ceiling · 4,000 files |
+| --- | --- | --- |
+| chunks / terms / postings | 1,738 / 7,519 / 95k | 68,363 / 200k / 2.58M |
+| cold build, 10 cores | 67 ms | 1,609 ms |
+| tokenise only, forced to 1 core | 172 ms | — |
+| cache save | 1.6 ms | 33 ms |
+| cache load | 1.8 ms | 46 ms |
+| **warm start (load + sweep tree)** | **2.6 ms** | **46 ms** |
+| cache on disk, lexical only | 0.88 MB | 27.9 MB |
+| resident, estimated | 1.5 MB | ~50 MB |
+| query, mean over the 35 gold queries | 55 µs | 334 µs |
+
+The build is now read-then-tokenise, with the tokenising fanned out across cores
+(`prepare_in_parallel`, the same shape and the same small-job refusal as
+`graph::parse_in_parallel`); reading stays serial because eight threads seeking
+at once is worse on the disks that would benefit. 177 ms → 67 ms.
+
+But the number that matters is 2.6 ms, and it is not about the build. §3.8's
+`.koda/index/` cache now exists — a `meta.json` manifest of per-file
+`(mtime, size)` stamps, and a hand-rolled little-endian `index.bin`. Every read
+in the loader is bounds-checked and returns `None` rather than panicking, because
+that file can be truncated by a full disk, a killed process, or a synced folder,
+and none of those may take a session down; `None` means rebuild, which is always
+correct. Writes go through a temp file and a retried rename, because on Windows a
+replace fails outright while another process holds the destination open.
+
+The cache is not there to save 66 ms. It is there to save the **embeddings**,
+which cost minutes on a machine without a GPU and were previously re-fetched on
+every single start. Two changes make that stick:
+
+- `Vectors` now carries an explicit row → chunk map, so the store can cover
+  *part* of the corpus. It used to be positional, which made it all-or-nothing:
+  one file edited during a session invalidated every embedding in the project.
+  Now an edit costs re-embedding the chunks of one file.
+- The background fill tops up `unembedded()` rather than starting over, verifies
+  each row still belongs to the chunk it was requested for (the tree moves while
+  minutes of embedding run), and saves immediately afterwards.
+
+Incremental update landed with it, on the hooks §3.8 named: `Index::update_file`
+and `remove_file` sit beside the graph's in the `write_file`/`edit_file` success
+branch, and `Index::refresh` rides the existing `codegraph_refresh_ms` sweep.
+Removal is by tombstone, compacted at 20% dead, because renumbering a chunk id
+means renumbering the postings, the structural index and the vector rows.
+
+### 11.5 A cross-platform bug the work uncovered
+
+`is_test` looks for `tests/` and `/tests/`. The walk yields `tests\probe.rs` on
+Windows, so **every test file in every project silently stopped being recognised
+as one** and kept its full rank. Paths are now normalised to `/` once, at the
+edge, in `relative()`. The same normalisation is what makes the cache portable
+across machines sharing a working tree.
+
+### 11.6 Still not done
+
+- **§3.9's `embed_batch`.** `EMBED_BATCH` is still a constant at 32.
+- **Graph reference expansion.** The structural channel ranks by definition name
+  and path; it does not yet walk `Graph::refs` to a chunk's callers, which is the
+  other half of what RepoGraph does.
+- **The gold set is 35 queries against one repository**, written by the person
+  who wrote the ranker. It is enough to catch a regression and not enough to
+  claim a general result.

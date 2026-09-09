@@ -15,6 +15,10 @@ tests/visual/playwright-report/
 # Learned-rule candidates are mined from however this checkout is used; they are
 # local state, not part of the project.
 .koda/learning/
+# The search index. A cache, derived entirely from the working tree, and
+# machine-specific (it records each file's mtime): committing it would only ever
+# be a merge conflict that resolves to a rebuild.
+.koda/index/
 
 # Built docs-site output
 docs-site/dist/
