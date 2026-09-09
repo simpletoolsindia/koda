@@ -808,7 +808,9 @@ args = ["term"]
 
 Custom tools are offered only to the top-level agent and never in plan mode. The
 full extension guide (custom tools, skills, role agents) is in
-[docs/extensions.md](docs/extensions.md).
+[docs/extensions.md](docs/extensions.md). To add a tool in Rust — one that needs
+koda's own state — follow the worked example in
+[docs/adding-a-builtin-tool.md](docs/adding-a-builtin-tool.md).
 
 ## Editing the system prompt
 

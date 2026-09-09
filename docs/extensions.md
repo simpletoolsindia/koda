@@ -183,3 +183,8 @@ written and usable either way.
 
 All three are plain config/markdown, version-controllable, and reload without a
 rebuild. Start with the simplest that solves your problem.
+
+If none of them fit — the tool needs koda's own state, or has to return a
+structured result the TUI draws — it has to be Rust. That path is a complete
+worked example, with the files to change and how to validate it, in
+[adding-a-builtin-tool.md](adding-a-builtin-tool.md).
