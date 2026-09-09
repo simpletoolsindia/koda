@@ -2095,12 +2095,23 @@ mod tests {
     ///
     /// The only honest way to pick `W_SYMBOLIC`. Run with
     /// `cargo test --release sweep_structural_weight -- --ignored --nocapture`.
+    /// Retrieval quality at the shipped constants, as a floor.
+    ///
+    /// The grid below is how `W_SYMBOLIC`, `SYMBOLIC_DEPTH` and
+    /// `SYMBOLIC_COVERAGE` were chosen; printing it is still the way to
+    /// re-derive them. What makes this a test rather than a script is the
+    /// assertion at the end: a change to chunking, scoring or fusion that
+    /// quietly makes search worse now fails here instead of being noticed
+    /// months later as "koda cannot find things any more".
+    ///
+    /// Floors sit just under the measured values, so noise does not fail the
+    /// build but a real regression does.
     #[test]
-    #[ignore = "diagnostic, not an assertion"]
     fn sweep_structural_weight() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let gold = gold_queries(root);
         let idx = build(root);
+        let mut shipped: Option<(f32, f32, f32, f32)> = None;
         eprintln!("\n  w_sym  depth   cov    P@1    R@3   R@10   MRR@10");
         for (w, d, cov) in [0.0f32, 0.7, 1.0, 1.5]
             .into_iter()
@@ -2132,14 +2143,29 @@ mod tests {
                 r10 / n,
                 mrr / n
             );
+            if (w, d, cov) == (W_SYMBOLIC, SYMBOLIC_DEPTH, SYMBOLIC_COVERAGE) {
+                shipped = Some((p1 / n, r3 / n, r10 / n, mrr / n));
+            }
         }
+
+        let (p1, r3, r10, mrr) = shipped.expect("the shipped constants are in the grid");
+        // Measured 0.600 / 0.743 / 0.971 / 0.706 at the time of writing.
+        assert!(p1 >= 0.55, "P@1 fell to {p1:.3}");
+        assert!(r3 >= 0.70, "R@3 fell to {r3:.3}");
+        assert!(r10 >= 0.94, "R@10 fell to {r10:.3}");
+        assert!(mrr >= 0.65, "MRR@10 fell to {mrr:.3}");
     }
 
     /// Prints each retrieval channel separately for a few gold queries, so a
     /// fusion result that looks wrong can be traced to the channel that caused
     /// it rather than to the fusion.
+    /// Both retrieval channels answer, and answer in rank order.
+    ///
+    /// Printing them side by side is how a bad fusion result gets traced to the
+    /// channel that caused it. The assertions catch the failure that printing
+    /// was there to spot: a channel that silently returns nothing, or returns
+    /// hits out of order, which fusion then hides.
     #[test]
-    #[ignore = "diagnostic, not an assertion"]
     fn show_channels() {
         let idx = build(Path::new(env!("CARGO_MANIFEST_DIR")));
         for q in [
@@ -2163,14 +2189,25 @@ mod tests {
                         c.names.join(",")
                     );
                 }
+                assert!(!hits.is_empty(), "{label} found nothing for {q:?}");
+                assert!(
+                    hits.windows(2).all(|w| w[0].score >= w[1].score),
+                    "{label} returned {q:?} out of rank order"
+                );
             }
         }
     }
 
     /// The numbers that decide whether this is worth having on a slow machine:
     /// cold build, cache write, cache load, and one query on each path.
+    /// What the index costs to build, save and query — with ceilings.
+    ///
+    /// The numbers are the point of the test; the assertions are deliberately
+    /// loose, ten to twenty times the measured value, because they exist to
+    /// catch an order-of-magnitude regression (an accidental O(n²), a cache
+    /// that stopped being used) on hardware that may be far slower than this
+    /// machine, not to police normal variation.
     #[test]
-    #[ignore = "diagnostic, not an assertion"]
     fn bench_index() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let t = std::time::Instant::now();
@@ -2268,6 +2305,20 @@ mod tests {
             std::thread::available_parallelism().map(|p| p.get()).unwrap_or(0),
         );
         let _ = std::fs::remove_dir_all(&dir);
+
+        // Measured on an M1 Max: build 454ms, save 13ms, load 28ms, query
+        // 494us. These allow roughly 10-20x that.
+        assert!(!idx.chunks.is_empty(), "indexed nothing at all");
+        assert!(build_ms < 10_000.0, "cold build took {build_ms:.0}ms");
+        assert!(
+            serial_ms < 30_000.0,
+            "single-core build took {serial_ms:.0}ms"
+        );
+        assert!(save_ms < 2_000.0, "cache save took {save_ms:.0}ms");
+        assert!(
+            bytes > 0 && bytes < 100_000_000,
+            "cache is {bytes} bytes, which is not a cache"
+        );
     }
 
     /// The same measurements against a corpus far larger than koda, to see
@@ -2278,7 +2329,6 @@ mod tests {
     ///   cargo test --release bench_large -- --ignored --nocapture
     /// ```
     #[test]
-    #[ignore = "diagnostic, needs KODA_BENCH_ROOT"]
     fn bench_large() {
         let Ok(root) = std::env::var("KODA_BENCH_ROOT") else {
             eprintln!("set KODA_BENCH_ROOT to a directory to measure");
@@ -2341,9 +2391,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Prints the ranking for a few real questions, for eyeballing quality.
+    /// Fusion answers every gold query, in rank order, quickly.
+    ///
+    /// Printing the top hits is how a ranking change gets eyeballed; the
+    /// assertions catch the two ways it can be broken rather than merely
+    /// different — a query that returns nothing, and hits out of order.
     #[test]
-    #[ignore = "diagnostic, not an assertion"]
     fn show_rankings() {
         let t0 = std::time::Instant::now();
         let idx = build(Path::new(env!("CARGO_MANIFEST_DIR")));

@@ -3900,8 +3900,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_browse_live_agent_browser() {
+        // The engine is downloaded on demand, so a machine that has never run
+        // `browse` has not got it yet. Say so rather than failing a test about
+        // browsing on a machine that cannot browse.
+        let Some(_) = find_agent_browser("") else {
+            eprintln!("SKIP: agent-browser is not installed (`koda browser install`)");
+            return;
+        };
         let dir = std::env::temp_dir().join(format!("koda-live-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = Config {
@@ -3987,8 +3993,14 @@ mod tests {
     /// Ignored by default: it needs a real agent-browser.
     /// `cargo test --bin koda -- --ignored --test-threads=1 every_action`
     #[test]
-    #[ignore]
     fn test_browse_every_action() {
+        // The engine is downloaded on demand, so a machine that has never run
+        // `browse` has not got it yet. Say so rather than failing a test about
+        // browsing on a machine that cannot browse.
+        let Some(_) = find_agent_browser("") else {
+            eprintln!("SKIP: agent-browser is not installed (`koda browser install`)");
+            return;
+        };
         const PAGE: &str = "<!doctype html><html><head><title>koda browse fixture</title></head>\
             <body><h1>Browse Fixture</h1>\
             <form><fieldset><legend>Order</legend>\
@@ -4172,8 +4184,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_browse_wikipedia_search_and_read() {
+        // The engine is downloaded on demand, so a machine that has never run
+        // `browse` has not got it yet. Say so rather than failing a test about
+        // browsing on a machine that cannot browse.
+        let Some(_) = find_agent_browser("") else {
+            eprintln!("SKIP: agent-browser is not installed (`koda browser install`)");
+            return;
+        };
         let dir = std::env::temp_dir().join(format!("koda-wiki-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = Config {
@@ -4954,8 +4972,14 @@ mod tests {
     ///   openai_schema_for      ~34us   per LLM request
     ///   graph::scan(koda)      ~15ms   once, off-thread at startup
     ///   streaming a 60KB reply ~11us   per frame (was ~1370us, and grew with length)
+    /// The per-call costs that decide whether a tool is cheap enough to sit in
+    /// the hot path, with ceilings.
+    ///
+    /// The printed table is the point; the assertions are deliberately loose —
+    /// far above anything this machine measures — because they exist to catch a
+    /// regression of a different order (a table rebuilt per call, a linear scan
+    /// that became quadratic) on hardware slower than any developer's.
     #[test]
-    #[ignore]
     fn perf() {
         use std::time::Instant;
         macro_rules! bench {
