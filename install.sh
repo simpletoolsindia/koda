@@ -13,10 +13,10 @@ set -euo pipefail
 
 REPO="https://github.com/simpletoolsindia/koda.git"
 BIN_NAME="koda"
-# Edition of koda this installer builds. The `uncensored` branch adds the stealth
-# browsing stack on top of the official tree; override with KODA_BRANCH to
-# install a different branch.
-BRANCH="${KODA_BRANCH:-uncensored}"
+# Branch to build when this script has to clone. It must exist on the remote:
+# the default was `uncensored`, which does not, so every `curl | bash` install
+# died on "clone failed" with nothing to act on. Override with KODA_BRANCH.
+BRANCH="${KODA_BRANCH:-master}"
 
 C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
 C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
@@ -26,10 +26,20 @@ warn()  { printf '%s!%s %s\n' "$C_YELLOW" "$C_OFF" "$1"; }
 die()   { printf '%s✗%s %s\n' "$C_RED" "$C_OFF" "$1" >&2; exit 1; }
 
 # --- locate the source: this checkout, the cwd, or a fresh clone -------------
+# Is this directory a koda checkout, rather than just some Rust project?
+# Piped through bash, `dirname "$0"` is ".", so without the name check the
+# one-liner run inside any other crate would happily build that crate and
+# install it as koda.
+is_koda_src() {
+    [ -f "$1/Cargo.toml" ] && grep -q '^name = "koda"' "$1/Cargo.toml" 2>/dev/null
+}
+
 resolve_src() {
-    if [ -f "$(dirname "${BASH_SOURCE[0]:-$0}")/Cargo.toml" ]; then
-        SRC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    elif [ -f Cargo.toml ] && grep -q '^name = "koda"' Cargo.toml 2>/dev/null; then
+    local here
+    here="$(dirname "${BASH_SOURCE[0]:-$0}")"
+    if is_koda_src "$here"; then
+        SRC="$(cd "$here" && pwd)"
+    elif is_koda_src "$(pwd)"; then
         SRC="$(pwd)"
     else
         command -v git >/dev/null 2>&1 || die "git not found — needed to fetch koda."
@@ -90,6 +100,11 @@ ensure_rust() {
 # --- build + copy into $BIN_DIR ----------------------------------------------
 build_and_install() {
     local prefix="$1"; local bin_dir="$prefix/bin"
+    # Check this before the build, not after: finding out that /usr/local/bin
+    # needs root is worth knowing now rather than two minutes into a compile.
+    if [ ! -w "$prefix" ] && [ ! -w "$bin_dir" ] && [ ! -w "$(dirname "$prefix")" ]; then
+        die "cannot write $bin_dir — re-run with sudo, or install for yourself with PREFIX=\$HOME/.local"
+    fi
     ensure_rust
     resolve_src
     cd "$SRC"

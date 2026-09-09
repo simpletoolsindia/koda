@@ -9,10 +9,10 @@
 
 param(
     [string]$Prefix = "$env:LOCALAPPDATA\koda",
-    # Edition to build when this script has to clone. Matches install.sh, which
-    # defaults to the same branch -- installing a different edition depending on
-    # which OS you are on is not a difference anyone asked for.
-    [string]$Branch = $(if ($env:KODA_BRANCH) { $env:KODA_BRANCH } else { "uncensored" })
+    # Branch to build when this script has to clone. It must exist on the
+    # remote: the default was "uncensored", which does not, so every
+    # `irm | iex` install died on "clone failed". Matches install.sh.
+    [string]$Branch = $(if ($env:KODA_BRANCH) { $env:KODA_BRANCH } else { "master" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,10 +24,20 @@ function Ok($m)   { Write-Host "OK $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
 function Die($m)  { Write-Host "x $m" -ForegroundColor Red; exit 1 }
 
+# Is this directory a koda checkout, rather than just some Rust project? Piped
+# through iex there is no $PSScriptRoot, so without the name check the one-liner
+# run inside any other crate would build that crate and install it as koda.
+function Test-KodaSrc($dir) {
+    if (-not $dir) { return $false }
+    $manifest = Join-Path $dir "Cargo.toml"
+    if (-not (Test-Path $manifest)) { return $false }
+    return [bool](Select-String -Path $manifest -Pattern '^name = "koda"' -Quiet)
+}
+
 function Resolve-Src {
-    if (Test-Path (Join-Path $PSScriptRoot "Cargo.toml")) {
+    if (Test-KodaSrc $PSScriptRoot) {
         return $PSScriptRoot
-    } elseif (Test-Path "Cargo.toml") {
+    } elseif (Test-KodaSrc (Get-Location).Path) {
         return (Get-Location).Path
     } else {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die "git not found." }
