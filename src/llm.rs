@@ -410,7 +410,24 @@ fn classify_transport(endpoint: &str, e: &reqwest::Error) -> ApiError {
 
 /// Turn an HTTP status into something a person can act on.
 fn classify_status(status: reqwest::StatusCode, body: &str, model: &str) -> ApiError {
-    let detail = format!("HTTP {status}: {body}");
+    // `detail` is logged, and the log ring holds a thousand entries. An error
+    // body is whatever the server chose to send — an HTML error page, a stack
+    // trace — so cap it here rather than retaining megabytes of someone else's
+    // 502 page. What diagnoses the failure is always at the front.
+    const CAP: usize = 4096;
+    let detail = if body.len() > CAP {
+        let end = (0..=CAP)
+            .rev()
+            .find(|i| body.is_char_boundary(*i))
+            .unwrap_or(0);
+        format!(
+            "HTTP {status}: {}… [{} more bytes]",
+            &body[..end],
+            body.len() - end
+        )
+    } else {
+        format!("HTTP {status}: {body}")
+    };
     let msg = snippet(body);
     match status.as_u16() {
         429 => ApiError::transient("the server is rate limiting; easing off", detail),

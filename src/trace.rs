@@ -8,9 +8,11 @@
 //! to answer "why did it do that?" without re-running anything.
 //!
 //! Like `debug.rs` this is a process-global sink behind a switch, so no call
-//! site has to thread a handle through. It is bounded on both axes: a ring of
-//! the last `MAX_TURNS` turns, and per-field payload caps, so a long session
-//! cannot grow memory without limit.
+//! site has to thread a handle through. It is bounded on three axes: a ring of
+//! the last `MAX_TURNS` turns, per-field payload caps, and a total byte budget
+//! across the whole ring — the first two alone still allowed 438 MB, measured,
+//! because 50 turns times 300 steps times a capped-but-large payload each is
+//! not a small number.
 
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -31,6 +33,19 @@ const MAX_STEPS: usize = 300;
 /// it gets a larger budget than the rest.
 const CAP_REQUEST: usize = 128 * 1024;
 const CAP_FIELD: usize = 32 * 1024;
+/// What the whole ring may hold in payloads.
+///
+/// The per-field caps bound one step; nothing bounded fifteen thousand of them.
+/// A full ring of 40-step turns measured at 438 MB, and `MAX_STEPS` allows
+/// seven times that — resident, for the life of the process, to serve a debug
+/// panel. Past this budget the oldest turns give up their payloads (see
+/// `enforce_budget`), which is the right thing to lose: their timings, tool
+/// names and outcomes survive, and only the raw bodies nobody scrolled back to
+/// read are dropped.
+const MAX_BYTES: usize = 48 * 1024 * 1024;
+/// Left in place of a payload the budget reclaimed, so the panel can say the
+/// body is gone rather than render an empty box that looks like a bug.
+const RECLAIMED: &str = "[payload released to stay inside the trace memory budget]";
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -348,6 +363,70 @@ pub fn begin_turn(mode: &str, model: &str, endpoint: &str, input: &str) -> Optio
     Some(id)
 }
 
+/// Roughly what one turn holds. Field lengths only — no allocation, so this is
+/// cheap enough to run on every turn boundary.
+fn payload_bytes(t: &Turn) -> usize {
+    t.input.len()
+        + t.reply.len()
+        + t.steps
+            .iter()
+            .map(|s| {
+                s.label.len()
+                    + s.model.as_ref().map_or(0, |m| {
+                        m.request.len() + m.response.len() + m.reasoning.len() + m.text.len()
+                    })
+                    + s.tool
+                        .as_ref()
+                        .map_or(0, |x| x.args.len() + x.detail.len() + x.summary.len())
+            })
+            .sum::<usize>()
+}
+
+/// Bring the ring back under `MAX_BYTES` by releasing payloads, oldest first.
+///
+/// Turns are stripped rather than dropped: what a person looks back at is the
+/// shape of a turn — what ran, in what order, how long it took — and that costs
+/// almost nothing to keep. The newest turn is never stripped, because it is the
+/// one being read.
+///
+/// This runs at turn boundaries, so one enormous turn can sit above the budget
+/// until it ends. That is deliberate: the alternative is emptying the panel
+/// someone is watching. `MAX_STEPS` bounds how far above it can go.
+fn enforce_budget(ring: &mut VecDeque<Turn>) {
+    let mut total: usize = ring.iter().map(payload_bytes).sum();
+    if total <= MAX_BYTES {
+        return;
+    }
+    let newest = ring.len().saturating_sub(1);
+    for (i, t) in ring.iter_mut().enumerate() {
+        if total <= MAX_BYTES || i == newest {
+            break;
+        }
+        let mut freed = 0usize;
+        for s in t.steps.iter_mut() {
+            if let Some(m) = s.model.as_mut() {
+                if m.request.len() > RECLAIMED.len() || !m.response.is_empty() {
+                    freed += m.request.len() + m.response.len() + m.reasoning.len() + m.text.len();
+                    m.request = RECLAIMED.to_string();
+                    m.response.clear();
+                    m.reasoning.clear();
+                    m.text.clear();
+                    freed -= RECLAIMED.len();
+                }
+            }
+            if let Some(x) = s.tool.as_mut() {
+                if x.detail.len() > RECLAIMED.len() {
+                    freed += x.detail.len() + x.args.len();
+                    x.detail = RECLAIMED.to_string();
+                    x.args.clear();
+                    freed -= RECLAIMED.len();
+                }
+            }
+        }
+        total = total.saturating_sub(freed);
+    }
+}
+
 pub fn end_turn(id: Option<u64>, status: Status, reply: &str, tokens: usize) {
     let Some(id) = id else { return };
     with_turn(id, |t| {
@@ -363,6 +442,11 @@ pub fn end_turn(id: Option<u64>, status: Status, reply: &str, tokens: usize) {
             s.ms = ((now() - s.started).max(0.0) * 1000.0) as u64;
         }
     });
+    // A turn boundary is the only place the ring is guaranteed quiet, and the
+    // only place its size can have grown by a whole turn.
+    if let Ok(mut ring) = ring().lock() {
+        enforce_budget(&mut ring);
+    }
 }
 
 /// Open a step inside a turn. The step is visible (and marked running) at once,
@@ -612,6 +696,95 @@ fn cap(s: &mut String, max: usize) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The ring is bounded in bytes, not just in turns.
+    ///
+    /// Before the budget existed this arrangement measured 438 MB resident —
+    /// fifty turns is a small number, fifteen thousand capped payloads is not.
+    #[test]
+    fn the_ring_stays_inside_its_memory_budget() {
+        let _g = guard();
+        fresh();
+        let big_req = "x".repeat(CAP_REQUEST);
+        let big_field = "y".repeat(CAP_FIELD);
+        for _ in 0..MAX_TURNS {
+            let turn = begin_turn("execute", "m", "e", "x");
+            for _ in 0..40 {
+                let st = open_step(turn, StepKind::Model, "m");
+                finish_model(
+                    st,
+                    ModelCall {
+                        request: big_req.clone(),
+                        response: big_field.clone(),
+                        reasoning: big_field.clone(),
+                        text: big_field.clone(),
+                        ..Default::default()
+                    },
+                );
+            }
+            end_turn(turn, Status::Ok, "", 0);
+        }
+
+        let held: usize = {
+            let ring = ring().lock().unwrap();
+            ring.iter().map(payload_bytes).sum()
+        };
+        assert!(
+            held <= MAX_BYTES,
+            "ring holds {} MB, over the {} MB budget",
+            held / 1024 / 1024,
+            MAX_BYTES / 1024 / 1024
+        );
+
+        // What survives is the shape of the session: every turn is still there,
+        // with its steps, timings and outcomes intact.
+        let sums = summaries();
+        assert_eq!(sums.len(), MAX_TURNS);
+        let newest = turn(sums[0].id).expect("newest turn");
+        assert_eq!(newest.steps.len(), 40);
+        assert!(
+            newest.steps[0].model.as_ref().unwrap().request.len() > RECLAIMED.len(),
+            "the newest turn keeps its payloads -- it is the one being read"
+        );
+
+        // Eviction is idempotent and keeps holding: filling the ring a second
+        // time must not double-count freed bytes and drift over the budget.
+        for _ in 0..MAX_TURNS {
+            let turn = begin_turn("execute", "m", "e", "x");
+            for _ in 0..40 {
+                let st = open_step(turn, StepKind::Model, "m");
+                finish_model(
+                    st,
+                    ModelCall {
+                        request: big_req.clone(),
+                        response: big_field.clone(),
+                        ..Default::default()
+                    },
+                );
+            }
+            end_turn(turn, Status::Ok, "", 0);
+        }
+        let held2: usize = {
+            let ring = ring().lock().unwrap();
+            ring.iter().map(payload_bytes).sum()
+        };
+        assert!(
+            held2 <= MAX_BYTES,
+            "after a second fill the ring holds {} MB",
+            held2 / 1024 / 1024
+        );
+
+        // And an old one has given up its bodies but kept its structure.
+        let sums = summaries();
+        let oldest = turn(sums[MAX_TURNS - 1].id).expect("oldest turn");
+        assert_eq!(oldest.steps.len(), 40, "structure is kept");
+        assert_eq!(
+            oldest.steps[0].model.as_ref().unwrap().request,
+            RECLAIMED,
+            "payload is released, and says so"
+        );
+        clear();
+    }
 
     /// Analytics answers what the rail cannot: where the time went, which
     /// tools ran, and whether the token numbers are the server's or a guess.
