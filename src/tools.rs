@@ -3932,6 +3932,245 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Serve one fixed HTML page on a loopback port for the duration of a test.
+    ///
+    /// A live browser test that depends on someone else's website tests their
+    /// uptime as much as koda's browser. This page is ours: it has exactly the
+    /// controls the actions below need, and it cannot change under us.
+    #[cfg(test)]
+    fn serve_fixture(html: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                // One thread per connection, with a read deadline. Served
+                // serially, a browser that opens a keep-alive socket and sends
+                // nothing on it blocks every later request behind it — which
+                // turned this test from two seconds into eight minutes.
+                std::thread::spawn(move || {
+                    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf);
+                    let (ctype, body) = if buf.starts_with(b"GET /next") {
+                        (
+                            "text/html",
+                            "<!doctype html><title>Second Page</title><h1>Second Page</h1>",
+                        )
+                    } else if buf.starts_with(b"GET /file.txt") {
+                        ("text/plain", "koda download fixture payload")
+                    } else {
+                        ("text/html", html)
+                    };
+                    let _ = s.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {ctype}; charset=utf-8\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// Every `browse` action, against a page that cannot move under us.
+    ///
+    /// The two live tests either side of this one cover search and read. The
+    /// rest of the surface — clicking, typing, selecting, checking, hovering,
+    /// keys, scrolling, history, tabs, screenshots — was never exercised, so a
+    /// regression in any of it would have shipped silently.
+    ///
+    /// Ignored by default: it needs a real agent-browser.
+    /// `cargo test --bin koda -- --ignored --test-threads=1 every_action`
+    #[test]
+    #[ignore]
+    fn test_browse_every_action() {
+        const PAGE: &str = "<!doctype html><html><head><title>koda browse fixture</title></head>\
+            <body><h1>Browse Fixture</h1>\
+            <form><fieldset><legend>Order</legend>\
+            <label>Customer name: <input name=custname></label>\
+            <label>Bacon <input type=checkbox name=topping value=bacon></label>\
+            <label>Size <select name=size>\
+              <option value=s>Small</option><option value=l>Large</option></select></label>\
+            </fieldset></form>\
+            <label>Attach <input type=file name=doc></label>\
+            <p><a href=\"/next\">Go to second page</a></p>\
+            <p><a href=\"/next\" target=_blank>Open in new tab</a></p>\
+            <div style=\"height:3000px\">tall</div><p>bottom marker</p></body></html>";
+
+        let base = serve_fixture(PAGE);
+        let dir = std::env::temp_dir().join(format!("koda-acts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolCtx {
+            root: dir.clone(),
+            cfg: Arc::new(Config {
+                browser_headless: true,
+                browser_session: true,
+                ..Config::default()
+            }),
+            progress: None,
+        };
+        let run = |args: Value| -> Outcome {
+            browse(&args, &ctx).unwrap_or_else(|e| panic!("browse {args} errored: {e}"))
+        };
+        let mut failed: Vec<String> = Vec::new();
+        let mut check = |what: &str, res: &Outcome, want: Option<&str>| {
+            let ok = res.ok
+                && want.is_none_or(|w| res.content.to_lowercase().contains(&w.to_lowercase()));
+            println!(
+                "{:<20} {}  {}",
+                what,
+                if ok { "ok  " } else { "FAIL" },
+                res.content
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+                    .replace('\n', " ")
+            );
+            if !ok {
+                failed.push(what.to_string());
+            }
+        };
+
+        check(
+            "navigate",
+            &run(json!({ "action": "navigate", "url": base })),
+            Some("customer name"),
+        );
+        check(
+            "type",
+            &run(json!({ "action": "type", "selector": "input[name=custname]", "text": "koda" })),
+            None,
+        );
+        check(
+            "check",
+            &run(json!({ "action": "check", "selector": "input[type=checkbox]" })),
+            None,
+        );
+        check(
+            "uncheck",
+            &run(json!({ "action": "uncheck", "selector": "input[type=checkbox]" })),
+            None,
+        );
+        check(
+            "select",
+            &run(json!({ "action": "select", "selector": "select[name=size]", "text": "Large" })),
+            None,
+        );
+        check(
+            "hover",
+            &run(json!({ "action": "hover", "selector": "legend" })),
+            None,
+        );
+        check(
+            "press",
+            &run(json!({ "action": "press", "key": "Tab" })),
+            None,
+        );
+        check(
+            "scroll",
+            &run(json!({ "action": "scroll", "direction": "bottom" })),
+            None,
+        );
+        // What was typed and selected must survive the round trip.
+        let after = run(json!({ "action": "read" }));
+        check("read after input", &after, Some("koda"));
+
+        let shot = dir.join("page.png");
+        check(
+            "screenshot",
+            &run(json!({ "action": "screenshot", "to": shot.to_string_lossy() })),
+            None,
+        );
+        let bytes = std::fs::metadata(&shot).map(|m| m.len()).unwrap_or(0);
+        println!("screenshot bytes: {bytes}");
+        check(
+            "screenshot_element",
+            &run(json!({ "action": "screenshot_element", "selector": "form",
+                         "to": dir.join("el.png").to_string_lossy() })),
+            None,
+        );
+
+        check(
+            "click link",
+            &run(json!({ "action": "click", "selector": "a" })),
+            Some("second page"),
+        );
+        check("back", &run(json!({ "action": "back" })), Some("fixture"));
+        check(
+            "forward",
+            &run(json!({ "action": "forward" })),
+            Some("second"),
+        );
+        check("reload", &run(json!({ "action": "reload" })), None);
+        check(
+            "wait",
+            &run(json!({ "action": "wait", "seconds": 0.2 })),
+            None,
+        );
+
+        // Back to the fixture for the remaining controls.
+        check(
+            "navigate back to form",
+            &run(json!({ "action": "navigate", "url": base })),
+            Some("browse fixture"),
+        );
+        // Models address elements by the numeric index in the page map far more
+        // often than by CSS, so that path needs its own check.
+        check(
+            "click by index",
+            &run(json!({ "action": "click", "index": 1 })),
+            None,
+        );
+        check(
+            "navigate for upload",
+            &run(json!({ "action": "navigate", "url": base })),
+            None,
+        );
+        let doc = dir.join("upload.txt");
+        std::fs::write(&doc, "koda upload fixture").unwrap();
+        check(
+            "upload",
+            &run(json!({ "action": "upload", "selector": "input[type=file]",
+                         "file": doc.to_string_lossy() })),
+            None,
+        );
+        check(
+            "click new-tab link",
+            &run(json!({ "action": "click", "selector": "a[target=_blank]" })),
+            None,
+        );
+        check("tab", &run(json!({ "action": "tab", "tab": 1 })), None);
+
+        let dl = dir.join("got.txt");
+        check(
+            "download",
+            &run(
+                json!({ "action": "download", "url": format!("{base}file.txt"),
+                         "to": dl.to_string_lossy() }),
+            ),
+            None,
+        );
+        let dl_ok = std::fs::read_to_string(&dl).unwrap_or_default();
+        println!("downloaded: {dl_ok:?}");
+
+        check("close", &run(json!({ "action": "close" })), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        // A screenshot that wrote nothing is a pass by the tool's own report
+        // and a failure by any use of it, so judge it on the file.
+        assert!(bytes > 1000, "screenshot is {bytes} bytes, likely blank");
+        assert!(
+            dl_ok.contains("payload"),
+            "download wrote {dl_ok:?}, not the served file"
+        );
+        assert!(failed.is_empty(), "these actions failed: {failed:?}");
+    }
+
     #[test]
     #[ignore]
     fn test_browse_wikipedia_search_and_read() {
