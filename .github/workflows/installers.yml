@@ -1,0 +1,133 @@
+name: Installers
+
+# The installers are the first thing a new user runs and the only part of koda
+# that `cargo test` cannot reach, so they had no coverage at all -- which is how
+# a default branch that does not exist on the remote shipped, breaking every
+# documented `curl | bash` with "clone failed".
+#
+# Fast checks run on every push. The real install runs when an installer, or
+# this file, changes.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Seconds, and catches the bug that actually shipped.
+  # --------------------------------------------------------------------------
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck install.sh
+        run: shellcheck --severity=warning install.sh
+
+      # The exact failure: BRANCH defaulted to a branch that is not on the
+      # remote, so resolve_src's clone died and took every one-liner with it.
+      - name: The branch the installers clone must exist
+        run: |
+          set -euo pipefail
+          repo=$(sed -n 's/^REPO="\(.*\)"$/\1/p' install.sh)
+          # shellcheck disable=SC2016  # ${KODA_BRANCH:-...} is sed's literal text
+          sh_branch=$(sed -n 's/^BRANCH="${KODA_BRANCH:-\(.*\)}"$/\1/p' install.sh)
+          ps_branch=$(sed -n 's/.*else { "\(.*\)" }).*/\1/p' install.ps1 | head -1)
+          echo "install.sh  -> $sh_branch"
+          echo "install.ps1 -> $ps_branch"
+          test -n "$sh_branch" && test -n "$ps_branch" \
+            || { echo "::error::could not read the default branch out of an installer"; exit 1; }
+          test "$sh_branch" = "$ps_branch" \
+            || { echo "::error::the two installers disagree on the branch"; exit 1; }
+          git ls-remote --exit-code --heads "$repo" "$sh_branch" >/dev/null \
+            || { echo "::error::branch '$sh_branch' does not exist in $repo"; exit 1; }
+
+      # The other shipped bug: piped through bash, `dirname "$0"` is ".", so any
+      # directory holding a Cargo.toml looked like a koda checkout and got built
+      # and installed as koda.
+      - name: Only koda's own source counts as koda's source
+        run: |
+          set -euo pipefail
+          decoy=$(mktemp -d)
+          printf '[package]\nname = "not-koda"\n' > "$decoy/Cargo.toml"
+          # A real file, not `source <(...)`: process substitution can return
+          # before bash has read it, leaving the function silently undefined.
+          sed -n '/^is_koda_src()/,/^}/p' install.sh > "$decoy/fn.sh"
+          # shellcheck disable=SC1090,SC1091
+          source "$decoy/fn.sh"
+          type is_koda_src > /dev/null \
+            || { echo "::error::could not extract is_koda_src from install.sh"; exit 1; }
+          if is_koda_src "$decoy"; then
+            echo "::error::a non-koda crate was accepted as koda's source"; exit 1
+          fi
+          is_koda_src "$PWD" \
+            || { echo "::error::koda's own checkout was rejected"; exit 1; }
+          echo "decoy rejected, real checkout accepted"
+
+  # --------------------------------------------------------------------------
+  # Actually run it. Only when an installer changes -- it builds koda.
+  # --------------------------------------------------------------------------
+  install:
+    name: Install on ${{ matrix.os }}
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: changed
+        shell: bash
+        run: |
+          if git diff --name-only "${{ github.event.before || 'HEAD~1' }}" HEAD 2>/dev/null \
+               | grep -qE '^(install\.sh|install\.ps1|\.github/workflows/installers\.yml)$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.changed.outputs.run == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changed.outputs.run == 'true'
+
+      # PREFIX makes it non-interactive, which is also the `curl | bash` path.
+      - name: Install into a scratch prefix
+        if: steps.changed.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$(mktemp -d)/koda"
+          PREFIX="$prefix" ./install.sh
+          "$prefix/bin/koda" --version
+          "$prefix/bin/koda" --help > /dev/null
+          echo "installed and runs"
+
+  # --------------------------------------------------------------------------
+  # No Windows runner is needed to catch a syntax error, and nobody here has
+  # PowerShell to hand.
+  # --------------------------------------------------------------------------
+  powershell:
+    name: install.ps1 parses
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse it
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          Write-Host "install.ps1 parses cleanly"
