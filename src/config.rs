@@ -712,6 +712,32 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(config_dir)
 }
 
+/// A pristine project root for a test, with the global state it derives cleared.
+///
+/// `project_state_dir` files sessions, the index and learned rules under the
+/// user's *data* directory keyed by project path — deliberately, so a project
+/// stays clean — which means they do not live inside the project root. A test
+/// that sets up with `remove_dir_all(root)` therefore starts with whatever the
+/// previous run left behind.
+///
+/// That is not theoretical. `rules.md` records dates, so
+/// `day_tracking_round_trips_through_rules_md` reloaded a rule written by an
+/// earlier run, compared its `last 2026-09-09` against today, and passed every
+/// time until the clock crossed midnight — then failed on a tree nobody had
+/// touched. Any test that needs a project directory should start here.
+#[cfg(test)]
+pub fn test_root(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("koda-test-{name}"));
+    std::fs::remove_dir_all(&root).ok();
+    // The state dirs are keyed by the root's path, so clearing them needs the
+    // root's name, not the root itself.
+    for kind in ["learning", "index", "sessions"] {
+        std::fs::remove_dir_all(data_dir().join(kind).join(project_key(&root))).ok();
+    }
+    std::fs::create_dir_all(&root).expect("test root");
+    root
+}
+
 /// A stable, readable, filesystem-safe key for a project directory.
 ///
 /// The last path component keeps it recognisable when browsing the directory
@@ -1205,6 +1231,38 @@ watch_interval_ms = 1500
 
 #[cfg(test)]
 mod tests {
+    /// The helper exists because state outlives the project directory. If it
+    /// ever stops clearing that state, every test built on it starts inheriting
+    /// the previous run again -- silently, and only failing once a fixture is a
+    /// day old. So the helper gets a test of its own.
+    #[test]
+    fn test_root_clears_state_left_by_an_earlier_run() {
+        let root = super::test_root("selfcheck");
+        // Something a previous run would have left behind, in each of the three
+        // places project state actually lives.
+        for kind in ["learning", "index", "sessions"] {
+            let state = super::data_dir().join(kind).join(super::project_key(&root));
+            std::fs::create_dir_all(&state).unwrap();
+            std::fs::write(state.join("stale"), "from an earlier run").unwrap();
+        }
+        std::fs::write(root.join("in-project"), "x").unwrap();
+
+        // A second setup, as the next run would do it.
+        let root = super::test_root("selfcheck");
+
+        assert!(!root.join("in-project").exists(), "the root must be fresh");
+        for kind in ["learning", "index", "sessions"] {
+            let stale = super::data_dir()
+                .join(kind)
+                .join(super::project_key(&root))
+                .join("stale");
+            assert!(
+                !stale.exists(),
+                "{kind} state survived: {}",
+                stale.display()
+            );
+        }
+    }
 
     /// The key must stay put across releases and tell two same-named projects
     /// apart — everything filed under it is orphaned if it ever changes.

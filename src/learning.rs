@@ -1452,9 +1452,7 @@ mod tests {
     /// user has accepted, which is theirs.
     #[test]
     fn re_mining_retires_candidates_it_no_longer_produces() {
-        let dir = std::env::temp_dir().join(format!("koda-learn-stale-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::config::test_root("learn-stale");
         let mut l = Learning::load(&dir);
 
         let idioms = vec![("undefined".to_string(), "fn", 2026_usize)];
@@ -1475,9 +1473,7 @@ mod tests {
     /// An accepted rule is a decision the user made; re-mining must not undo it.
     #[test]
     fn retiring_stale_candidates_leaves_accepted_rules_alone() {
-        let dir = std::env::temp_dir().join(format!("koda-learn-keep-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::config::test_root("learn-keep");
         let mut l = Learning::load(&dir);
 
         l.induce_idioms(&[("log_audit".to_string(), "fn", 9)], &[]);
@@ -1493,13 +1489,7 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("koda-learn-{tag}"));
-        std::fs::remove_dir_all(&d).ok();
-        // Learning state lives outside the project now, so clearing the project
-        // no longer clears it: without this a fixture survives into the next run.
-        std::fs::remove_dir_all(dir(&d)).ok();
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::config::test_root(&format!("learn-{tag}"))
     }
 
     #[test]
@@ -1532,9 +1522,7 @@ mod tests {
     /// that a correction could never be attributed to anyway.
     #[test]
     fn tracked_writes_are_bounded_in_count_and_size() {
-        let dir = std::env::temp_dir().join(format!("koda-writes-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::config::test_root("learn-writes");
 
         for i in 0..260 {
             record_write(&dir, &format!("src/file{i}.rs"), "fn main() {}\n");
@@ -1570,10 +1558,7 @@ mod tests {
         // while this state lived inside the project and was deleted with it;
         // now it lives in koda's data directory and outlives the test run, so
         // a shared name means yesterday's `last-pass` marker fails today's run.
-        let dir = std::env::temp_dir().join(format!("koda-daily-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(super::dir(&dir)).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::config::test_root("learn-daily");
         let mut l = Learning::load(&dir);
         // Evidence that a habit exists: the same command failing, its fix
         // working — repeated, which is what induce_rules needs.
@@ -1647,9 +1632,10 @@ mod tests {
     /// and nothing would ever be promoted.
     #[test]
     fn day_tracking_round_trips_through_rules_md() {
-        let dir = std::env::temp_dir().join("koda-daily-roundtrip");
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        // Hermetic: rules.md lives outside the project and carries dates, so
+        // a root that is merely re-created inherits yesterday's rule -- which
+        // is precisely how this test passed all day and failed after midnight.
+        let dir = crate::config::test_root("learn-daily-roundtrip");
         let mut l = Learning::load(&dir);
         l.rules.push(Rule {
             key: "cmd.use.pytest".into(),

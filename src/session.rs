@@ -448,8 +448,7 @@ mod tests {
     /// written — the session file silently loses the middle of the conversation.
     #[test]
     fn trimming_history_does_not_lose_messages_from_the_session_file() {
-        let root = std::env::temp_dir().join(format!("koda-sesstrim-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::config::test_root("session-trim");
         std::fs::create_dir_all(dir(&root)).unwrap();
 
         let mut s = Store::create(&root, "m", "e");
@@ -490,13 +489,17 @@ mod tests {
     #[test]
     fn listing_sessions_does_not_parse_whole_transcripts() {
         use std::time::Instant;
-        let root = std::env::temp_dir().join(format!("koda-sesslist-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::config::test_root("session-list");
         let d = dir(&root);
         std::fs::create_dir_all(&d).unwrap();
 
         // 12 sessions, each with a big transcript, as a real project accrues.
-        let bulk = "x".repeat(20_000);
+        // The bulk records are deliberately NOT valid JSON: summarize() counts
+        // lines and only parses until it has a title, so if listing ever starts
+        // deserializing every record it will trip over these. That is the
+        // property this test is about, and unlike a stopwatch it holds on a
+        // loaded machine.
+        let bulk = format!(r#"{{"role":"assistant","content":"{}"#, "x".repeat(20_000));
         for f in 0..12 {
             let mut out = String::new();
             out.push_str(
@@ -519,9 +522,7 @@ mod tests {
             );
             out.push('\n');
             for _ in 0..60 {
-                out.push_str(
-                    &serde_json::to_string(&Record::Msg(Message::assistant(bulk.clone()))).unwrap(),
-                );
+                out.push_str(&bulk);
                 out.push('\n');
             }
             std::fs::write(d.join(format!("s{f}.jsonl")), out).unwrap();
@@ -542,30 +543,30 @@ mod tests {
             "counted without deserializing each one"
         );
 
-        // The old path, for comparison: read() on every file.
+        // Guard against the fixture quietly becoming parseable, which would
+        // make everything above vacuous.
+        assert!(
+            serde_json::from_str::<Record>(&bulk).is_err(),
+            "the bulk records must be unparseable for this test to mean anything"
+        );
+
+        // The old path, for comparison. Reported, never asserted: a wall-clock
+        // ratio between two operations on the same machine is a coin flip once
+        // the suite runs in parallel, and this assertion failed roughly one run
+        // in three while proving nothing the check above does not.
         let t1 = Instant::now();
         for s in &got {
             let _ = read(&s.path);
         }
-        let full = t1.elapsed();
-        eprintln!("  list(): {cheap:?}   full read of the same files: {full:?}");
-        assert!(
-            cheap * 2 < full,
-            "listing should be far cheaper than parsing every record \
-             (list {cheap:?} vs read {full:?})"
+        eprintln!(
+            "  list(): {cheap:?}   full read of the same files: {:?}",
+            t1.elapsed()
         );
         std::fs::remove_dir_all(&root).ok();
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("koda-session-{tag}"));
-        std::fs::remove_dir_all(&d).ok();
-        // Transcripts live outside the project now, so clearing the project
-        // directory no longer clears them: without this the fixtures pile up
-        // across runs and every count assertion drifts.
-        std::fs::remove_dir_all(dir(&d)).ok();
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::config::test_root(&format!("session-{tag}"))
     }
 
     #[test]
@@ -665,7 +666,9 @@ mod tests {
     /// stops mentioning it.
     #[test]
     fn transcripts_move_out_of_the_project() {
-        let root = std::env::temp_dir().join(format!("koda-mig-{}", std::process::id()));
+        // migrate_out_of_project is a no-op when the global dir already
+        // exists, so a leftover one from an earlier run silently voids this.
+        let root = crate::config::test_root("session-mig");
         let legacy = legacy_dir(&root);
         std::fs::create_dir_all(&legacy).unwrap();
 
@@ -713,7 +716,7 @@ mod tests {
     /// picker, and can be cleared again.
     #[test]
     fn a_session_can_be_named_and_renamed() {
-        let root = std::env::temp_dir().join(format!("koda-name-{}", std::process::id()));
+        let root = crate::config::test_root("session-name");
         std::fs::create_dir_all(dir(&root)).unwrap();
 
         let mut store = Store::create(&root, "m", "http://x");
