@@ -2826,7 +2826,8 @@ impl Agent {
     /// far better than classic OCR, so this is tried before tesseract when a
     /// model is configured.
     async fn vision_ocr(&self, path: &std::path::Path) -> anyhow::Result<String> {
-        let url = tools::image_data_url(path, self.cfg.max_file_bytes)?;
+        // Same ceiling as attaching it: this is an image, not a text file.
+        let url = tools::image_data_url(path, self.cfg.max_document_bytes)?;
         const PROMPT: &str = "Transcribe every piece of visible text in this \
             image verbatim, preserving layout and reading order (tables, \
             labels, code, etc). Then, on a new line, briefly describe any \
@@ -2913,10 +2914,18 @@ impl Agent {
                 }
                 continue;
             }
-            // Path 1 — a vision model: attach the image as a data URL, capped at
-            // the file-read ceiling so a huge asset can't blow up the request.
+            // Path 1 — a vision model: attach the image as a data URL, capped so
+            // a huge asset can't blow up the request.
+            //
+            // The cap is `max_document_bytes`, not `max_file_bytes`.
+            // `max_file_bytes` (256 KB by default) is the *text* read ceiling —
+            // it exists so one large source file cannot eat the context window —
+            // and applying it to a picture refused practically every screenshot
+            // ever pasted, while the `view_image` tool accepted the same file at
+            // `max_document_bytes`. One image, two limits, thirty-two times
+            // apart.
             if vision {
-                match tools::image_data_url(&full, self.cfg.max_file_bytes) {
+                match tools::image_data_url(&full, self.cfg.max_document_bytes) {
                     Ok(url) => {
                         images.push(url);
                         attached.push(raw.to_string());
@@ -5301,6 +5310,57 @@ fn absorb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pasted screenshot is a few hundred KB, and every one of them was
+    /// refused: the attach path capped images with `max_file_bytes` (256 KB),
+    /// the ceiling that exists to stop one big *source file* eating the context,
+    /// while the `view_image` tool accepted the same picture at
+    /// `max_document_bytes`. The report was "could not attach: image is 358.0K
+    /// but the limit is 256.0K".
+    #[tokio::test]
+    async fn a_screenshot_sized_image_still_attaches() {
+        let dir = std::env::temp_dir().join("koda-image-attach-test");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cfg = crate::config::Config {
+            vision: "on".into(),
+            ..Default::default()
+        };
+        // Comfortably over the text ceiling, well under the document one:
+        // the size a screenshot actually is.
+        let size = 400 * 1024;
+        assert!(
+            size > cfg.max_file_bytes && size < cfg.max_document_bytes,
+            "the fixture has to sit between the two limits to prove anything"
+        );
+        std::fs::write(dir.join("shot.png"), vec![0u8; size]).unwrap();
+
+        let agent = Agent::new(
+            Arc::new(cfg),
+            dir.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Notify::new()),
+        )
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let msg = agent.user_message("@shot.png what is this", &tx).await;
+        drop(tx);
+
+        let mut notices = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let Event::Notice(n) = ev {
+                notices.push(n);
+            }
+        }
+        assert!(
+            !msg.images.is_empty(),
+            "the screenshot should be on the wire; koda said: {notices:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// `/clear` empties the conversation, but the status bar's token count and
     /// context gauge are fed only by `Event::Tokens`. Without one the numbers
