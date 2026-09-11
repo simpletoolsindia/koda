@@ -352,14 +352,22 @@ fn dedup(v: &[&str]) -> Vec<String> {
     out
 }
 
-/// The current date and time, for the system prompt.
+/// The current date, for the system prompt.
 ///
 /// A model with no clock guesses the year from its training data, and then
-/// dates a changelog entry or a copyright header wrong. This is captured when
-/// the prompt is built rather than per turn on purpose: the system prompt is
-/// the cached KV prefix for local models, and rewriting it every message would
-/// throw that cache away for a minute hand nobody reads. The wording says so,
-/// so a long session does not mistake the stamp for the wall clock.
+/// dates a changelog entry or a copyright header wrong. So the date is worth
+/// its tokens.
+///
+/// The *time* is not, and used to be here at minute resolution. The system
+/// prompt is the cached KV prefix for a local model, and that cache is
+/// invalidated by any change at all -- so a minute hand nobody reads made every
+/// launch, and every rebuild of the prompt, a full re-prefill of the preamble.
+/// Measured against a local 30B that is about eleven seconds, paid whenever the
+/// clock ticked over. At day resolution the prompt is byte-identical from one
+/// run to the next, and a restart answers immediately.
+///
+/// A model that genuinely needs the wall clock can run `date`, and gets a
+/// precise answer instead of a stamp that was stale the moment it was taken.
 fn now_line() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -369,7 +377,6 @@ fn now_line() -> String {
     let local = secs + offset as i64;
 
     let days = local.div_euclid(86_400);
-    let sod = local.rem_euclid(86_400);
     // The calendar arithmetic already exists, for dating learned rules.
     let date = crate::learning::ymd(days.max(0) as u32);
     // 1970-01-01 was a Thursday.
@@ -382,10 +389,8 @@ fn now_line() -> String {
         ('+', offset)
     };
     format!(
-        "Current date and time: {weekday} {date} {:02}:{:02} UTC{sign}{:02}:{:02} \
-         (taken when this session's prompt was built; the clock has moved on since).",
-        sod / 3600,
-        (sod % 3600) / 60,
+        "Current date: {weekday} {date} (local time, UTC{sign}{:02}:{:02}). \
+         Run `date` if you need the time of day.",
         off / 3600,
         (off % 3600) / 60,
     )
@@ -548,9 +553,44 @@ mod tests {
     fn prompts_state_the_current_date() {
         let cfg = Config::default();
         let main = build(&cfg, Path::new("/tmp"), false, Mode::Execute);
-        assert!(main.contains("Current date and time:"), "{main}");
+        assert!(main.contains("Current date:"), "{main}");
         let sub = subagent(Path::new("/tmp"));
-        assert!(sub.contains("Current date and time:"), "{sub}");
+        assert!(sub.contains("Current date:"), "{sub}");
+    }
+
+    /// The preamble is the model server's cached KV prefix, and that cache is
+    /// invalidated by *any* change to it. A clock with a minute hand therefore
+    /// cost a full re-prefill of the whole preamble every time the minute
+    /// rolled over -- about eleven seconds on a local 30B, paid on every launch
+    /// and every rebuild of the prompt, for a stamp that was stale the moment
+    /// it was taken.
+    #[test]
+    fn the_preamble_does_not_change_with_the_clock() {
+        let cfg = Config::default();
+        let root = Path::new("/tmp");
+        let first = build(&cfg, root, false, Mode::Execute);
+        // Two builds a notional minute apart must be byte-identical. Building
+        // twice in a row is the same test the old code failed roughly once a
+        // minute, so the assertion is on the content, not on timing.
+        let again = build(&cfg, root, false, Mode::Execute);
+        assert_eq!(first, again, "the preamble is not stable between builds");
+
+        // No time of day anywhere in it. `\d\d:\d\d` is what the old line
+        // emitted; the UTC offset is written without one.
+        let clockish = first
+            .lines()
+            .find(|l| l.contains("Current date:"))
+            .expect("the date line");
+        assert!(
+            !clockish.contains("date and time"),
+            "the minute hand is back: {clockish}"
+        );
+        // The date itself must still be there — a model with no calendar dates
+        // a changelog entry from its training cutoff.
+        assert!(
+            clockish.contains("UTC"),
+            "the offset should stay, so the date is unambiguous: {clockish}"
+        );
     }
 
     #[test]

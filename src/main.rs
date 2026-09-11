@@ -181,6 +181,45 @@ fn main() -> Result<()> {
     std::process::exit(0);
 }
 
+/// Reap koda's children when the process is told to end.
+///
+/// koda starts two kinds of child that outlive it: a debug adapter holding a
+/// stopped program, and the browse engine, which is a daemon holding a whole
+/// headless Chrome. Both were only ever cleaned up on koda's own exit paths, so
+/// anything that ended the process from outside -- closing the terminal window,
+/// `kill`, a `systemctl stop` -- left them running. Three of those in an
+/// afternoon is several gigabytes of orphaned Chrome and a laptop that swaps.
+///
+/// SIGKILL cannot be caught by anything, which is what `reap_orphaned_browsers`
+/// is for: it cleans up on the *next* start what this could not clean up on the
+/// last exit.
+fn install_signal_handlers() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // SIGHUP is the terminal window closing or an ssh session dropping;
+        // SIGTERM is a `kill` or a supervisor; SIGINT is ctrl+c, which only
+        // reaches us in a headless run -- the TUI puts the terminal in raw
+        // mode, where ctrl+c arrives as a key event instead.
+        for (kind, code) in [
+            (SignalKind::hangup(), 129),
+            (SignalKind::interrupt(), 130),
+            (SignalKind::terminate(), 143),
+        ] {
+            tokio::spawn(async move {
+                let Ok(mut sig) = signal(kind) else { return };
+                if sig.recv().await.is_none() {
+                    return;
+                }
+                // `restore` is the one teardown: terminal, debugger, browser.
+                // It runs at most once however koda is ending.
+                tui::restore();
+                std::process::exit(code);
+            });
+        }
+    }
+}
+
 async fn async_main(cli: Cli) -> Result<()> {
     let root = match &cli.dir {
         Some(d) => d.clone(),
@@ -189,6 +228,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     let root = root
         .canonicalize()
         .with_context(|| format!("resolving {}", root.display()))?;
+
+    // Installed before anything can start a child, so a signal arriving during
+    // startup still finds a teardown to run.
+    install_signal_handlers();
 
     let mut cfg = Config::load(&root)?;
     if let Some(v) = cli.base_url.clone() {
@@ -445,6 +488,9 @@ async fn headless(
         }
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
+    // Captured before the agent moves into the task below.
+    let cfg_browser = agent.cfg.browser;
+    let browser_path = agent.cfg.browser_path.clone();
 
     let task = tokio::spawn(async move {
         agent.handle(Command::User(prompt), &tx).await;
@@ -526,6 +572,22 @@ async fn headless(
     }
     let _ = task.await;
     println!();
+    // The TUI tears its children down in `restore`; this path has no terminal
+    // to restore and so had no teardown at all -- a headless run that browsed
+    // left the engine and its Chrome tree running, and the `exit(2)` below
+    // skipped even a `Drop`. Same children, same rule.
+    crate::dap::shutdown();
+    crate::tools::shutdown_browser();
+    // Reap here as well as at startup. The startup reap runs on a background
+    // thread so it cannot delay the first prompt, and a headless run is often
+    // over before that thread has finished closing anything -- so a `koda -p`
+    // would find an orphan and then exit before it had dealt with it. By this
+    // point koda's own sessions are already closed above and their records
+    // still name this live process, so they are skipped and only genuinely
+    // dead ones are touched.
+    if cfg_browser {
+        crate::tools::reap_orphaned_browsers(&browser_path);
+    }
     if failed {
         std::process::exit(2);
     }

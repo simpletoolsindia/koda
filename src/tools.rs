@@ -4,6 +4,7 @@
 use crate::config::Config;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -3060,6 +3061,240 @@ pub fn browser_session_file(root: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("{id}.json"))
 }
 
+/// The browser session this process started and left running, if any.
+///
+/// `agent-browser` is a daemon on purpose: with `browser_session` on, the
+/// engine stays warm so the next `browse` call does not pay for a fresh Chrome.
+/// Nothing was ever telling it the session had ended, though, so the engine and
+/// the whole Chrome tree behind it outlived koda -- reparented to init, holding
+/// a gigabyte, invisible unless you go looking in `ps`. Three quit sessions and
+/// a laptop is swapping.
+///
+/// Recorded here rather than passed to the exit path because `restore` runs
+/// from the terminal teardown, which has no config and no workspace root; this
+/// is the same shape `dap`'s session slot uses for the same reason.
+static LIVE_BROWSER: OnceLock<std::sync::Mutex<BTreeMap<String, PathBuf>>> = OnceLock::new();
+
+fn live_browser() -> &'static std::sync::Mutex<BTreeMap<String, PathBuf>> {
+    LIVE_BROWSER.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Where koda records that it, specifically, left this engine running.
+///
+/// The file holds koda's pid. It is what lets the next start tell a genuinely
+/// orphaned engine -- one whose koda was killed -- from one a second koda in
+/// the same workspace is using right now. Without it the only safe choice is to
+/// leave every engine alone, which is how a SIGKILL leaks one for ever.
+fn browser_owner_file(session: &str) -> PathBuf {
+    browser_socket_dir().join(format!("{session}.owner"))
+}
+
+/// Note that a warm engine is running, so exit can close it.
+///
+/// A map rather than a single slot: the session id comes from the workspace
+/// root, and one process can touch more than one -- so remembering only the
+/// last one would close one engine and leak the rest.
+fn remember_browser_session(bin: &Path, session: &str) {
+    let first = match live_browser().lock() {
+        Ok(mut live) => live
+            .insert(session.to_string(), bin.to_path_buf())
+            .is_none(),
+        Err(_) => false,
+    };
+    if first {
+        let _ = std::fs::write(browser_owner_file(session), std::process::id().to_string());
+    }
+}
+
+/// Forget one engine, once it is known to be closed.
+fn forget_browser_session(session: &str) {
+    if let Ok(mut live) = live_browser().lock() {
+        live.remove(session);
+    }
+    let _ = std::fs::remove_file(browser_owner_file(session));
+}
+
+/// Whether a pid is a live koda.
+///
+/// Both halves matter. A pid that is gone means the engine is orphaned; a pid
+/// that has been *reused* by some unrelated program would otherwise make koda
+/// leave an orphaned engine alone for ever, so the name is checked too.
+fn pid_is_live_koda(pid: u32) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+    else {
+        // No `ps` to ask: assume it is alive rather than reap something that
+        // might be in use. A leaked engine is a bad day; killing a running
+        // session's browser is a bad bug.
+        return true;
+    };
+    let comm = String::from_utf8_lossy(&out.stdout);
+    let comm = comm.trim();
+    !comm.is_empty()
+        && Path::new(comm)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("koda"))
+            .unwrap_or(false)
+}
+
+/// Close browse engines left behind by a koda that is no longer running.
+///
+/// The other half of the exit teardown. Signals koda can catch are handled on
+/// the way out; SIGKILL, a panic in the terminal layer, or the machine losing
+/// power are not, and an engine holding a headless Chrome then survives for
+/// ever -- reparented to init, invisible unless you go looking in `ps`, about a
+/// gigabyte each.
+///
+/// Conservative by construction: it only touches sessions koda itself recorded,
+/// and only when the koda that recorded one is provably gone. Most of the time
+/// it finds a record for an engine that is already closed, and the close is a
+/// harmless no-op -- that is the point. The cost is one process spawn on the
+/// first start after a session that browsed; the alternative is a browser that
+/// survives for ever because one close went unheard.
+pub fn reap_orphaned_browsers(browser_path: &str) {
+    // Deliberately not `browser_socket_dir()`, which creates the directory. A
+    // koda that has never browsed has no directory, and this must be able to
+    // find that out without making one.
+    let dir = std::env::temp_dir().join("koda-agent-browser");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut engine: Option<PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("owner") {
+            continue;
+        }
+        let Some(session) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Our own sessions are live by definition; exit will close them.
+        if live_browser()
+            .lock()
+            .map(|m| m.contains_key(session))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let owner = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok());
+        match owner {
+            Some(pid) if pid_is_live_koda(pid) => continue,
+            // An unreadable owner file is not evidence of anything, and acting
+            // on no evidence is how this reaps a browser someone is using.
+            None => continue,
+            Some(_) => {}
+        }
+        let bin = match &engine {
+            Some(b) => b.clone(),
+            None => match find_agent_browser(browser_path) {
+                Some(b) => {
+                    engine = Some(b.clone());
+                    b
+                }
+                None => return,
+            },
+        };
+        crate::tel_info!("browser", "reaping an orphaned engine", "session" => session);
+        close_engine(&bin, session);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Close the browser engine this process left running.
+///
+/// Called from the terminal teardown alongside the debugger's shutdown, and a
+/// no-op when no engine was started -- which is most sessions, so it must not
+/// cost a process spawn to find that out.
+pub fn shutdown_browser() {
+    let live: Vec<(String, PathBuf)> = live_browser()
+        .lock()
+        .map(|mut m| std::mem::take(&mut *m).into_iter().collect())
+        .unwrap_or_default();
+    for (session, bin) in live {
+        close_engine(&bin, &session);
+    }
+}
+
+/// Close only the sessions named, leaving every other engine alone.
+///
+/// For tests, which run concurrently against distinct workspaces: the blanket
+/// `shutdown_browser` is right at exit, when koda owns everything it started,
+/// and wrong inside a test, where it would reap the engine another test is in
+/// the middle of using.
+#[cfg(test)]
+fn close_browser_sessions(sessions: &[String]) {
+    for session in sessions {
+        let bin = live_browser()
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(session));
+        if let Some(bin) = bin {
+            close_engine(&bin, session);
+        }
+    }
+}
+
+/// Close one engine and wait, briefly, for it to go.
+///
+/// The session id has to be the one the engine actually registered under. A
+/// `close` naming a session that is not there exits 0 and prints "✓ Browser
+/// closed" having reaped nothing -- which is exactly how a leak this size stayed
+/// invisible. Hence the id is recorded when the engine is started rather than
+/// reconstructed here.
+fn close_engine(bin: &Path, session: &str) {
+    // The ownership record is deliberately *not* removed here. A close is not
+    // a guarantee: issued while the engine is mid-operation it can go
+    // unhonoured, and it reports success either way. Leaving the record means
+    // the next koda re-checks -- finds the owning pid dead, and closes again
+    // against an engine that is now idle. Removing it here is what let a
+    // survivor become permanent. Callers that are staying alive and know the
+    // engine is gone drop the record through `forget_browser_session`.
+    //
+    // Twice, for the same reason. The failure this was caught by: a signal
+    // arriving mid-browse, the close landing while the engine was still
+    // serving a batch, and the engine surviving -- holding a headless Chrome,
+    // reparented to init. The second attempt finds it idle.
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
+        close_engine_once(bin, session);
+    }
+}
+
+/// One `close`, time-boxed.
+fn close_engine_once(bin: &Path, session: &str) {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("--session").arg(session);
+    cmd.env("AGENT_BROWSER_SOCKET_DIR", browser_socket_dir());
+    cmd.arg("close");
+    // Silenced and time-boxed: this runs while the terminal is being handed
+    // back, so it may not print, and an engine that will not answer must not
+    // hold the exit. Killing the CLI does not strand the daemon -- the next
+    // start reuses the same socket, and a session file is not left behind.
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    let Ok(mut child) = cmd.spawn() else { return };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+}
+
 /// Canonical socket directory for agent-browser communication.
 pub fn browser_socket_dir() -> &'static Path {
     static SOCK_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -3207,6 +3442,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             let _ = cmd.output();
         }
         let _ = std::fs::remove_file(&session_file);
+        forget_browser_session(&session_id);
         return Ok(Outcome::ok("closed browser session", "browser closed"));
     }
 
@@ -3372,6 +3608,14 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
              `koda browser install` — or set `browser_path` to your own copy.",
         ));
     };
+
+    // From here a warm engine may be left running, so exit has to know about
+    // it. Recorded before the call rather than after: a batch that starts the
+    // daemon and then fails still leaves the daemon behind, and that is exactly
+    // the case that used to leak.
+    if use_session {
+        remember_browser_session(&agent_browser_bin, &session_id);
+    }
 
     let target = if let Some(idx) = target_index {
         format!("@e{idx}")
@@ -3655,6 +3899,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
                 cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
                 cmd.arg("close");
                 let _ = cmd.output();
+                forget_browser_session(&session_id);
             }
             return Ok(Outcome::err(format!("browse failed: {e}")));
         }
@@ -3753,6 +3998,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
         cmd.arg("close");
         let _ = cmd.output();
+        forget_browser_session(&session_id);
     }
 
     let summary = match action.as_str() {
@@ -3867,6 +4113,262 @@ mod tests {
         assert_eq!(url_encode("abc-123_.~"), "abc-123_.~");
     }
 
+    /// The leak this exists to stop: `agent-browser` is a daemon holding a
+    /// headless Chrome, kept warm on purpose between calls, and nothing closed
+    /// it when koda exited. Three quit sessions left three browsers running,
+    /// reparented to init, ~3.6 GB between them.
+    ///
+    /// Records only, under names unique to this test, so it needs no lock and
+    /// cannot disturb a browse test running beside it.
+    #[test]
+    fn the_warm_browser_is_remembered_so_exit_can_close_it() {
+        let bin = Path::new("/usr/bin/true");
+        if !bin.is_file() {
+            return;
+        }
+        let tag = format!(
+            "koda-rec-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let (a, b) = (format!("{tag}-a"), format!("{tag}-b"));
+
+        // Every session is remembered, not just the last -- the id comes from
+        // the workspace root, so one process can hold more than one, and
+        // remembering only the newest would close one and leak the others.
+        remember_browser_session(bin, &a);
+        remember_browser_session(bin, &b);
+        {
+            let live = live_browser().lock().unwrap();
+            assert!(live.contains_key(&a) && live.contains_key(&b));
+        }
+        assert!(
+            browser_owner_file(&a).exists(),
+            "no ownership record written"
+        );
+
+        // Closing one drops only that one: the record is what identifies an
+        // engine later, and dropping the wrong one strands it for ever.
+        let t = std::time::Instant::now();
+        close_browser_sessions(std::slice::from_ref(&a));
+        {
+            let live = live_browser().lock().unwrap();
+            assert!(!live.contains_key(&a), "the closed session was not dropped");
+            assert!(live.contains_key(&b), "an unrelated session was dropped");
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(12),
+            "each close is time-boxed so a wedged engine cannot hold the exit"
+        );
+        // The ownership record deliberately outlives the close, so a later
+        // start can re-check an engine that ignored it.
+        assert!(
+            browser_owner_file(&a).exists(),
+            "the record must survive a close, or a survivor becomes permanent"
+        );
+
+        // `forget` is for when koda is staying alive and knows it is gone.
+        forget_browser_session(&a);
+        forget_browser_session(&b);
+        for stale in [&a, &b] {
+            assert!(!browser_owner_file(stale).exists(), "{stale} left a record");
+        }
+    }
+
+    /// The reaper must never touch an engine that is still in use. Getting this
+    /// wrong is worse than the leak: it kills a browser out from under a second
+    /// koda working in the same repo.
+    #[test]
+    fn a_live_kodas_engine_is_left_alone() {
+        // Our own pid is a live koda -- the test binary is named `koda-<hash>`.
+        assert!(
+            pid_is_live_koda(std::process::id()),
+            "koda must recognise itself as live, or the reaper eats its own engine"
+        );
+        // A pid that is alive but is not koda must not count as an owner.
+        assert!(!pid_is_live_koda(1));
+
+        // A session this process is holding is skipped even though its owner
+        // file names a dead pid, because this koda will close it at exit.
+        let session = format!(
+            "koda-live-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        remember_browser_session(Path::new("/usr/bin/true"), &session);
+        std::fs::write(browser_owner_file(&session), "1").expect("owner file");
+        reap_orphaned_browsers("");
+        assert!(
+            browser_owner_file(&session).exists(),
+            "the reaper touched a session this process is holding"
+        );
+        forget_browser_session(&session);
+        assert!(
+            !browser_owner_file(&session).exists(),
+            "left a record behind"
+        );
+    }
+
+    /// Exclusive use of the browse engine for one test.
+    ///
+    /// The process table is the only way to see an engine -- the daemon's argv
+    /// carries no session -- so a test that asks "is my engine gone?" can only
+    /// answer it by difference, and a *concurrent* test starting one makes that
+    /// difference a lie. Every test that starts an engine takes this, so the
+    /// difference means what it says.
+    fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The set of browse-engine pids running right now.
+    ///
+    /// Pids, not a count. A count cannot survive a parallel suite: another
+    /// test starting its own engine moves the number, and the assertion then
+    /// fails for a reason that has nothing to do with the code under test.
+    /// Identity is stable where a total is not.
+    fn engine_pids() -> std::collections::BTreeSet<u32> {
+        std::process::Command::new("pgrep")
+            .args(["-f", "bin/agent-browser"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| l.trim().parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Wait for these pids to disappear, up to a deadline.
+    fn wait_gone(pids: &std::collections::BTreeSet<u32>, wait: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let now = engine_pids();
+            if pids.iter().all(|p| !now.contains(p)) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    /// SIGKILL cannot be caught, so the engine it strands has to be cleaned up
+    /// by the *next* koda. This is the exact shape of that: an engine running,
+    /// its owner file naming a pid that is gone.
+    #[test]
+    fn an_engine_whose_koda_was_killed_is_reaped_on_the_next_start() {
+        let _engine = engine_lock();
+        let Some(bin) = find_agent_browser("") else {
+            eprintln!("SKIP: agent-browser is not installed (`koda browser install`)");
+            return;
+        };
+        let session = format!(
+            "koda-orphan-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let before = engine_pids();
+
+        // Start a real engine and hand it an owner file naming a dead pid --
+        // which is precisely what a `kill -9`ed koda leaves behind.
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("--session").arg(&session);
+        cmd.env("AGENT_BROWSER_SOCKET_DIR", browser_socket_dir());
+        cmd.args(["open", "about:blank"]);
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        let started = cmd.status().map(|s| s.success()).unwrap_or(false);
+        let mine: std::collections::BTreeSet<u32> =
+            engine_pids().difference(&before).copied().collect();
+        if !started || mine.is_empty() {
+            eprintln!("SKIP: the engine would not start");
+            let _ = std::fs::remove_file(browser_owner_file(&session));
+            return;
+        }
+        // A pid that cannot be koda: pid 1 is init, which also exercises the
+        // "the pid was reused by something else" half of the liveness check.
+        std::fs::write(browser_owner_file(&session), "1").expect("owner file");
+        assert!(!pid_is_live_koda(1), "pid 1 is init, not a koda");
+
+        reap_orphaned_browsers("");
+
+        assert!(
+            wait_gone(&mine, std::time::Duration::from_secs(20)),
+            "an orphaned engine survived the next start — kill -9 still leaks"
+        );
+        assert!(
+            !browser_owner_file(&session).exists(),
+            "the ownership record must go with the engine"
+        );
+    }
+
+    /// The fix, end to end against the real engine: browse, then quit, and the
+    /// engine that browse started is gone.
+    ///
+    /// Worth a live test rather than a unit one because the whole bug was an
+    /// assumption about the engine that turned out to be wrong -- a `close`
+    /// naming a session that does not exist prints "✓ Browser closed" and
+    /// reaps nothing, which is why the leak went unnoticed for so long. Only
+    /// starting a real engine and looking at the process table proves it.
+    #[test]
+    fn quitting_koda_leaves_no_browser_running() {
+        let _engine = engine_lock();
+        let Some(_) = find_agent_browser("") else {
+            eprintln!("SKIP: agent-browser is not installed (`koda browser install`)");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "koda-leak-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let cfg = Config {
+            browser: true,
+            // The leaking configuration: the engine is kept warm between calls,
+            // which is the default and the whole point of the session.
+            browser_session: true,
+            ..Config::default()
+        };
+        let ctx = ToolCtx {
+            root: dir.clone(),
+            cfg: Arc::new(cfg),
+            progress: None,
+        };
+
+        let before = engine_pids();
+        // A machine with no network still exercises the leak: the engine is
+        // started before the navigation is attempted.
+        let _ = browse(
+            &json!({ "action": "read", "url": "https://example.com" }),
+            &ctx,
+        );
+        let session = browser_session_id(&dir);
+        assert!(
+            live_browser().lock().unwrap().contains_key(&session),
+            "browse must record the session it left warm, or exit cannot close it"
+        );
+        let mine: std::collections::BTreeSet<u32> =
+            engine_pids().difference(&before).copied().collect();
+
+        // What `restore` does at exit, narrowed to this test's own session so
+        // it cannot reap an engine another test is using.
+        close_browser_sessions(&[session]);
+
+        if !mine.is_empty() {
+            assert!(
+                wait_gone(&mine, std::time::Duration::from_secs(20)),
+                "quitting left a browser engine running — this is the leak"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn browser_socket_dir_is_stable() {
         let p1 = browser_socket_dir();
@@ -3901,6 +4403,7 @@ mod tests {
 
     #[test]
     fn test_browse_live_agent_browser() {
+        let _engine = engine_lock();
         // The engine is downloaded on demand, so a machine that has never run
         // `browse` has not got it yet. Say so rather than failing a test about
         // browsing on a machine that cannot browse.
@@ -3919,22 +4422,40 @@ mod tests {
             cfg: Arc::new(cfg),
             progress: None,
         };
-        let res = browse(
-            &json!({
-                "action": "search",
-                "query": "Quantum computing",
-                "engine": "duckduckgo"
-            }),
-            &ctx,
-        )
-        .unwrap();
+        // Two attempts, because the first browse of a run starts a browser
+        // from cold and then reaches a real search engine, and that pair can
+        // exceed the page timeout on a loaded machine. This used to be hidden:
+        // the test binary leaked its engine, so every run after the first found
+        // one already warm. Closing the engine properly exposed the dependency,
+        // which is the test's problem and not the browser's -- a real user's
+        // first browse is always cold too.
+        let query = json!({
+            "action": "search",
+            "query": "Quantum computing",
+            "engine": "duckduckgo"
+        });
+        let mut res = browse(&query, &ctx).unwrap();
+        if !res.ok {
+            println!("first attempt failed ({}), retrying warm", res.summary);
+            res = browse(&query, &ctx).unwrap();
+        }
         println!("RES OK: {}", res.ok);
         println!(
             "RES CONTENT:\n{}",
             res.content.chars().take(400).collect::<String>()
         );
-        assert!(res.ok);
+        // A machine with no route to the internet is not a failing browser.
+        if !res.ok && res.content.to_lowercase().contains("timed out") {
+            eprintln!("SKIP: no usable network for the live search test");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(res.ok, "{}", res.content);
         assert!(res.content.to_lowercase().contains("quantum"));
+        // Close what this test opened. The engine is a daemon holding a
+        // headless Chrome; a test that walks away from one is how `cargo test`
+        // ends up costing a gigabyte a run.
+        let _ = browse(&json!({ "action": "close" }), &ctx);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3994,6 +4515,7 @@ mod tests {
     /// `cargo test --bin koda -- --ignored --test-threads=1 every_action`
     #[test]
     fn test_browse_every_action() {
+        let _engine = engine_lock();
         // The engine is downloaded on demand, so a machine that has never run
         // `browse` has not got it yet. Say so rather than failing a test about
         // browsing on a machine that cannot browse.
@@ -4181,10 +4703,14 @@ mod tests {
             "download wrote {dl_ok:?}, not the served file"
         );
         assert!(failed.is_empty(), "these actions failed: {failed:?}");
+        // `close` was exercised mid-list, so the engine may have been restarted
+        // by the actions after it. Close it again on the way out.
+        let _ = run(json!({ "action": "close" }));
     }
 
     #[test]
     fn test_browse_wikipedia_search_and_read() {
+        let _engine = engine_lock();
         // The engine is downloaded on demand, so a machine that has never run
         // `browse` has not got it yet. Say so rather than failing a test about
         // browsing on a machine that cannot browse.

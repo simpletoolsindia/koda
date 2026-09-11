@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sridhar Karuppusamy — Full Stack &amp; AI Architect</title>
+  <meta name="description" content="Sridhar Karuppusamy — Full Stack & AI Architect. 7+ years building enterprise systems with Java, Spring Boot, React and Generative AI. Based in Coimbatore, India. Open for freelance & consulting." />
+  <meta name="color-scheme" content="dark" />
+  <meta property="og:title" content="Sridhar Karuppusamy — Full Stack & AI Architect" />
+  <meta property="og:description" content="Enterprise systems, microservices and Gen AI agents. Open for freelance & consulting." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://simpletools.in/" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Sridhar Karuppusamy — Full Stack & AI Architect" />
+  <meta name="twitter:description" content="Enterprise systems, microservices and Gen AI agents. Open for freelance & consulting." />
+  <link rel="canonical" href="https://simpletools.in/" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%238b5cf6'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='36' font-weight='bold' text-anchor='middle' fill='%2306060a'%3ES%3C/text%3E%3C/svg%3E" />
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Person",
+    "name": "Sridhar Karuppusamy",
+    "jobTitle": "Full Stack & AI Architect",
+    "description": "Senior Software Engineer with 7+ years building enterprise systems with Java, Spring Boot, React and Generative AI.",
+    "url": "https://simpletools.in/",
+    "email": "mailto:support@simpletools.in",
+    "address": { "@type": "PostalAddress", "addressLocality": "Coimbatore", "addressRegion": "Tamil Nadu", "addressCountry": "IN" },
+    "sameAs": [
+      "https://github.com/simpletoolsindia",
+      "https://wa.me/917373735013"
+    ],
+    "knowsAbout": ["Java", "Spring Boot", "React.js", "Python", "Generative AI", "AWS", "Docker", "Microservices"]
+  }
+  </script>
+
+  <!-- Tailwind Play CDN (no build step) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+          },
+          colors: {
+            ink:    '#06060a',
+            panel:  '#0c0d14',
+            edge:   '#1d1f2e',
+            neon:   '#8b5cf6',
+            cyan:   '#22d3ee',
+            lime:   '#a3e635',
+            amber:  '#fbbf24',
+            rose:   '#fb7185',
+          },
+          keyframes: {
+            marquee:  { '0%': { transform: 'translateX(0)' }, '100%': { transform: 'translateX(-50%)' } },
+            floaty:   { '0%,100%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-10px)' } },
+            blink:    { '0%,49%': { opacity: '1' }, '50%,100%': { opacity: '0' } },
+            pulseDot: { '0%,100%': { opacity: '1' }, '50%': { opacity: '.35' } },
+            spinSlow: { 'to': { transform: 'rotate(360deg)' } },
+          },
+          animation: {
+            marquee:  'marquee 28s linear infinite',
+            floaty:   'floaty 7s ease-in-out infinite',
+            blink:    'blink 1.1s step-end infinite',
+            pulseDot: 'pulseDot 2s ease-in-out infinite',
+            spinSlow: 'spinSlow 14s linear infinite',
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+  <style>
+    :root { color-scheme: dark; }
+    html { background: #06060a; }
+    body { -webkit-font-smoothing: antialiased; }
+
+    /* ---- Ambient backdrop: aurora mesh + grid + grain ---- */
+    .aurora {
+      background:
+        radial-gradient(55rem 38rem at 15% -12%, rgba(139,92,246,.30), transparent 60%),
+        radial-gradient(48rem 36rem at 88% -5%,  rgba(34,211,238,.16), transparent 55%),
+        radial-gradient(42rem 32rem at 50% 118%, rgba(163,230,53,.10), transparent 60%);
+    }
+    .grid-fade {
+      background-image:
+        linear-gradient(rgba(139,92,246,.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(139,92,246,.07) 1px, transparent 1px);
+      background-size: 46px 46px;
+      -webkit-mask-image: radial-gradient(75% 55% at 50% 18%, #000 35%, transparent 100%);
+              mask-image: radial-gradient(75% 55% at 50% 18%, #000 35%, transparent 100%);
+    }
+    .grain::before {
+      content: "";
+      position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: .05;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+
+    /* ---- Type ---- */
+    .display { letter-spacing: -0.045em; line-height: .95; }
+    .text-gradient {
+      background: linear-gradient(94deg, #c4b5fd 0%, #22d3ee 52%, #a3e635 100%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .text-outline {
+      -webkit-text-stroke: 1.5px rgba(196,181,253,.55);
+      color: transparent;
+    }
+
+    /* ---- Surfaces ---- */
+    .glass {
+      background: linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.012));
+      border: 1px solid rgba(139,92,246,.16);
+      backdrop-filter: blur(14px);
+    }
+    .glass:hover { border-color: rgba(34,211,238,.35); }
+    .glow { box-shadow: 0 0 0 1px rgba(139,92,246,.22), 0 30px 80px -30px rgba(139,92,246,.5); }
+    .ring-soft { box-shadow: 0 0 60px -18px rgba(34,211,238,.35); }
+
+    /* ---- Cursor glow ---- */
+    #cursor-glow {
+      position: fixed; z-index: 0; width: 520px; height: 520px; border-radius: 9999px;
+      background: radial-gradient(circle, rgba(139,92,246,.14), rgba(34,211,238,.05) 45%, transparent 70%);
+      transform: translate(-50%, -50%); pointer-events: none;
+      transition: opacity .4s ease; will-change: left, top;
+    }
+
+    /* ---- Scroll reveal ---- */
+    .reveal { opacity: 0; transform: translateY(26px); transition: opacity .7s ease, transform .7s cubic-bezier(.2,.7,.2,1); }
+    .reveal.is-in { opacity: 1; transform: none; }
+
+    /* ---- Tilt cards ---- */
+    .tilt { transform-style: preserve-3d; transition: transform .18s ease, border-color .25s ease; }
+
+    /* ---- Marquee ---- */
+    .marquee-mask {
+      -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+              mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+    }
+
+    /* ---- Terminal ---- */
+    .term { background: #0a0b11; border: 1px solid #1d1f2e; }
+    .term-dot { width: .65rem; height: .65rem; border-radius: 9999px; }
+
+    /* ---- Skill bars ---- */
+    .bar-fill { width: 0; transition: width 1.2s cubic-bezier(.2,.7,.2,1) .15s; }
+    .is-in .bar-fill { width: var(--w); }
+
+    /* ---- Misc ---- */
+    a:focus-visible, button:focus-visible { outline: 2px solid #22d3ee; outline-offset: 3px; border-radius: .4rem; }
+    ::selection { background: rgba(139,92,246,.4); }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { scrollbar-width: none; }
+
+    /* ---- Scroll progress ---- */
+    #scroll-progress {
+      position: fixed; top: 0; left: 0; z-index: 60; height: 2px; width: 0;
+      background: linear-gradient(90deg, #8b5cf6, #22d3ee, #a3e635);
+      box-shadow: 0 0 12px rgba(139,92,246,.6);
+    }
+
+    /* ---- Nav active state ---- */
+    .nav-link { position: relative; }
+    .nav-link.is-active { color: #fff; }
+    .nav-link.is-active::after {
+      content: ""; position: absolute; left: 1rem; right: 1rem; bottom: .3rem; height: 2px; border-radius: 2px;
+      background: linear-gradient(90deg, #8b5cf6, #22d3ee);
+    }
+
+    /* ---- Mobile menu ---- */
+    #mobile-menu { transition: opacity .25s ease, transform .25s ease; }
+    #mobile-menu.is-open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    #mobile-menu:not(.is-open) { opacity: 0; transform: translateY(-8px); pointer-events: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+      .reveal { opacity: 1; transform: none; }
+      .bar-fill { width: var(--w); }
+      #cursor-glow { display: none; }
+      #scroll-progress { display: none; }
+    }
+  </style>
+</head>
+
+<body class="bg-ink text-slate-200 font-sans antialiased grain overflow-x-hidden">
+
+  <a href="#work" class="sr-only focus:not-sr-only focus:fixed focus:z-50 focus:top-3 focus:left-3 focus:bg-neon focus:text-white focus:px-4 focus:py-2 focus:rounded-lg">Skip to content</a>
+
+  <div id="cursor-glow" aria-hidden="true"></div>
+
+  <!-- Ambient backdrop -->
+  <div class="fixed inset-0 -z-10 aurora" aria-hidden="true"></div>
+  <div class="fixed inset-0 -z-10 grid-fade" aria-hidden="true"></div>
+
+  <!-- ============ NAV ============ -->
+  <header class="sticky top-0 z-40">
+    <nav class="mx-auto max-w-7xl px-4 sm:px-6 pt-4" aria-label="Primary">
+      <div class="glass rounded-2xl flex items-center justify-between pl-5 pr-2.5 py-2.5">
+        <a href="#top" class="flex items-center gap-2.5 group">
+          <span class="grid place-items-center w-9 h-9 rounded-xl bg-gradient-to-br from-neon to-cyan text-ink font-mono font-bold shadow-lg" aria-hidden="true">S</span>
+          <span class="font-mono text-sm font-bold tracking-tight text-white">sridhar<span class="text-cyan">.dev</span></span>
+        </a>
+        <div class="hidden md:flex items-center gap-1 text-sm text-slate-400">
+          <a href="#about"  class="px-3.5 py-2 rounded-xl hover:text-white hover:bg-white/5 transition">About</a>
+          <a href="#work"   class="px-3.5 py-2 rounded-xl hover:text-white hover:bg-white/5 transition">Work</a>
+          <a href="#oss"    class="px-3.5 py-2 rounded-xl hover:text-white hover:bg-white/5 transition">OSS</a>
+          <a href="#stack"  class="px-3.5 py-2 rounded-xl hover:text-white hover:bg-white/5 transition">Stack</a>
+          <a href="#contact" class="px-3.5 py-2 rounded-xl hover:text-white hover:bg-white/5 transition">Contact</a>
+        </div>
+        <a href="mailto:support@simpletools.in" class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-neon to-cyan text-ink text-sm font-semibold px-4 py-2.5 hover:opacity-90 transition shadow-lg shadow-neon/25">
+          <span class="relative flex h-2 w-2"><span class="animate-pulseDot absolute inline-flex h-full w-full rounded-full bg-ink/60"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-ink"></span></span>
+          Hire me
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="top" class="relative z-10">
+
+    <!-- ============ HERO ============ -->
+    <section class="mx-auto max-w-7xl px-4 sm:px-6 pt-14 sm:pt-20 pb-16">
+      <div class="grid lg:grid-cols-[1.15fr_.85fr] gap-10 lg:gap-14 items-center">
+
+        <div>
+          <p class="reveal inline-flex items-center gap-2 rounded-full border border-lime/30 bg-lime/10 text-lime text-xs font-mono px-4 py-2 mb-7">
+            <span class="relative flex h-2 w-2"><span class="animate-pulseDot absolute inline-flex h-full w-full rounded-full bg-lime opacity-60"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-lime"></span></span>
+            Available for projects — Coimbatore, IN
+          </p>
+
+          <h1 class="reveal display font-black text-white text-5xl sm:text-7xl lg:text-[5.2rem]">
+            Full Stack<br />&amp; <span class="text-gradient">AI Architect</span>
+          </h1>
+
+          <p class="reveal mt-7 max-w-xl text-lg text-slate-400 leading-relaxed">
+            I'm <span class="text-white font-semibold">Sridhar Karuppusamy</span>. I architect scalable enterprise systems with
+            <span class="text-slate-200">Spring Boot &amp; React</span> and build the future with
+            <span class="text-slate-200">Python &amp; Generative AI agents</span> — 7+ years of shipping, from legacy migrations to real-time platforms.
+          </p>
+
+          <div class="reveal mt-9 flex flex-wrap items-center gap-4">
+            <a href="#work" class="group inline-flex items-center gap-2.5 rounded-xl bg-white text-ink font-semibold px-6 py-3.5 hover:bg-slate-200 transition shadow-xl shadow-white/10">
+              View my work
+              <svg class="transition-transform group-hover:translate-y-0.5" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 2v11M3.5 8.5 8 13l4.5-4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+            <a href="https://wa.me/917373735013" class="inline-flex items-center gap-2.5 rounded-xl border border-edge bg-white/5 px-6 py-3.5 font-medium text-slate-200 hover:border-cyan/50 hover:text-white transition">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" class="text-cyan" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2Zm5.3 14.1c-.2.7-1.3 1.3-1.9 1.4-.5.1-1.1.1-1.7-.1-.4-.1-.9-.3-1.6-.6-2.8-1.2-4.6-4-4.8-4.2-.1-.2-1.1-1.4-1.1-2.7 0-1.3.7-1.9.9-2.2.2-.2.5-.3.7-.3h.5c.2 0 .4 0 .6.5l.8 1.9c.1.2.1.4 0 .5l-.4.6c-.1.2-.3.3-.1.6.1.3.7 1.1 1.5 1.8 1 .9 1.9 1.1 2.1 1.2.2.1.4.1.6-.1l.7-.8c.2-.2.4-.2.6-.1l1.8.9c.2.1.4.2.5.3.1.2.1.7-.1 1.4Z"/></svg>
+              WhatsApp me
+            </a>
+          </div>
+
+          <!-- quick stats -->
+          <dl class="reveal mt-12 grid grid-cols-3 gap-4 max-w-lg">
+            <div class="glass rounded-2xl p-4">
+              <dt class="text-[11px] uppercase tracking-widest text-slate-500 font-mono">Experience</dt>
+              <dd class="mt-1.5 text-2xl font-extrabold text-white">7<span class="text-cyan">+</span> yrs</dd>
+            </div>
+            <div class="glass rounded-2xl p-4">
+              <dt class="text-[11px] uppercase tracking-widest text-slate-500 font-mono">Focus</dt>
+              <dd class="mt-1.5 text-2xl font-extrabold text-white">Gen AI</dd>
+            </div>
+            <div class="glass rounded-2xl p-4">
+              <dt class="text-[11px] uppercase tracking-widest text-slate-500 font-mono">Scale</dt>
+              <dd class="mt-1.5 text-2xl font-extrabold text-white">1000s<span class="text-cyan">/day</span></dd>
+            </div>
+          </dl>
+        </div>
+
+        <!-- Terminal card -->
+        <div class="reveal relative">
+          <div class="absolute -inset-6 rounded-[2rem] bg-gradient-to-br from-neon/25 via-cyan/10 to-transparent blur-2xl" aria-hidden="true"></div>
+          <div class="term glow rounded-2xl overflow-hidden animate-floaty">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-edge bg-white/[.02]">
+              <span class="term-dot bg-rose/80"></span><span class="term-dot bg-amber/80"></span><span class="term-dot bg-lime/80"></span>
+              <span class="ml-3 font-mono text-xs text-slate-500">sridhar@coimbatore — zsh</span>
+            </div>
+            <div class="p-5 font-mono text-[13px] leading-7 min-h-[280px]">
+              <p class="text-slate-500"><span class="text-cyan">➜</span> <span class="text-neon">~</span> whoami</p>
+              <p class="text-slate-200" id="type-line-1"></p>
+              <p class="text-slate-500 mt-3"><span class="text-cyan">➜</span> <span class="text-neon">~</span> cat focus.txt</p>
+              <p class="text-slate-300">java · spring-boot · react · python · gen-ai · aws</p>
+              <p class="text-slate-500 mt-3"><span class="text-cyan">➜</span> <span class="text-neon">~</span> status --now</p>
+              <p class="text-lime">● open to freelance &amp; consulting</p>
+              <p class="text-slate-500 mt-3"><span class="text-cyan">➜</span> <span class="text-neon">~</span> <span class="animate-blink text-white">▍</span></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ MARQUEE ============ -->
+    <section class="marquee-mask border-y border-edge/60 py-5 overflow-hidden" aria-hidden="true">
+      <div class="flex w-max animate-marquee gap-10 font-mono text-sm text-slate-500">
+        <div class="flex gap-10 shrink-0">
+          <span>Java</span><span class="text-neon">✦</span><span>Spring Boot</span><span class="text-cyan">✦</span><span>React.js</span><span class="text-lime">✦</span><span>Material UI</span><span class="text-amber">✦</span><span>Python</span><span class="text-rose">✦</span><span>Gen AI</span><span class="text-neon">✦</span><span>AWS</span><span class="text-cyan">✦</span><span>Docker</span><span class="text-lime">✦</span><span>SQL</span><span class="text-amber">✦</span><span>Git</span><span class="text-rose">✦</span><span>HTML5</span><span class="text-neon">✦</span><span>CSS3</span><span class="text-cyan">✦</span>
+        </div>
+        <div class="flex gap-10 shrink-0">
+          <span>Java</span><span class="text-neon">✦</span><span>Spring Boot</span><span class="text-cyan">✦</span><span>React.js</span><span class="text-lime">✦</span><span>Material UI</span><span class="text-amber">✦</span><span>Python</span><span class="text-rose">✦</span><span>Gen AI</span><span class="text-neon">✦</span><span>AWS</span><span class="text-cyan">✦</span><span>Docker</span><span class="text-lime">✦</span><span>SQL</span><span class="text-amber">✦</span><span>Git</span><span class="text-rose">✦</span><span>HTML5</span><span class="text-neon">✦</span><span>CSS3</span><span class="text-cyan">✦</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ ABOUT ============ -->
+    <section id="about" class="mx-auto max-w-7xl px-4 sm:px-6 py-24">
+      <div class="grid lg:grid-cols-[.9fr_1.1fr] gap-12 items-start">
+        <div class="reveal lg:sticky lg:top-28">
+          <p class="font-mono text-sm text-cyan">01. / about</p>
+          <h2 class="display mt-4 text-4xl sm:text-5xl font-black text-white">
+            Legacy in.<br /><span class="text-gradient">Modern out.</span>
+          </h2>
+          <p class="mt-6 text-slate-400 leading-relaxed max-w-md">
+            Senior Software Engineer with deep expertise in the Java ecosystem. I specialize in migrating legacy
+            <span class="text-slate-200">Struts</span> applications to modern
+            <span class="text-slate-200">microservices</span> architectures handling thousands of transactions —
+            and I'm building the next layer with Generative AI.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-2.5">
+            <span class="rounded-full border border-neon/30 bg-neon/10 px-4 py-1.5 text-sm text-slate-300">Senior Engineer</span>
+            <span class="rounded-full border border-cyan/30 bg-cyan/10 px-4 py-1.5 text-sm text-slate-300">Architecture</span>
+            <span class="rounded-full border border-lime/30 bg-lime/10 px-4 py-1.5 text-sm text-slate-300">AI Agents</span>
+          </div>
+        </div>
+
+        <div class="grid sm:grid-cols-2 gap-5">
+          <div class="reveal glass tilt rounded-2xl p-6 sm:col-span-2">
+            <p class="font-mono text-xs text-slate-500">CORE FOCUS</p>
+            <div class="mt-5 space-y-5">
+              <div><div class="flex justify-between text-sm mb-2"><span class="text-slate-300">Java · Spring Boot</span><span class="font-mono text-cyan">95%</span></div><div class="h-1.5 rounded-full bg-white/5"><div class="bar-fill h-full rounded-full bg-gradient-to-r from-neon to-cyan" style="--w:95%"></div></div></div>
+              <div><div class="flex justify-between text-sm mb-2"><span class="text-slate-300">React + Material UI</span><span class="font-mono text-cyan">90%</span></div><div class="h-1.5 rounded-full bg-white/5"><div class="bar-fill h-full rounded-full bg-gradient-to-r from-cyan to-lime" style="--w:90%"></div></div></div>
+              <div><div class="flex justify-between text-sm mb-2"><span class="text-slate-300">Python &amp; Gen AI</span><span class="font-mono text-cyan">88%</span></div><div class="h-1.5 rounded-full bg-white/5"><div class="bar-fill h-full rounded-full bg-gradient-to-r from-lime to-amber" style="--w:88%"></div></div></div>
+              <div><div class="flex justify-between text-sm mb-2"><span class="text-slate-300">AWS Cloud</span><span class="font-mono text-cyan">85%</span></div><div class="h-1.5 rounded-full bg-white/5"><div class="bar-fill h-full rounded-full bg-gradient-to-r from-amber to-rose" style="--w:85%"></div></div></div>
+            </div>
+          </div>
+          <div class="reveal glass rounded-2xl p-6">
+            <p class="text-3xl" aria-hidden="true">🏗️</p>
+            <p class="mt-3 font-bold text-white">Enterprise-grade</p>
+            <p class="mt-2 text-sm text-slate-400 leading-relaxed">Architectures that survive scale — thousands of transactions, real-time dashboards, zero-drama deploys.</p>
+          </div>
+          <div class="reveal glass rounded-2xl p-6">
+            <p class="text-3xl" aria-hidden="true">🤖</p>
+            <p class="mt-3 font-bold text-white">AI-native</p>
+            <p class="mt-2 text-sm text-slate-400 leading-relaxed">Gen AI agents for triage, automation and conversation — shipped, not slideware.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ WORK (bento) ============ -->
+    <section id="work" class="mx-auto max-w-7xl px-4 sm:px-6 py-24">
+      <div class="reveal flex items-end justify-between flex-wrap gap-4 mb-12">
+        <div>
+          <p class="font-mono text-sm text-cyan">02. / portfolio</p>
+          <h2 class="display mt-4 text-4xl sm:text-5xl font-black text-white">Selected <span class="text-gradient">deployments</span></h2>
+        </div>
+        <p class="font-mono text-xs text-slate-500">05 projects · production-grade</p>
+      </div>
+
+      <div class="grid md:grid-cols-6 gap-5">
+        <!-- Enterprise Job Automation — big tile -->
+        <article class="reveal tilt glass rounded-3xl p-7 md:col-span-4 md:row-span-2 relative overflow-hidden group">
+          <div class="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-neon/20 blur-3xl group-hover:bg-neon/30 transition" aria-hidden="true"></div>
+          <div class="relative">
+            <div class="flex items-center justify-between">
+              <span class="rounded-full border border-neon/40 bg-neon/10 px-3.5 py-1 text-xs font-mono text-neon">FLAGSHIP</span>
+              <span class="font-mono text-xs text-slate-500">2024 → now</span>
+            </div>
+            <h3 class="mt-6 text-2xl sm:text-3xl font-extrabold text-white">Enterprise Job Automation</h3>
+            <p class="mt-3 text-slate-400 max-w-md leading-relaxed">Real-time Autosys control dashboard for monitoring thousands of jobs. Led the migration of legacy Java Struts to React.js and AWS cloud.</p>
+            <div class="mt-6 flex flex-wrap gap-2">
+              <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">Spring Boot</span>
+              <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">React.js</span>
+              <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">AWS</span>
+            </div>
+            <div class="mt-8 h-1.5 rounded-full bg-white/5 overflow-hidden"><div class="bar-fill h-full rounded-full bg-gradient-to-r from-neon via-cyan to-lime" style="--w:96%"></div></div>
+            <p class="mt-2 font-mono text-[11px] text-slate-500">impact: 1000s of jobs monitored in real time</p>
+          </div>
+        </article>
+
+        <!-- Notification Engine -->
+        <article class="reveal tilt glass rounded-3xl p-7 md:col-span-2 group">
+          <span class="rounded-full border border-cyan/40 bg-cyan/10 px-3.5 py-1 text-xs font-mono text-cyan">MICROSERVICE</span>
+          <h3 class="mt-5 text-xl font-extrabold text-white">Notification Engine</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Java microservice for automated email notifications with dynamic templating.</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">Microservices</span>
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">Java</span>
+          </div>
+        </article>
+
+        <!-- Mac Store AI Bot -->
+        <article class="reveal tilt glass rounded-3xl p-7 md:col-span-2 group">
+          <span class="rounded-full border border-lime/40 bg-lime/10 px-3.5 py-1 text-xs font-mono text-lime">GEN AI</span>
+          <h3 class="mt-5 text-xl font-extrabold text-white">Mac Store AI Bot</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">WhatsApp automation for inventory checks and pricing queries using Gen AI.</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">Python</span>
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">AI Agents</span>
+          </div>
+        </article>
+
+        <!-- Clinic AI Reception -->
+        <article class="reveal tilt glass rounded-3xl p-7 md:col-span-2 group">
+          <span class="rounded-full border border-amber/40 bg-amber/10 px-3.5 py-1 text-xs font-mono text-amber">AI + UI</span>
+          <h3 class="mt-5 text-xl font-extrabold text-white">Clinic AI Reception</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Intelligent triage and appointment scheduling bot built with React Admin.</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">Material UI</span>
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">React.js</span>
+          </div>
+        </article>
+
+        <!-- Secure Booking System -->
+        <article class="reveal tilt glass rounded-3xl p-7 md:col-span-2 group">
+          <span class="rounded-full border border-rose/40 bg-rose/10 px-3.5 py-1 text-xs font-mono text-rose">PRIVACY-FIRST</span>
+          <h3 class="mt-5 text-xl font-extrabold text-white">Secure Booking System</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Privacy-first appointment system for mental health clinics.</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">SQL</span>
+            <span class="rounded-lg bg-white/5 border border-edge px-3 py-1 text-xs font-mono text-slate-300">API</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ OPEN SOURCE ============ -->
+    <section id="oss" class="mx-auto max-w-7xl px-4 sm:px-6 py-24">
+      <div class="reveal flex items-end justify-between flex-wrap gap-4 mb-12">
+        <div>
+          <p class="font-mono text-sm text-cyan">03. / open source</p>
+          <h2 class="display mt-4 text-4xl sm:text-5xl font-black text-white">Building in the <span class="text-gradient">open</span></h2>
+        </div>
+        <a href="https://github.com/simpletoolsindia" class="inline-flex items-center gap-2 rounded-xl border border-edge bg-white/5 px-4 py-2.5 text-sm font-medium text-slate-300 hover:border-cyan/50 hover:text-white transition">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+          github.com/simpletoolsindia
+        </a>
+      </div>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
+        <!-- koda -->
+        <a href="https://github.com/simpletoolsindia/koda" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-neon/40 bg-neon/10 px-3.5 py-1 text-xs font-mono text-neon">CODING AGENT</span>
+            <span class="font-mono text-xs text-slate-500">Rust</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">koda</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">A fast terminal coding agent for local LLMs — one ~6MB binary, OpenAI-compatible, reads & edits code and shows diffs before applying.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- Media-Automation -->
+        <a href="https://github.com/simpletoolsindia/Media-Automation" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-cyan/40 bg-cyan/10 px-3.5 py-1 text-xs font-mono text-cyan">MEDIA</span>
+            <span class="font-mono text-xs text-slate-500">Python</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">Media-Automation</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">All-in-one replacement for Sonarr + Radarr + Prowlarr + Overseerr — one app to manage your entire media pipeline.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- SEI MCP Server -->
+        <a href="https://github.com/simpletoolsindia/Software-Engineering-Intelligence-MCP-Server" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-lime/40 bg-lime/10 px-3.5 py-1 text-xs font-mono text-lime">MCP</span>
+            <span class="font-mono text-xs text-slate-500">TypeScript</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">SEI MCP Server</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Stop feeding Claude your entire codebase — give it a brain instead. Software-engineering intelligence as an MCP server.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- golden-agentic-dataset -->
+        <a href="https://github.com/simpletoolsindia/golden-agentic-dataset" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-amber/40 bg-amber/10 px-3.5 py-1 text-xs font-mono text-amber">DATASET</span>
+            <span class="font-mono text-xs text-slate-500">Python</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">Golden Agentic Dataset</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">One unified golden dataset for training agentic AI coding assistants — 10K samples from real sources, 100% tool-calling accuracy.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- llm-client-framework -->
+        <a href="https://github.com/simpletoolsindia/llm-client-framework" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-rose/40 bg-rose/10 px-3.5 py-1 text-xs font-mono text-rose">LIBRARY</span>
+            <span class="font-mono text-xs text-slate-500">Java</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">LLM Client Framework</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">A unified Java framework for talking to multiple LLM providers — Ollama, OpenAI, Claude and more behind one clean API.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- llm-copilot-tui -->
+        <a href="https://github.com/simpletoolsindia/llm-copilot-tui" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-neon/40 bg-neon/10 px-3.5 py-1 text-xs font-mono text-neon">TUI</span>
+            <span class="font-mono text-xs text-slate-500">TypeScript</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">LLM Copilot TUI</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">A Claude Code-style terminal UI for the LLM Client Framework — chat with any LLM provider from a beautiful TUI.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- focusflow -->
+        <a href="https://github.com/simpletoolsindia/focusflow" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-cyan/40 bg-cyan/10 px-3.5 py-1 text-xs font-mono text-cyan">PRODUCTIVITY</span>
+            <span class="font-mono text-xs text-slate-500">JavaScript</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">FocusFlow</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Offline-first productivity workspace with a bring-your-own AI copilot. No build, no server, no telemetry.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- aiplus -->
+        <a href="https://github.com/simpletoolsindia/aiplus" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-lime/40 bg-lime/10 px-3.5 py-1 text-xs font-mono text-lime">VS CODE</span>
+            <span class="font-mono text-xs text-slate-500">TypeScript</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">AI+ for VS Code</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Chat panel, ghost-text autocomplete and inline completion against your internal LLM gateway, delegated to a coding subagent.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- jloop -->
+        <a href="https://github.com/simpletoolsindia/jloop" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-amber/40 bg-amber/10 px-3.5 py-1 text-xs font-mono text-amber">AGENT</span>
+            <span class="font-mono text-xs text-slate-500">Java</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">jloop</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">Spring AI agent with file & shell tools — read, write, update, search, bash — on an OpenAI-compatible Ollama provider.</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+
+        <!-- funny-bunny -->
+        <a href="https://github.com/simpletoolsindia/funny-bunny" class="reveal tilt glass rounded-3xl p-7 group block">
+          <div class="flex items-center justify-between">
+            <span class="rounded-full border border-rose/40 bg-rose/10 px-3.5 py-1 text-xs font-mono text-rose">VS CODE</span>
+            <span class="font-mono text-xs text-slate-500">JavaScript</span>
+          </div>
+          <h3 class="mt-5 text-xl font-extrabold text-white group-hover:text-cyan transition">Panda Dev Buddy</h3>
+          <p class="mt-2.5 text-sm text-slate-400 leading-relaxed">A fun VS Code extension that adds a small animated panda companion to your coding environment. 🐼</p>
+          <p class="mt-5 font-mono text-xs text-slate-500 group-hover:text-cyan transition">view on github ↗</p>
+        </a>
+      </div>
+    </section>
+
+    <!-- ============ STACK ============ -->
+    <section id="stack" class="mx-auto max-w-7xl px-4 sm:px-6 py-24">
+      <div class="reveal mb-12">
+        <p class="font-mono text-sm text-cyan">04. / stack</p>
+        <h2 class="display mt-4 text-4xl sm:text-5xl font-black text-white">Technical <span class="text-gradient">arsenal</span></h2>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">☕</p><p class="mt-3 font-semibold text-white text-sm">Java</p><p class="font-mono text-[11px] text-slate-500 mt-1">core</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🍃</p><p class="mt-3 font-semibold text-white text-sm">Spring Boot</p><p class="font-mono text-[11px] text-slate-500 mt-1">backend</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">⚛️</p><p class="mt-3 font-semibold text-white text-sm">React.js</p><p class="font-mono text-[11px] text-slate-500 mt-1">frontend</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🎨</p><p class="mt-3 font-semibold text-white text-sm">Material UI</p><p class="font-mono text-[11px] text-slate-500 mt-1">frontend</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🐍</p><p class="mt-3 font-semibold text-white text-sm">Python</p><p class="font-mono text-[11px] text-slate-500 mt-1">ai / scripts</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🧠</p><p class="mt-3 font-semibold text-white text-sm">Gen AI</p><p class="font-mono text-[11px] text-slate-500 mt-1">agents</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">☁️</p><p class="mt-3 font-semibold text-white text-sm">AWS</p><p class="font-mono text-[11px] text-slate-500 mt-1">cloud</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🐳</p><p class="mt-3 font-semibold text-white text-sm">Docker</p><p class="font-mono text-[11px] text-slate-500 mt-1">devops</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🗄️</p><p class="mt-3 font-semibold text-white text-sm">SQL</p><p class="font-mono text-[11px] text-slate-500 mt-1">data</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🌿</p><p class="mt-3 font-semibold text-white text-sm">Git</p><p class="font-mono text-[11px] text-slate-500 mt-1">vcs</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">📄</p><p class="mt-3 font-semibold text-white text-sm">HTML5</p><p class="font-mono text-[11px] text-slate-500 mt-1">web</p></div>
+        <div class="reveal glass tilt rounded-2xl p-5 text-center"><p class="text-2xl" aria-hidden="true">🎯</p><p class="mt-3 font-semibold text-white text-sm">CSS3</p><p class="font-mono text-[11px] text-slate-500 mt-1">web</p></div>
+      </div>
+    </section>
+
+    <!-- ============ CONTACT ============ -->
+    <section id="contact" class="mx-auto max-w-7xl px-4 sm:px-6 py-24">
+      <div class="reveal relative glass glow rounded-[2.5rem] px-6 py-16 sm:py-24 text-center overflow-hidden">
+        <div class="absolute inset-0 -z-10" aria-hidden="true" style="background: radial-gradient(40rem 22rem at 50% 0%, rgba(139,92,246,.22), transparent 65%);"></div>
+        <p class="font-mono text-sm text-cyan">05. / contact</p>
+        <h2 class="display mt-5 text-4xl sm:text-6xl lg:text-7xl font-black text-white">
+          Let's build something<br /><span class="text-gradient">extraordinary.</span>
+        </h2>
+        <p class="mt-6 text-slate-400 max-w-md mx-auto">
+          Based in <span class="text-slate-200">Coimbatore, India</span>. Open for freelance &amp; consulting — remote-friendly, timezone-flexible.
+        </p>
+        <div class="mt-10 flex flex-wrap justify-center gap-4">
+          <a href="mailto:support@simpletools.in" class="inline-flex items-center gap-2.5 rounded-xl bg-gradient-to-r from-neon to-cyan text-ink font-semibold px-7 py-4 hover:opacity-90 transition shadow-xl shadow-neon/30">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 6 10-6"/></svg>
+            support@simpletools.in
+          </a>
+          <a href="https://wa.me/917373735013" class="inline-flex items-center gap-2.5 rounded-xl border border-edge bg-white/5 px-7 py-4 font-medium text-slate-200 hover:border-lime/50 hover:text-white transition">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" class="text-lime" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2Zm5.3 14.1c-.2.7-1.3 1.3-1.9 1.4-.5.1-1.1.1-1.7-.1-.4-.1-.9-.3-1.6-.6-2.8-1.2-4.6-4-4.8-4.2-.1-.2-1.1-1.4-1.1-2.7 0-1.3.7-1.9.9-2.2.2-.2.5-.3.7-.3h.5c.2 0 .4 0 .6.5l.8 1.9c.1.2.1.4 0 .5l-.4.6c-.1.2-.3.3-.1.6.1.3.7 1.1 1.5 1.8 1 .9 1.9 1.1 2.1 1.2.2.1.4.1.6-.1l.7-.8c.2-.2.4-.2.6-.1l1.8.9c.2.1.4.2.5.3.1.2.1.7-.1 1.4Z"/></svg>
+            WhatsApp
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="relative z-10 border-t border-edge/60">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <p class="font-mono text-xs text-slate-500">COIMBATORE, TAMIL NADU, IN <span class="text-neon">//</span> © 2026 SRIDHAR KARUPPUSAMY</p>
+      <p class="font-mono text-xs text-slate-600">designed &amp; built with <span class="text-rose">♥</span> · tailwind + html5</p>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      /* ---- Scroll reveal ---- */
+      var reveals = document.querySelectorAll('.reveal');
+      if (reduced || !('IntersectionObserver' in window)) {
+        reveals.forEach(function (el) { el.classList.add('is-in'); });
+      } else {
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (e) {
+            if (e.isIntersecting) { e.target.classList.add('is-in'); io.unobserve(e.target); }
+          });
+        }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+        reveals.forEach(function (el) { io.observe(el); });
+      }
+
+      /* ---- Cursor glow ---- */
+      var glow = document.getElementById('cursor-glow');
+      if (glow && !reduced && window.matchMedia('(pointer: fine)').matches) {
+        var gx = innerWidth / 2, gy = innerHeight / 3, tx = gx, ty = gy, raf = null;
+        addEventListener('pointermove', function (e) { tx = e.clientX; ty = e.clientY; if (!raf) loop(); });
+        function loop() {
+          raf = requestAnimationFrame(function () {
+            gx += (tx - gx) * 0.12; gy += (ty - gy) * 0.12;
+            glow.style.left = gx + 'px'; glow.style.top = gy + 'px';
+            if (Math.abs(tx - gx) > 0.5 || Math.abs(ty - gy) > 0.5) { loop(); } else { raf = null; }
+          });
+        }
+      } else if (glow) { glow.style.display = 'none'; }
+
+      /* ---- Tilt ---- */
+      if (!reduced && window.matchMedia('(pointer: fine)').matches) {
+        document.querySelectorAll('.tilt').forEach(function (card) {
+          card.addEventListener('pointermove', function (e) {
+            var r = card.getBoundingClientRect();
+            var x = (e.clientX - r.left) / r.width - 0.5;
+            var y = (e.clientY - r.top) / r.height - 0.5;
+            card.style.transform = 'perspective(900px) rotateX(' + (-y * 5).toFixed(2) + 'deg) rotateY(' + (x * 5).toFixed(2) + 'deg) translateY(-2px)';
+          });
+          card.addEventListener('pointerleave', function () { card.style.transform = ''; });
+        });
+      }
+
+      /* ---- Hero terminal typing ---- */
+      var line = document.getElementById('type-line-1');
+      if (line) {
+        var text = 'sridhar karuppusamy — full stack & ai architect';
+        if (reduced) { line.textContent = text; }
+        else {
+          var i = 0;
+          (function tick() {
+            line.textContent = text.slice(0, i++);
+            if (i <= text.length) setTimeout(tick, 34 + Math.random() * 40);
+          })();
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -572,6 +572,15 @@ impl Agent {
             let _ = std::fs::remove_dir_all(crate::index::cache_dir(&root));
         }
 
+        // Close browse engines a previous koda left behind. Off-thread and
+        // off the startup path: it is a directory read that finds nothing in a
+        // session that has never browsed, and the point of doing it at all is
+        // that SIGKILL leaves no chance to clean up on the way out.
+        if cfg.browser {
+            let browser_path = cfg.browser_path.clone();
+            std::thread::spawn(move || crate::tools::reap_orphaned_browsers(&browser_path));
+        }
+
         let system = prompt::build_with_skills(
             &cfg,
             &root,
@@ -587,7 +596,7 @@ impl Agent {
             // Filled in per call, so a tool reports progress to its own card.
             progress: None,
         };
-        Ok(Self {
+        let agent = Self {
             model: cfg.model.clone(),
             auto_approve: cfg.auto_approve,
             auto_tier: if cfg.auto_approve {
@@ -638,8 +647,103 @@ impl Agent {
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
             last_approval: None,
-        })
+        };
+        Ok(agent)
     }
+    /// Whether an endpoint runs on this machine.
+    ///
+    /// The warm-up is a real request. Against a local server it costs a little
+    /// GPU time that would otherwise be spent on the first turn anyway; against
+    /// somebody's metered API it costs money to solve a problem that API does
+    /// not have.
+    fn endpoint_is_local(&self) -> bool {
+        let e = self.endpoint.to_ascii_lowercase();
+        // Strip the scheme so the host is what is matched, not a path that
+        // happens to contain the word.
+        let host = e
+            .split("://")
+            .nth(1)
+            .unwrap_or(&e)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        let host = host.rsplit('@').next().unwrap_or(host);
+        let name = host.rsplit(':').next_back().unwrap_or(host);
+        name == "localhost"
+            || name == "127.0.0.1"
+            || name == "::1"
+            || name == "[::1]"
+            || name == "0.0.0.0"
+            || name.ends_with(".local")
+    }
+
+    /// Prefill the model's prompt cache with koda's fixed preamble, in the
+    /// background, before the user has finished typing.
+    ///
+    /// Measured on a local 30B: koda's instructions plus its tool schema are
+    /// about 4,700 tokens, and a cold prefill of that is ten to fourteen
+    /// seconds. The server caches by prefix, so the *same* preamble followed by
+    /// any question is then a quarter of a second. The cost is real and
+    /// unavoidable; where it is paid is a choice, and paying it while the user
+    /// is still typing is strictly better than paying it after they hit enter.
+    ///
+    /// Deliberately fire-and-forget. It asks for a single token, ignores the
+    /// answer, and swallows every error: a warm-up that fails has cost nothing,
+    /// and a warm-up that *complained* would be a startup error message for an
+    /// optimisation the user never asked for.
+    ///
+    /// Called only from the interactive TUI. The whole trade is "spend the
+    /// prefill during the seconds a human spends typing", and a headless run
+    /// has no such seconds -- there, the first request is already in flight,
+    /// and a second one would compete with it for the same GPU.
+    pub fn warm_prompt_cache(&self) {
+        if !self.cfg.prompt_warmup || self.depth > 0 {
+            return;
+        }
+        if !self.endpoint_is_local() {
+            return;
+        }
+        if self.model.trim().is_empty() {
+            return;
+        }
+        let req = ChatRequest {
+            model: self.model.clone(),
+            // The system prompt and the tool schema are the whole point: they
+            // are what the next request will repeat verbatim, and they are
+            // ~73% of the preamble on their own.
+            messages: vec![
+                Message::system(self.system.clone()),
+                // Some servers reject a conversation that is only a system
+                // message, so there has to be a user turn -- and it has to be
+                // one the real first message will not accidentally match, or
+                // the cached entry is for the wrong thing.
+                Message::user("hi"),
+            ],
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens: 1,
+            tools: Some(self.advertised_tools()),
+            reasoning_effort: "off".into(),
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            // Drained rather than dropped: dropping the receiver makes every
+            // send fail, which the client would report as a broken request.
+            let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            let ok = client.stream_with_retry(&req, &tx, 1).await.is_ok();
+            drop(tx);
+            let _ = drain.await;
+            crate::tel_debug!(
+                "llm",
+                "prompt cache warmed",
+                "ok" => ok,
+                "ms" => started.elapsed().as_millis()
+            );
+        });
+    }
+
     /// Adopt a saved conversation. The transcript the user sees is rebuilt
     /// separately by the UI from the same messages.
     pub fn resume(&mut self, path: std::path::PathBuf, messages: Vec<Message>) {
@@ -810,6 +914,7 @@ impl Agent {
     }
 
     fn rebuild_system(&mut self) {
+        let before = std::mem::take(&mut self.system);
         self.system = prompt::build_with_skills(
             &self.cfg,
             &self.ctx.root.clone(),
@@ -819,6 +924,16 @@ impl Agent {
             &self.memory,
             &self.learning.brief(),
         );
+        // A changed preamble is a cold prefix again: the server caches by
+        // prefix, so switching mode or loading a tool group costs the same
+        // ten-odd seconds the first turn did. Warm it now rather than making
+        // the user pay for it on their next message.
+        //
+        // Only when it actually changed — most calls here rebuild an identical
+        // prompt, and a request per no-op would be pure waste.
+        if before != self.system {
+            self.warm_prompt_cache();
+        }
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
@@ -6759,6 +6874,47 @@ mod tests {
             .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
             .collect();
         assert_eq!(names.first().copied(), Some("codegraph"), "{names:?}");
+    }
+
+    /// The warm-up is a real request, so it must only go somewhere that
+    /// charges time rather than money.
+    #[test]
+    fn only_a_local_endpoint_is_warmed() {
+        let cases = [
+            ("http://localhost:11434/v1", true),
+            ("http://127.0.0.1:8080/v1", true),
+            ("http://0.0.0.0:1234/v1", true),
+            ("http://studio.local:1234/v1", true),
+            ("https://api.openai.com/v1", false),
+            ("https://api.anthropic.com/v1", false),
+            // A remote host on the LAN is somebody else's machine: it is not
+            // koda's GPU to spend, and the user may be paying for it.
+            ("http://192.168.1.7:8000/v1", false),
+            // The word appearing in a path must not be mistaken for the host.
+            ("https://example.com/localhost/v1", false),
+            ("https://user@evil.com/v1", false),
+        ];
+        let dir = crate::config::test_root("warmup-endpoint");
+        for (endpoint, want) in cases {
+            let cfg = std::sync::Arc::new(crate::config::Config {
+                base_url: endpoint.into(),
+                model: "m".into(),
+                ..crate::config::Config::default()
+            });
+            let agent = Agent::new(
+                cfg,
+                dir.clone(),
+                std::sync::Arc::new(AtomicBool::new(false)),
+                std::sync::Arc::new(Notify::new()),
+            )
+            .expect("agent");
+            assert_eq!(
+                agent.endpoint_is_local(),
+                want,
+                "{endpoint} should{} be treated as local",
+                if want { "" } else { " not" }
+            );
+        }
     }
 
     #[test]

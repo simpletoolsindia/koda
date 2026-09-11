@@ -395,6 +395,20 @@ pub struct Config {
     /// on its own when a tree is big enough that the walk is slow.
     pub codegraph_refresh_ms: u64,
 
+    /// Prefill the model's prompt cache in the background at startup.
+    ///
+    /// A local server prefills at a few hundred tokens a second, and koda's
+    /// fixed preamble -- instructions plus the tool schema -- is several
+    /// thousand tokens. Paid for on the first turn, that is ten seconds of a
+    /// user staring at nothing. Sent while they are still typing, it is free.
+    ///
+    /// Only for endpoints on this machine, by default: the whole point is that
+    /// a local prefill costs time rather than money, and spending a request on
+    /// somebody's metered API to save latency they do not have is not a trade
+    /// koda should make on its own.
+    #[serde(default = "default_true")]
+    pub prompt_warmup: bool,
+
     /// Allow the `web_search` tool. Off unless a SearXNG URL is set.
     pub web_search: bool,
     /// Which backend web search uses: "duckduckgo" (no setup) or "searxng"
@@ -648,6 +662,7 @@ impl Default for Config {
             subagent_review_rounds: 1,
             max_subagent_depth: 1,
             custom_tools: Vec::new(),
+            prompt_warmup: true,
             reasoning_effort: default_reasoning(),
             debug: false,
             system_prompt: String::new(),
