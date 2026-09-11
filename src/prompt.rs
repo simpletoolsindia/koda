@@ -273,18 +273,66 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     }
 
     // Project-level agent rules, if the repo has them.
-    for name in ["AGENTS.md", "CLAUDE.md", ".koda.md"] {
-        let path = root.join(name);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let text = text.trim();
-            if !text.is_empty() {
-                let clipped: String = text.chars().take(4000).collect();
-                let _ = write!(p, "\n\nFrom {name}:\n{clipped}");
-                break;
-            }
-        }
+    // Standing instructions, general first and specific second, so a project
+    // can override a habit rather than merely restate it.
+    //
+    // The user-level file is the half koda was missing. A preference that is
+    // true of everything you write -- the test runner you use, that you want
+    // no comments unless you asked for them, which spelling -- belonged in
+    // every project's AGENTS.md, copied by hand, or nowhere. Both Gemini CLI
+    // (`~/.gemini/GEMINI.md`) and Claude Code settled on a user-level file
+    // above the project one; this is the same shape.
+    for (label, text) in user_instructions()
+        .into_iter()
+        .chain(project_instructions(root))
+    {
+        let _ = write!(p, "\n\nFrom {label}:\n{text}");
     }
     p
+}
+
+/// How much of one instruction file reaches the prompt.
+///
+/// Bounded because this text sits in the cached preamble of every request: on a
+/// local model each thousand tokens here is a couple of seconds of one-time
+/// prefill and a permanent slice of the context window. Generous enough for a
+/// real set of house rules, small enough that a README pasted in by mistake
+/// cannot cost the user their window.
+const MAX_INSTRUCTION_CHARS: usize = 4000;
+
+fn read_clipped(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(MAX_INSTRUCTION_CHARS).collect())
+}
+
+/// The user's own standing instructions, applying to every project.
+fn user_instructions() -> Option<(String, String)> {
+    let dir = crate::config::config_dir();
+    // `KODA.md` first since it is koda's own name; `AGENTS.md` accepted in the
+    // same place so a user who already keeps one there is not asked to
+    // maintain a second copy under a different name.
+    for name in ["KODA.md", "AGENTS.md"] {
+        if let Some(text) = read_clipped(&dir.join(name)) {
+            return Some((format!("your {name} (applies to every project)"), text));
+        }
+    }
+    None
+}
+
+/// The project's instructions. First match wins, deliberately: `AGENTS.md` and
+/// `CLAUDE.md` are usually the same content under two names, and sending both
+/// would pay for it twice.
+fn project_instructions(root: &Path) -> Option<(String, String)> {
+    for name in ["AGENTS.md", "CLAUDE.md", ".koda.md"] {
+        if let Some(text) = read_clipped(&root.join(name)) {
+            return Some((name.to_string(), text));
+        }
+    }
+    None
 }
 
 /// A few cheap facts that stop the model from guessing about the project.
@@ -448,6 +496,74 @@ fn parse_offset(raw: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A preference that is true of everything you write had nowhere to live:
+    /// it went into every project's AGENTS.md by hand, or nowhere.
+    #[test]
+    fn user_instructions_apply_to_every_project_and_the_project_can_override() {
+        let home = crate::config::test_root("prompt-user-instructions");
+        let cfgdir = home.join("cfg");
+        std::fs::create_dir_all(&cfgdir).unwrap();
+        // `config_dir()` honours XDG_CONFIG_HOME, which is how this reaches a
+        // scratch directory instead of the real one.
+        std::env::set_var("XDG_CONFIG_HOME", &cfgdir);
+        std::fs::write(cfgdir.join("koda/KODA.md"), "")
+            .or_else(|_| {
+                std::fs::create_dir_all(cfgdir.join("koda"))?;
+                std::fs::write(cfgdir.join("koda/KODA.md"), "Always use British spelling.")
+            })
+            .unwrap();
+
+        let root = crate::config::test_root("prompt-project-instructions");
+        let cfg = Config::default();
+
+        // With only the user file, it is present.
+        let p = build(&cfg, &root, false, Mode::Execute);
+        assert!(p.contains("British spelling"), "user instructions missing");
+        assert!(p.contains("applies to every project"), "{p}");
+
+        // A project file is added *after* it, so the specific one is read last
+        // and wins where they disagree.
+        std::fs::write(
+            root.join("AGENTS.md"),
+            "This project uses American spelling.",
+        )
+        .unwrap();
+        let p = build(&cfg, &root, false, Mode::Execute);
+        let u = p.find("British spelling").expect("user rules kept");
+        let a = p.find("American spelling").expect("project rules added");
+        assert!(
+            u < a,
+            "the project's rules must come after the user's:\n{p}"
+        );
+
+        // The two names for a project file are the same content under two
+        // names in most repos, so only one is sent.
+        std::fs::write(root.join("CLAUDE.md"), "DUPLICATE").unwrap();
+        let p = build(&cfg, &root, false, Mode::Execute);
+        assert!(
+            !p.contains("DUPLICATE"),
+            "both project files were sent:\n{p}"
+        );
+
+        // Nothing here may grow without bound: this text is in the cached
+        // preamble of every single request.
+        std::fs::write(root.join("AGENTS.md"), "x".repeat(50_000)).unwrap();
+        let p = build(&cfg, &root, false, Mode::Execute);
+        // The longest run of `x`, not every `x` in the prompt — the base
+        // instructions contain the letter too.
+        let longest = p
+            .split(|c| c != 'x')
+            .map(|run| run.len())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            longest, MAX_INSTRUCTION_CHARS,
+            "an oversized instruction file was not clipped to the cap"
+        );
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
     use super::*;
 
     #[test]
