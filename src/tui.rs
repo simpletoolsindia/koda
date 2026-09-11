@@ -5306,9 +5306,25 @@ fn setup(mouse: bool) -> Result<Term> {
 }
 
 pub fn restore() {
+    // Once, however koda is ending. The normal exit path, the panic hook and a
+    // signal can all arrive at this function, and two of them can arrive at
+    // once -- a `kill` landing while the user is already quitting. The child
+    // shutdowns below are individually idempotent, but a second pass through
+    // the terminal escape sequences while the first is mid-write is how a shell
+    // is left in raw mode with no echo.
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     // A debug adapter is a child process holding a debuggee. Leaving one alive
     // after koda exits leaves a stopped program nobody can reach.
     crate::dap::shutdown();
+    // The browse engine is the same problem an order of magnitude larger: it is
+    // a daemon holding a headless Chrome, and it is kept warm on purpose
+    // between calls. Nothing closed it on exit, so every session that browsed
+    // left a browser behind -- reparented to init, ~1.2 GB, until the machine
+    // started swapping.
+    crate::tools::shutdown_browser();
     let mut out = io::stdout();
     let _ = execute!(
         out,
@@ -5332,6 +5348,12 @@ pub async fn run(
     if let Some(name) = name {
         agent.set_session_name(name);
     }
+    // Spend the model's cold prefill now, while the user is reading the screen
+    // and typing, rather than after they press enter. On a local server koda's
+    // fixed preamble is several thousand tokens and ten-odd seconds of prefill;
+    // this is the difference between a first turn that answers immediately and
+    // one that appears to hang.
+    agent.warm_prompt_cache();
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Event>();
