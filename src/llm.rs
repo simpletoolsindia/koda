@@ -818,6 +818,8 @@ impl Client {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
         let mut finished = false;
+        // Per-stream, because the tag state has to survive across frames.
+        let mut think = ThinkSplit::default();
 
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
@@ -856,7 +858,7 @@ impl Client {
                     break;
                 }
                 match serde_json::from_str::<Value>(payload) {
-                    Ok(v) => emit(&v, tx),
+                    Ok(v) => emit(&v, tx, &mut think),
                     // Some servers split large JSON across frames; skip unparseable ones.
                     Err(_) => continue,
                 }
@@ -865,11 +867,109 @@ impl Client {
                 break;
             }
         }
+        // A stream can end with text still held back -- a suffix that looked
+        // like the start of a tag, or an unterminated `<think>`. Dropping it
+        // would lose the tail of an answer.
+        let (text, reasoning) = think.finish();
+        if !reasoning.is_empty() {
+            let _ = tx.send(StreamEvent::Reasoning(reasoning));
+        }
+        if !text.is_empty() {
+            let _ = tx.send(StreamEvent::Text(text));
+        }
         Ok(())
     }
 }
 
-fn emit(v: &Value, tx: &UnboundedSender<StreamEvent>) {
+/// Splits inline `<think>` reasoning out of a streaming content channel.
+///
+/// Two conventions exist for thinking models and koda only understood one.
+/// DeepSeek-style servers put reasoning in its own `reasoning_content` field,
+/// which is easy to route. MiniMax, Qwen/QwQ, GLM and most local builds instead
+/// wrap it in `<think>...</think>` *inside* `content` -- so koda treated it as
+/// ordinary prose: printed verbatim, immune to `/think`, and worst of all kept
+/// in the transcript and sent back on every later turn. `StreamEvent::Reasoning`
+/// says "never sent back"; for these models that promise was quietly broken.
+///
+/// Stateful because a tag can be split across chunks -- `<thi` at the end of
+/// one frame and `nk>` at the start of the next is normal.
+#[derive(Default)]
+pub(crate) struct ThinkSplit {
+    tail: String,
+    inside: bool,
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+impl ThinkSplit {
+    /// Returns (visible text, reasoning text) for this chunk.
+    fn push(&mut self, chunk: &str) -> (String, String) {
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.push_str(chunk);
+        let (mut text, mut think) = (String::new(), String::new());
+        loop {
+            if self.inside {
+                if let Some(i) = buf.find(THINK_CLOSE) {
+                    think.push_str(&buf[..i]);
+                    buf = buf[i + THINK_CLOSE.len()..].to_string();
+                    self.inside = false;
+                    continue;
+                }
+                // Hold back a suffix that might be the start of the closing tag.
+                let hold = partial_tag_suffix(&buf, THINK_CLOSE);
+                let split = buf.len() - hold;
+                think.push_str(&buf[..split]);
+                buf = buf[split..].to_string();
+                break;
+            }
+            if let Some(i) = buf.find(THINK_OPEN) {
+                text.push_str(&buf[..i]);
+                buf = buf[i + THINK_OPEN.len()..].to_string();
+                self.inside = true;
+                continue;
+            }
+            let hold = partial_tag_suffix(&buf, THINK_OPEN);
+            let split = buf.len() - hold;
+            text.push_str(&buf[..split]);
+            buf = buf[split..].to_string();
+            break;
+        }
+        self.tail = buf;
+        (text, think)
+    }
+
+    /// Whatever is still buffered when the stream ends.
+    ///
+    /// A stream that ends mid-`<think>` has its remainder reported as
+    /// reasoning, not dropped: losing text silently is worse than showing it
+    /// in the dimmer channel.
+    fn finish(&mut self) -> (String, String) {
+        let rest = std::mem::take(&mut self.tail);
+        if self.inside {
+            (String::new(), rest)
+        } else {
+            (rest, String::new())
+        }
+    }
+}
+
+/// Length of the longest suffix of `buf` that could begin `tag`.
+fn partial_tag_suffix(buf: &str, tag: &str) -> usize {
+    let max = tag.len().saturating_sub(1).min(buf.len());
+    for n in (1..=max).rev() {
+        let start = buf.len() - n;
+        if !buf.is_char_boundary(start) {
+            continue;
+        }
+        if tag.starts_with(&buf[start..]) {
+            return n;
+        }
+    }
+    0
+}
+
+fn emit(v: &Value, tx: &UnboundedSender<StreamEvent>, think: &mut ThinkSplit) {
     if let Some(err) = v.get("error") {
         let msg = err
             .get("message")
@@ -903,15 +1003,22 @@ fn emit(v: &Value, tx: &UnboundedSender<StreamEvent>) {
                 let _ = tx.send(StreamEvent::Reasoning(r.to_string()));
             }
         }
-        match d.get("content") {
-            Some(Value::String(s)) if !s.is_empty() => {
-                let _ = tx.send(StreamEvent::Text(s.clone()));
+        let mut content = |s: &str, tx: &UnboundedSender<StreamEvent>| {
+            let (text, reasoning) = think.push(s);
+            if !reasoning.is_empty() {
+                let _ = tx.send(StreamEvent::Reasoning(reasoning));
             }
+            if !text.is_empty() {
+                let _ = tx.send(StreamEvent::Text(text));
+            }
+        };
+        match d.get("content") {
+            Some(Value::String(s)) if !s.is_empty() => content(s, tx),
             // Vision-style content arrays.
             Some(Value::Array(parts)) => {
                 for p in parts {
                     if let Some(s) = p.get("text").and_then(|t| t.as_str()) {
-                        let _ = tx.send(StreamEvent::Text(s.to_string()));
+                        content(s, tx);
                     }
                 }
             }
@@ -975,6 +1082,68 @@ fn snippet(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Two conventions exist for thinking models and koda only understood one.
+    /// DeepSeek-style servers use a `reasoning_content` field; MiniMax, Qwen,
+    /// GLM and most local builds wrap it in `<think>` inside `content`. Those
+    /// were treated as ordinary prose -- printed raw, immune to `/think`, and
+    /// kept in the transcript to be sent back on every later turn.
+    #[test]
+    fn inline_think_blocks_are_reasoning_not_prose() {
+        let mut sp = ThinkSplit::default();
+        let (text, think) = sp.push("<think>\nweighing it up\n</think>\n\nHello.");
+        assert_eq!(think.trim(), "weighing it up");
+        assert_eq!(text.trim(), "Hello.");
+
+        // A tag split across frames -- `<thi` + `nk>` is routine in a stream.
+        let mut sp = ThinkSplit::default();
+        let (t1, r1) = sp.push("before <thi");
+        assert_eq!(t1, "before ");
+        assert!(r1.is_empty());
+        let (t2, r2) = sp.push("nk>secret");
+        assert!(t2.is_empty(), "the tag must not leak as text: {t2:?}");
+        assert_eq!(r2, "secret");
+        let (t3, r3) = sp.push(" more</thi");
+        assert_eq!(r3, " more");
+        assert!(t3.is_empty());
+        let (t4, _) = sp.push("nk>after");
+        assert_eq!(t4, "after");
+
+        // Ordinary text with no tags is untouched, including a stray `<`.
+        let mut sp = ThinkSplit::default();
+        assert_eq!(sp.push("a < b and c").0, "a < b and c");
+
+        // A stream ending mid-think: the body is already reported as reasoning
+        // as it arrives, and nothing is stranded in the buffer afterwards.
+        let mut sp = ThinkSplit::default();
+        let (text, think) = sp.push("<think>unterminated");
+        assert_eq!(think, "unterminated");
+        assert!(text.is_empty());
+        assert_eq!(sp.finish(), (String::new(), String::new()));
+
+        // But a genuinely stranded tail -- held back because it could have
+        // begun a closing tag -- is flushed as reasoning, not dropped.
+        let mut sp = ThinkSplit::default();
+        let (_, r) = sp.push("<think>body</thi");
+        assert_eq!(r, "body");
+        assert_eq!(sp.finish().1, "</thi");
+
+        // And a held-back partial tag at end of stream is flushed as text.
+        let mut sp = ThinkSplit::default();
+        let (t, _) = sp.push("done <thi");
+        assert_eq!(t, "done ");
+        assert_eq!(sp.finish().0, "<thi");
+    }
+
+    #[test]
+    fn a_partial_tag_suffix_is_measured_on_char_boundaries() {
+        assert_eq!(partial_tag_suffix("abc<thi", "<think>"), 4);
+        assert_eq!(partial_tag_suffix("abc", "<think>"), 0);
+        assert_eq!(partial_tag_suffix("x<", "<think>"), 1);
+        // Multi-byte tail must not panic or mis-measure.
+        assert_eq!(partial_tag_suffix("héllo", "<think>"), 0);
+    }
+
     use super::*;
 
     #[test]
