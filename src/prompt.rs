@@ -15,10 +15,13 @@ Rules:
 - Prefer `edit_file` over `write_file` for existing files.
 - Verify changes by running builds, tests, or linters via `run_command`.
 - Never run destructive commands without explicit request.
+- Do not delete what you set up for the user (clones, builds, outputs) unless they ask.
 - Make one write or command at a time, and wait for its result before the next step.
+- Long jobs (large downloads, builds, servers): run them in the background with output to a log (`nohup CMD > job.log 2>&1 &`), then check the log, rather than waiting on a command that may time out.
 - When a task takes >2 steps, call `todo` to lay out the plan, then call it again \
 as each step finishes — done for what you completed, in_progress for what you are on. \
-A plan you never update tells the user less than no plan at all.
+A plan you never update tells the user less than no plan at all. Mark a step done only when a tool result shows it happened; a step you skipped or could not do is reported as such, never as tested or finished.
+- Users type fast: read a misspelled word by its context, and if a key word is still unclear, ask before acting on a guess.
 - Web research: use `web_search`/`web_fetch` for static text. Use `browse` for dynamic sites, forms, tabs, and media downloads.
 - Store durable facts (build commands, architecture) with `remember`.
 - Store repeatable procedures (release checklists, setup steps) with `manage_skill`.
@@ -428,11 +431,74 @@ fn environment(root: &Path) -> Option<String> {
         bits.push("Git repository.".into());
     }
 
+    if let Some(py) = python_toolchain() {
+        bits.push(py);
+    }
+
     if bits.is_empty() {
         None
     } else {
         Some(bits.join("\n"))
     }
+}
+
+/// Which interpreter `python3` runs and whether `pip` installs into it.
+///
+/// They can disagree, and nothing in a failing import says so: a real session
+/// had `python3` → Homebrew 3.14 while `pip` → the Command Line Tools' 3.9, and
+/// spent a dozen steps installing packages the interpreter never saw. One
+/// process spawn, once per process.
+fn python_toolchain() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let out = std::process::Command::new("python3")
+                .args(["-c", "import sys; print(sys.version.split()[0]); print(sys.executable)"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let mut lines = text.lines();
+            let version = lines.next()?.trim().to_string();
+            let exe = lines.next()?.trim().to_string();
+            Some(python_line(&version, &exe, pip_interpreter().as_deref()))
+        })
+        .clone()
+}
+
+fn python_line(version: &str, exe: &str, pip_python: Option<&str>) -> String {
+    let mut line = format!("Python: `python3` is {version} ({exe}).");
+    let same = |a: &str, b: &str| {
+        let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+        a == b || canon(a) == canon(b)
+    };
+    if let Some(pip) = pip_python.filter(|p| !same(p, exe)) {
+        let _ = write!(
+            line,
+            " `pip` installs into a different interpreter ({pip}): use `python3 -m pip`, or a venv."
+        );
+    }
+    line
+}
+
+/// The interpreter named in the shebang of the `pip` found on PATH. `None` when
+/// there is no `pip`, or it defers to PATH itself (`#!/usr/bin/env python3`).
+fn pip_interpreter() -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    let pip = std::env::split_paths(&path)
+        .map(|d| d.join("pip"))
+        .find(|p| p.is_file())?;
+    let head = std::fs::read(&pip).ok()?;
+    let first = String::from_utf8_lossy(&head[..head.len().min(512)])
+        .lines()
+        .next()?
+        .to_string();
+    let interp = first.strip_prefix("#!")?.split_whitespace().next()?.to_string();
+    (!interp.ends_with("/env")).then_some(interp)
 }
 
 fn dedup(v: &[&str]) -> Vec<String> {
@@ -541,6 +607,25 @@ fn parse_offset(raw: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A `pip` that installs somewhere other than `python3` is named in the
+    /// prompt; a matching one adds nothing but the version.
+    #[test]
+    fn a_pip_for_another_python_is_called_out() {
+        let split = super::python_line(
+            "3.14.7",
+            "/opt/homebrew/bin/python3",
+            Some("/Library/Developer/CommandLineTools/usr/bin/python3"),
+        );
+        assert!(split.contains("3.14.7"), "{split}");
+        assert!(split.contains("different interpreter"), "{split}");
+        assert!(split.contains("python3 -m pip"), "{split}");
+
+        let same = super::python_line("3.12.1", "/usr/bin/python3", Some("/usr/bin/python3"));
+        assert!(!same.contains("different"), "{same}");
+        let none = super::python_line("3.12.1", "/usr/bin/python3", None);
+        assert!(!none.contains("different"), "{none}");
+    }
 
     /// A preference that is true of everything you write had nowhere to live:
     /// it went into every project's AGENTS.md by hand, or nowhere.
