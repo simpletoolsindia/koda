@@ -193,8 +193,39 @@ pub fn servers() -> &'static [ServerDef] {
 }
 
 /// Whether a server's executable is on this machine.
+///
+/// A PATH lookup and nothing more, because this runs while koda is opening.
+/// See [`runnable`] for the stronger question, which costs a process.
 pub fn installed(s: &ServerDef) -> bool {
     which(s.command).is_some()
+}
+
+/// Whether the executable on PATH actually runs.
+///
+/// Being on PATH is not the same as being installed. `rustup` puts a proxy for
+/// `rust-analyzer` in `~/.cargo/bin` whether or not the component is there, and
+/// running it prints `error: Unknown binary 'rust-analyzer' in official
+/// toolchain` and exits. koda would report the server as usable, advertise the
+/// tool, and only discover the truth when the model called it -- a wasted turn
+/// and a confusing error.
+///
+/// Costs a process, so it is only asked where a human is reading the answer:
+/// `lsp action=servers` and `/lsp`. The startup path keeps the cheap check, and
+/// a server that turns out not to run says so when it is called.
+fn runnable(s: &ServerDef) -> Option<bool> {
+    let bin = which(s.command)?;
+    // `gopls` spells it `gopls version`; the rest take `--version`.
+    let arg = if s.command == "gopls" {
+        "version"
+    } else {
+        "--version"
+    };
+    let out = Command::new(&bin)
+        .arg(arg)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    Some(out.status.success())
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
@@ -735,7 +766,19 @@ impl Session {
         });
         let caps = client
             .request_timeout("initialize", init, INIT_TIMEOUT)
-            .context("the language server refused to initialize")?;
+            .map_err(|e| {
+                // Overwhelmingly the cause is a binary that is on PATH without
+                // being installed -- a rustup proxy for a missing component,
+                // most often. Saying so turns a dead end into one command.
+                anyhow!(
+                    "`{}` would not start ({e:#}). It is on PATH, but check it actually \
+                     runs -- `{} --version`. A rustup proxy for a component that was \
+                     never installed looks installed until you run it \
+                     (`rustup component add rust-analyzer`).",
+                    def.name,
+                    def.command
+                )
+            })?;
         client.notify("initialized", json!({}))?;
         // pyright and several others do nothing until configuration arrives.
         // An empty settings object is a valid answer and unblocks them.
@@ -1424,7 +1467,12 @@ pub fn status_report(root: &Path) -> String {
         let live = running.iter().find(|(n, _)| n == s.name);
         let state = match (live, installed(s)) {
             (Some((_, detail)), _) => format!("running, {detail}"),
-            (None, true) => "installed".into(),
+            // On PATH, but does it run? A rustup proxy for a component that was
+            // never installed is on PATH and is not a language server.
+            (None, true) => match runnable(s) {
+                Some(false) => "on PATH but will not run".into(),
+                _ => "installed".into(),
+            },
             (None, false) => "not installed".into(),
         };
         let _ = writeln!(
@@ -1434,7 +1482,10 @@ pub fn status_report(root: &Path) -> String {
             s.extensions.join(" .")
         );
     }
-    let usable = available(root);
+    let usable: Vec<&'static ServerDef> = available(root)
+        .into_iter()
+        .filter(|s| runnable(s) != Some(false))
+        .collect();
     if usable.is_empty() {
         out.push_str(
             "\nNone of them is installed for a language in this project. Install the one for \
@@ -1709,10 +1760,121 @@ ROOT = ""
         Session::start(fake_def(&script), dir).ok()
     }
 
+    /// Tests that drive a language server share the global session map, so
+    /// they take turns -- one test's `shutdown` drains the map another is
+    /// holding a session in.
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The stub above proves koda speaks the protocol. This proves koda speaks
+    /// it to *rust-analyzer* -- which is the thing users actually have, and
+    /// which gets to decide what "correct" means. A stub agrees with whatever
+    /// its author believed.
+    ///
+    /// A throwaway two-file crate rather than this repository: koda is large
+    /// enough that indexing it would make the test a minute long and its
+    /// failures ambiguous.
+    #[test]
+    fn a_real_rust_analyzer_resolves_a_symbol() {
+        let _exclusive = exclusive();
+        let Some(def) = servers().iter().find(|s| s.name == "rust-analyzer") else {
+            return;
+        };
+        // `runnable`, not `installed`: a rustup proxy for a missing component
+        // is on PATH, and waiting for it to fail to initialize costs this test
+        // thirty seconds to learn what one `--version` says instantly.
+        if runnable(def) != Some(true) {
+            eprintln!("SKIP: rust-analyzer is not installed and runnable");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("koda-ra-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        // `width` is defined once and used twice. A regex graph would also find
+        // the name; only a resolver knows these are the same `width`.
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "fn width(n: u32) -> u32 {\n    n * 2\n}\n\nfn main() {\n                 let a = width(3);\n    let b = width(4);\n    println!(\"{a} {b}\");\n}\n",
+        )
+        .unwrap();
+
+        // Where it is defined, asked from one of the call sites.
+        let out = match run(
+            &json!({
+                "action": "definition",
+                "file": "src/main.rs",
+                "line": 6,
+                "symbol": "width"
+            }),
+            &dir,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                // A machine that cannot run rust-analyzer here (no toolchain,
+                // no network for the sysroot) is not a failing client.
+                eprintln!("SKIP: rust-analyzer would not answer: {e:#}");
+                shutdown();
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        };
+        assert!(
+            out.contains("src/main.rs:1"),
+            "definition should be line 1:\n{out}"
+        );
+
+        // Both call sites, which is the answer a name match cannot give.
+        let out = run(
+            &json!({
+                "action": "references",
+                "file": "src/main.rs",
+                "line": 1,
+                "symbol": "width"
+            }),
+            &dir,
+        )
+        .expect("references");
+        assert!(out.contains("src/main.rs"), "{out}");
+        assert!(
+            out.contains('6') && out.contains('7'),
+            "both call sites:\n{out}"
+        );
+
+        // And the type, which the graph has no notion of at all.
+        let out = run(
+            &json!({
+                "action": "hover",
+                "file": "src/main.rs",
+                "line": 1,
+                "symbol": "width"
+            }),
+            &dir,
+        )
+        .expect("hover");
+        assert!(out.contains("fn width"), "{out}");
+        assert!(
+            out.contains("u32"),
+            "the signature should carry types:\n{out}"
+        );
+
+        shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The whole protocol against a real process: the handshake, answering the
     /// server's own request, opening a document, and each navigation query.
     #[test]
     fn a_real_server_is_initialized_and_queried() {
+        let _exclusive = exclusive();
         let dir = std::env::temp_dir().join(format!("koda-lsp-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
@@ -1883,6 +2045,40 @@ ROOT = ""
         assert!(pick(&dir, "notes.txt").is_none());
         assert!(pick(&dir, "noextension").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Being on PATH is not the same as being installed, and koda used to
+    /// conflate them. `rustup` puts a proxy for `rust-analyzer` in
+    /// `~/.cargo/bin` whether or not the component is there; koda reported
+    /// "Usable here: rust-analyzer", advertised the tool, and the model found
+    /// out the hard way.
+    #[test]
+    fn on_path_is_not_the_same_as_runnable() {
+        let mk = |cmd: &'static str| ServerDef {
+            name: "probe",
+            command: cmd,
+            args: &[],
+            extensions: &["rs"],
+            markers: &["Cargo.toml"],
+            init_options: None,
+        };
+
+        // Nothing on PATH: no opinion, rather than a wrong one.
+        assert_eq!(runnable(&mk("koda-no-such-binary-anywhere")), None);
+
+        // On PATH and exits cleanly -- a server koda can use. `true` is the
+        // standing in for one that answers `--version`.
+        if which("true").is_some() {
+            assert_eq!(runnable(&mk("true")), Some(true));
+        }
+        // On PATH and fails -- exactly the rustup-proxy shape. `installed`
+        // still says yes, because it only looks at PATH; `runnable` is what
+        // tells them apart.
+        if which("false").is_some() {
+            let broken = mk("false");
+            assert!(installed(&broken), "it is on PATH");
+            assert_eq!(runnable(&broken), Some(false), "but it does not run");
+        }
     }
 
     #[test]
