@@ -63,6 +63,18 @@ with `lsp_in_codegraph = false`.
 Keep reaching for `codegraph` first, for orientation. Reach for `lsp` when a
 name is ambiguous or overloaded, or when you need a type.
 
+## "It says it will not run"
+
+Being on PATH is not the same as being installed. `rustup` puts a proxy for
+`rust-analyzer` in `~/.cargo/bin` whether or not the component is there, and
+running it just prints `error: Unknown binary`. `lsp action=servers` and `/lsp`
+check by running each candidate, so they report **on PATH but will not run**
+rather than claiming it is usable. The fix is usually one command:
+
+```
+rustup component add rust-analyzer
+```
+
 ## Servers koda knows
 
 rust-analyzer, pyright, pylsp, typescript-language-server, gopls, clangd, zls,
