@@ -372,6 +372,42 @@ pub async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 
 pub async fn fetch_url(url: &str, timeout_secs: u64) -> Result<String> {
     let url = url.trim();
+    // A GitHub repository page flattens to mostly navigation — menus, sign-in
+    // banners, hovercard attributes — with the README the model came for cut
+    // off behind it. Ask for the README itself first; the page is the fallback.
+    if let Some((repo, raw)) = github_readme_url(url) {
+        if let Ok(readme) = fetch_page(&raw, timeout_secs).await {
+            return Ok(format!("GitHub repository {repo} — README:\n\n{readme}"));
+        }
+    }
+    fetch_page(url, timeout_secs).await
+}
+
+/// The raw README of a bare `github.com/<owner>/<repo>` URL, with the repo name.
+/// Deeper paths (files, issues, trees) are left alone: they are what was asked.
+fn github_readme_url(url: &str) -> Option<(String, String)> {
+    let rest = ["https://github.com/", "http://github.com/", "https://www.github.com/"]
+        .iter()
+        .find_map(|p| url.strip_prefix(p))?;
+    let rest = rest.split(['?', '#']).next()?.trim_end_matches('/');
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?.trim_end_matches(".git");
+    const NOT_OWNERS: &[&str] = &[
+        "orgs", "topics", "search", "settings", "marketplace", "features", "sponsors",
+        "collections", "trending", "login", "notifications", "explore", "pricing",
+    ];
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() || NOT_OWNERS.contains(&owner)
+    {
+        return None;
+    }
+    Some((
+        format!("{owner}/{repo}"),
+        format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/README.md"),
+    ))
+}
+
+async fn fetch_page(url: &str, timeout_secs: u64) -> Result<String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         bail!("web_fetch only supports http:// and https:// URLs");
     }
@@ -502,6 +538,40 @@ fn tidy_lines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare repo URL fetches its README; anything deeper is what was asked.
+    #[test]
+    fn github_repo_pages_fetch_the_readme() {
+        assert_eq!(
+            github_readme_url("https://github.com/neeryks/facefusion_colab"),
+            Some((
+                "neeryks/facefusion_colab".into(),
+                "https://raw.githubusercontent.com/neeryks/facefusion_colab/HEAD/README.md"
+                    .into()
+            ))
+        );
+        for same in [
+            "https://github.com/ratatui/ratatui/",
+            "https://github.com/ratatui/ratatui#readme",
+            "https://github.com/ratatui/ratatui.git",
+            "https://www.github.com/ratatui/ratatui?tab=readme",
+        ] {
+            assert_eq!(
+                github_readme_url(same).map(|(repo, _)| repo),
+                Some("ratatui/ratatui".into()),
+                "{same}"
+            );
+        }
+        for other in [
+            "https://github.com/ratatui/ratatui/issues/1",
+            "https://github.com/ratatui/ratatui/blob/main/src/lib.rs",
+            "https://github.com/topics/rust",
+            "https://github.com/ratatui",
+            "https://gitlab.com/a/b",
+        ] {
+            assert_eq!(github_readme_url(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn formats_hits_with_urls() {
