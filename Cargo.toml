@@ -32,6 +32,12 @@ tokio = { version = "1", features = [
     "time",
     "fs",
     "io-util",
+    # Closing the terminal window, `kill`, or ctrl+c in a headless run all
+    # arrive as signals, and koda's children -- a debug adapter holding a
+    # stopped program, a browse engine holding a headless Chrome -- outlive the
+    # process unless something catches them. tokio already ships this, so it
+    # costs a feature flag rather than a dependency.
+    "signal",
 ] }
 toml = "0.8"
 unicode-width = "0.2"
