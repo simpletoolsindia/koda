@@ -812,6 +812,50 @@ full extension guide (custom tools, skills, role agents) is in
 koda's own state — follow the worked example in
 [docs/adding-a-builtin-tool.md](docs/adding-a-builtin-tool.md).
 
+## MCP servers
+
+koda speaks the Model Context Protocol, so a published server — Postgres,
+GitHub, Sentry, your company's internal API — lends koda its tools without a
+line of Rust. Declare one as an `[[mcp_server]]` table:
+
+```toml
+[[mcp_server]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+tools = ["search_issues", "get_issue"]   # optional: take only these
+
+[mcp_server.env]
+GITHUB_TOKEN = "${GH_TOKEN}"             # expands from koda's environment
+```
+
+Its tools arrive as `mcp__github__search_issues`. They ask before running —
+an MCP server runs somebody else's code — unless the server marks a tool
+read-only, or you set `trust = true` on that server. Hosted servers work too:
+set `url` instead of `command`.
+
+`/mcp` lists every server and what it lends; `koda mcp` does the same from a
+shell and is the first thing to run when a tool you expected is missing. Full
+guide: [docs/mcp.md](docs/mcp.md).
+
+## Language servers
+
+The code graph matches names; a language server resolves them. When one is
+installed for your project, the `lsp` tool answers the questions regexes cannot:
+
+```
+lsp action=definition  file=src/agent.rs line=412 symbol=execute
+lsp action=references  file=src/agent.rs line=412 symbol=execute
+lsp action=hover       file=src/agent.rs line=412 symbol=outcome
+lsp action=diagnostics file=src/agent.rs
+```
+
+Give it a line and the symbol as it appears there — you never work out a column.
+It costs nothing when no server is installed: koda checks the project's marker
+files, and if nothing matches, the tool is not even advertised. Servers start on
+first use, not at launch. `/lsp` reports what is installed and running. Full
+guide: [docs/lsp.md](docs/lsp.md).
+
 ## Editing the system prompt
 
 The built-in system prompt is deliberately short, but you can replace it. Open

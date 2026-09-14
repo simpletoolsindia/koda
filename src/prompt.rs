@@ -65,6 +65,22 @@ every file that uses it — that is the difference between a complete change and
 message, a TODO, a config value) or for when the graph has no answer.
 - The graph is current, including files changed outside koda. It never needs rebuilding.";
 
+/// What a language server adds that the graph cannot, stated as the rule for
+/// when to reach past the graph.
+///
+/// Only added when a server for this project is actually installed: telling a
+/// model about a tool it does not have is how a turn gets spent on a refusal.
+const LSP_GUIDANCE: &str = "\n\nPRECISE ANSWERS — `lsp` asks this project's real language server, the same one an editor uses. The code graph matches names; the language server resolves them.
+
+Reach for it when a name match is not good enough:
+- Two things share a name, or the symbol is a trait/interface method -> lsp action=definition
+- You need a TYPE, a signature, or what a value actually is -> lsp action=hover
+- \"Who calls this, really\" before changing a signature -> lsp action=references
+- What the compiler or type checker says is wrong with a file -> lsp action=diagnostics
+- Follow a type or find implementations -> lsp action=type_definition / implementation
+
+Give `file`, `line` (1-based) and `symbol` — the name as it appears on that line. You never have to work out a column. Keep using codegraph first for orientation; `lsp` is for when the answer has to be exact.";
+
 /// The same job when there is no graph to ask. Kept parallel to
 /// `CODEGRAPH_GUIDANCE` so the base rules never have to name either tool: a
 /// rule in `BASE` telling the model to grep is a rule it follows, and it
@@ -213,8 +229,31 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     } else {
         p.push_str(FIND_GUIDANCE);
     }
+    if cfg.lsp && !crate::lsp::available(root).is_empty() {
+        p.push_str(LSP_GUIDANCE);
+    }
     if cfg.subagents {
         p.push_str(DELEGATION);
+    }
+    // Servers lending tools are named once, so the model knows that a
+    // `mcp__…` name in its list reaches out of the project — and that `mcp`
+    // itself reaches the resources and prompts those servers publish.
+    if cfg.mcp && crate::mcp::any_tools() {
+        let names: Vec<String> = crate::mcp::catalog()
+            .into_iter()
+            .filter(|s| s.connected && !s.tools.is_empty())
+            .map(|s| format!("{} ({} tools)", s.name, s.tools.len()))
+            .collect();
+        if !names.is_empty() {
+            let _ = write!(
+                p,
+                "\n\nCONNECTED SERVICES (MCP): {}. Their tools are in your list as \
+                 `mcp__<server>__<tool>` and reach systems outside this workspace — \
+                 use them when the answer is not in the code. `mcp` lists what each \
+                 one also publishes as resources and prompts.",
+                names.join(", ")
+            );
+        }
     }
     // Name what is not in the schema. A tool the model cannot see and is not
     // told about is a tool that does not exist — which is the one way this
@@ -266,6 +305,12 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
         p.push_str("\n\n");
         p.push_str(TEXT_PROTOCOL);
         p.push_str(&tools::text_protocol_help_for(allow));
+        // Tools lent by MCP servers are not in the built-in table, so the text
+        // protocol has to be told about them separately or a model without
+        // native tool calling can never reach them.
+        if cfg.mcp {
+            p.push_str(&crate::mcp::text_protocol_help(mode.read_only()));
+        }
     }
 
     if !cfg.instructions.trim().is_empty() {

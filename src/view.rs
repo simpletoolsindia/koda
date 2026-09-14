@@ -1011,7 +1011,10 @@ fn running_verb(name: &str) -> &'static str {
         "skill" => "reading skill",
         "todo" => "planning",
         "codegraph" => "consulting the code graph",
+        "lsp" => "asking the language server",
+        "mcp" => "asking a connected service",
         "remember" => "noting",
+        other if crate::mcp::is_mcp_tool(other) => "calling a connected service",
         _ => "working",
     }
 }
@@ -1345,9 +1348,12 @@ fn tool_identity(name: &str, g: &Glyphs) -> (&'static str, String) {
         "delegate" => ("Task", g.branch_arrow.to_string()),
         "web_search" => ("Search", g.magnify.to_string()),
         "codegraph" => ("Graph", g.magnify.to_string()),
+        "lsp" => ("Types", g.magnify.to_string()),
+        "mcp" => ("MCP", g.branch_arrow.to_string()),
         "remember" => ("Memory", g.ok.to_string()),
         "skill" => ("Skill", g.ok.to_string()),
         "todo" => ("Plan", g.check_on.to_string()),
+        other if crate::mcp::is_mcp_tool(other) => ("MCP", g.branch_arrow.to_string()),
         _ => ("Tool", g.ok.to_string()),
     }
 }

@@ -408,6 +408,34 @@ pub struct Config {
     /// koda should make on its own.
     #[serde(default = "default_true")]
     pub prompt_warmup: bool,
+    /// Speak the Model Context Protocol, so servers declared as `[[mcp_server]]`
+    /// tables can lend koda their tools. The switch is on by default because it
+    /// costs nothing until a server is configured — and off, it is a way to
+    /// silence every server at once without editing their entries.
+    #[serde(default = "default_true")]
+    pub mcp: bool,
+
+    /// Consult a language server for the questions the regex code graph cannot
+    /// answer precisely: what type is this, where is this *actually* defined,
+    /// who really calls it, what does the compiler think is wrong with this
+    /// file. Costs nothing when no server for the project's language is
+    /// installed — the `lsp` tool is not even advertised then.
+    #[serde(default = "default_true")]
+    pub lsp: bool,
+
+    /// Start the project's language servers at launch rather than on first use.
+    /// Off by default: rust-analyzer on a large workspace is a minute of CPU
+    /// and a gigabyte of memory, which a session that never asks a type-aware
+    /// question should not pay. On, the first `lsp` call answers immediately.
+    #[serde(default)]
+    pub lsp_eager: bool,
+
+    /// Let `codegraph query=symbol` fold in a language server's resolved answer
+    /// when one is already running. Strictly an addition: the graph's own
+    /// answer is unchanged, and a server that is cold, missing or slow is
+    /// silently skipped rather than made to wait.
+    #[serde(default = "default_true")]
+    pub lsp_in_codegraph: bool,
 
     /// Allow the `web_search` tool. Off unless a SearXNG URL is set.
     pub web_search: bool,
@@ -530,6 +558,14 @@ pub struct Config {
     /// How often (ms) watch mode rescans for triggers.
     #[serde(default = "default_watch_ms")]
     pub watch_interval_ms: u64,
+    /// MCP servers, declared as `[[mcp_server]]` tables.
+    ///
+    /// Declared here, next to `providers`, for the reason spelled out below: a
+    /// scalar serialised after a table array is read back as a field *of that
+    /// table*, so every array of tables has to live at the end of this struct.
+    #[serde(default, rename = "mcp_server")]
+    pub mcp_servers: Vec<McpServer>,
+
     /// Named endpoints, added through the setup page or by hand.
     ///
     /// Declared last on purpose: serde writes fields in declaration order and
@@ -584,6 +620,75 @@ pub struct CustomTool {
     /// Whether calling it needs approval (defaults to true — it runs a command).
     #[serde(default = "default_true")]
     pub mutating: bool,
+}
+
+/// One MCP server koda may borrow tools from.
+///
+/// Either a `command` (a child process speaking JSON-RPC on stdio, which is what
+/// nearly every published server is) or a `url` (a hosted server speaking
+/// streamable HTTP). Values in `env` and `headers` expand `${VAR}` from koda's
+/// own environment, so a config carrying `token = "${GITHUB_TOKEN}"` is a file
+/// that can be committed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpServer {
+    /// How koda refers to it. Becomes part of every tool name it offers:
+    /// `mcp__<name>__<tool>`.
+    pub name: String,
+    /// The executable, for a stdio server.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment for the child process.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Working directory, relative to the project unless absolute. Defaults to
+    /// the workspace root.
+    #[serde(default)]
+    pub cwd: String,
+    /// The endpoint, for an HTTP server. Set this *or* `command`.
+    #[serde(default)]
+    pub url: String,
+    /// Extra headers for an HTTP server — an API key, usually.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Treat every tool from this server as read-only, so it runs without
+    /// asking. Per-server rather than global on purpose: "my local filesystem
+    /// server may act without asking" is a sentence a user can mean; "every MCP
+    /// server may" is not one they should be able to say by accident.
+    #[serde(default)]
+    pub trust: bool,
+    /// Take only these tools. Empty means all of them. A server with sixty
+    /// tools would otherwise cost more context than the conversation.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Drop these tools. Applied after `tools`.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+impl McpServer {
+    /// Whether this server's tool list should include `name`.
+    pub fn allows(&self, name: &str) -> bool {
+        if self.exclude.iter().any(|e| e == name) {
+            return false;
+        }
+        self.tools.is_empty() || self.tools.iter().any(|t| t == name)
+    }
+
+    /// A one-line description of where this server comes from, for `/mcp`.
+    pub fn origin(&self) -> String {
+        if !self.url.trim().is_empty() {
+            return self.url.clone();
+        }
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", self.command, self.args.join(" "))
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -663,6 +768,11 @@ impl Default for Config {
             max_subagent_depth: 1,
             custom_tools: Vec::new(),
             prompt_warmup: true,
+            mcp: true,
+            lsp: true,
+            lsp_eager: false,
+            lsp_in_codegraph: true,
+            mcp_servers: Vec::new(),
             reasoning_effort: default_reasoning(),
             debug: false,
             system_prompt: String::new(),
@@ -1132,6 +1242,30 @@ codegraph_search = true
 # interval backs off automatically on a large tree.
 codegraph_refresh_ms = 15000
 
+# Consult a language server (rust-analyzer, pyright, gopls, ...) for questions
+# the regex code graph cannot answer precisely: real definitions, real
+# references, types, compiler diagnostics. Costs nothing when none is installed
+# -- the `lsp` tool is not even advertised then. See docs/lsp.md.
+lsp = true
+# Start the project's language servers at launch instead of on first use. Off:
+# rust-analyzer on a big workspace is a minute of CPU and a gigabyte of memory,
+# which a session that never asks a type-aware question should not pay.
+lsp_eager = false
+# Let `codegraph query=symbol` fold in a language server's resolved answer when
+# one is already running. Time-boxed, and skipped silently if it is not.
+lsp_in_codegraph = true
+
+# Speak the Model Context Protocol, so servers declared as [[mcp_server]] tables
+# can lend koda their tools. Nothing happens until one is configured; off is a
+# way to silence every server at once. See docs/mcp.md.
+mcp = true
+
+# Prefill the model's prompt cache in the background at startup, while you are
+# still typing. A local server prefills at a few hundred tokens a second and
+# koda's preamble is several thousand, so paid after you press enter that is ten
+# seconds of nothing. Local endpoints only.
+prompt_warmup = true
+
 # Web search through your own SearXNG instance. That instance needs `json` in
 # `search.formats` in its settings.yml. Toggle live with /websearch.
 # Web search. On, koda uses your SearXNG instance if searx_url is set (private,
@@ -1398,6 +1532,85 @@ mod tests {
         assert_eq!(back.active_provider, "omni");
         assert_eq!(back.base_url, "http://top-level/v1");
         assert_eq!(back.resolved().base_url, "http://provider/v1");
+    }
+
+    /// The same hazard, now that a second array of tables exists: an `[[mcp_server]]`
+    /// entry written before a scalar would swallow it. Both arrays have to
+    /// stay below every top-level key.
+    #[test]
+    fn mcp_servers_are_written_below_every_scalar() {
+        let mut cfg = Config {
+            model: "qwen".into(),
+            ..Config::default()
+        };
+        cfg.mcp_servers.push(McpServer {
+            name: "fs".into(),
+            command: "mcp-server-filesystem".into(),
+            args: vec![".".into()],
+            enabled: true,
+            ..Default::default()
+        });
+        cfg.upsert_provider(Provider {
+            name: "local".into(),
+            ..Provider::default()
+        });
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let first_table = text
+            .find("[[mcp_server]]")
+            .expect("the server was written")
+            .min(text.find("[[provider]]").unwrap_or(usize::MAX));
+        let head = &text[..first_table];
+        for key in ["model", "mcp", "lsp", "theme"] {
+            assert!(
+                head.lines().any(|l| l.starts_with(&format!("{key} ="))),
+                "{key} is written after a table array and would be read back as \
+                 part of it:\n{text}"
+            );
+        }
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.model, "qwen");
+        assert_eq!(back.mcp_servers.len(), 1);
+        assert_eq!(back.mcp_servers[0].command, "mcp-server-filesystem");
+        // Defaults hold for a server declared with only the essentials.
+        assert!(back.mcp_servers[0].enabled);
+        assert!(!back.mcp_servers[0].trust);
+    }
+
+    /// A project config naming a server by hand is the way most people will
+    /// add one, so the shape in the docs has to parse.
+    #[test]
+    fn the_documented_mcp_table_parses() {
+        let cfg: Config = toml::from_str(
+            r#"
+model = "qwen"
+
+[[mcp_server]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+tools = ["search_issues"]
+trust = false
+
+[mcp_server.env]
+GITHUB_TOKEN = "${GH_TOKEN}"
+
+[[mcp_server]]
+name = "docs"
+url = "https://example.test/mcp"
+
+[mcp_server.headers]
+Authorization = "Bearer ${DOCS_KEY}"
+"#,
+        )
+        .expect("the documented shape must parse");
+        assert_eq!(cfg.mcp_servers.len(), 2);
+        assert_eq!(cfg.mcp_servers[0].env["GITHUB_TOKEN"], "${GH_TOKEN}");
+        assert!(cfg.mcp_servers[0].allows("search_issues"));
+        assert!(!cfg.mcp_servers[0].allows("create_issue"));
+        assert_eq!(cfg.mcp_servers[1].origin(), "https://example.test/mcp");
+        // And the feature switches default on without being named.
+        assert!(cfg.mcp && cfg.lsp && cfg.lsp_in_codegraph);
+        assert!(!cfg.lsp_eager);
     }
 
     /// A config written before providers existed must keep working exactly as

@@ -1,28 +1,56 @@
-# Spec: MCP and LSP — deferred (P2), with a design sketch
+# MCP and LSP — the deferral, and what was built instead
 
-Status: **deferred, not abandoned.** Both are on the roadmap as P2. This document
-records *why* they are not in the current batch and *how* they should be built
-when picked up, so the decision is reviewable and the work is pre-scoped.
+Status: **delivered.** This document was the argument for *not* building these
+yet. It is kept because the reasoning was sound and the guardrails it set are
+the ones the implementation was held to — and because where the built thing
+diverges from the sketch, the reason is worth recording.
 
-## Why deferred
+See [mcp.md](mcp.md) and [lsp.md](lsp.md) for how to use them.
 
-Both MCP (Model Context Protocol) and LSP (Language Server Protocol) are large,
-self-contained subsystems, and both put pressure on koda's two hardest-won
-properties:
+## Where the implementation diverged, and why
 
-1. **~3 ms startup.** koda opens instantly because it does almost nothing on the
-   startup path. An MCP client that dials external servers, or an LSP client that
-   spawns a language server and waits for `initialize`, adds hundreds of
-   milliseconds to seconds — on the critical path, for every launch, even when
-   the feature is unused.
-2. **Zero runtime dependencies / one ~6 MB binary.** A serious LSP integration
-   pulls in a JSON-RPC stack, per-language server discovery, and document
-   synchronisation state. MCP pulls in a transport layer and a server lifecycle
-   manager. Neither is free in binary size or maintenance surface.
+- **Tool naming.** The sketch said `mcp/<server>/<tool>`. OpenAI-compatible tool
+  names may not contain a slash, so it is `mcp__<server>__<tool>`.
 
-Neither is a quick win, and shipping a half-built version would rot. So the
-decision is: **design now, build behind an opt-in flag later, never on the
-startup path.**
+- **Config shape.** The sketch said an `[mcp]` table. Servers are
+  `[[mcp_server]]` tables with an `mcp = true` master switch, because TOML binds
+  a bare key to whatever table precedes it — the same hazard already documented
+  around `[[provider]]`.
+
+- **Lifecycle: background, not lazy.** The sketch said nothing connects until
+  first use. That cannot work: a tool the model cannot see does not exist, so a
+  lazily-connected server would never be called. Servers instead connect in the
+  background at startup, which keeps the ~3 ms open intact while still putting
+  the tools in the schema. Nothing spawns unless a server is configured, which
+  is itself explicit opt-in.
+
+- **LSP config.** The sketch said a `[lsp]` table mapping language to command.
+  There is a built-in table instead, gated on the project's marker files and a
+  PATH lookup — so it works with no configuration at all, and costs a handful of
+  `stat` calls when no server is installed.
+
+- **LSP on by default.** The sketch said off. It is on, because the honest cost
+  when no server is installed is zero: the tool is not advertised, and no
+  process is started until it is called. `lsp_eager` is the opt-in for starting
+  servers at launch.
+
+## Something the sketch could not have known
+
+Both features change the *tool schema*, and that turned out to be expensive in a
+way nobody had measured. A local model server caches by prompt prefix, and the
+schema is ~73% of koda's preamble — so a tool list that changes mid-session
+throws that cache away and costs a full re-prefill, about eleven seconds on a
+local 30B.
+
+Two consequences, both now handled:
+
+- MCP servers arriving mid-session change the list, so the prompt-cache warm-up
+  waits for the catalog to settle before warming, and caches the shape the next
+  request will actually send.
+- The existing **deferred tools** mechanism (`browser`, `debugger`) is a
+  pessimisation on a local endpoint for the same reason: loading a group mid-
+  session costs more in re-prefill than the held-back tokens ever saved. That is
+  not yet addressed.
 
 ## Guardrails for whoever implements these
 
