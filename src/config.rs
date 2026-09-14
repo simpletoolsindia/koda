@@ -320,6 +320,17 @@ pub struct Config {
     /// rather than failing -- the point is to read the page.
     #[serde(default = "default_browser_channel")]
     pub browser_channel: String,
+    /// Which browser engine drives `browse`: "chrome" (default) or "lightpanda".
+    ///
+    /// Lightpanda is a headless engine built for agents — measured ~16x less
+    /// memory and ~9x faster than Chrome, because it runs the DOM, JS and
+    /// networking with no graphical rendering. That last part is the trade: it
+    /// cannot take screenshots and some heavy JS sites may not work, so `browse`
+    /// falls back to Chrome for screenshot actions even when this is
+    /// "lightpanda". Install it first (https://lightpanda.io); if it is missing,
+    /// agent-browser says so rather than guessing.
+    #[serde(default = "default_browser_engine")]
+    pub browser_engine: String,
     /// Run the browser without a window. On by default, because that is what
     /// you want when an agent is doing the browsing. Turn it off to watch the
     /// page as it works, or to sign in somewhere by hand first -- headed runs
@@ -373,6 +384,21 @@ pub struct Config {
     /// Carry notes and command outcomes between sessions in
     /// <project>/.koda/memory.md.
     pub memory: bool,
+
+    /// Route model calls through a TencentDB-Agent-Memory proxy, which adds
+    /// long-term, cross-session, shareable memory transparently — no plugin, its
+    /// own design is "point the agent's base URL at the proxy". Off by default.
+    ///
+    /// You run the proxy yourself (https://github.com/TencentCloud/TencentDB-Agent-Memory,
+    /// `./start-all.sh`); it holds the real LLM credentials and forwards to them.
+    /// When on with a URL set, koda talks to the proxy instead of its own
+    /// endpoint. This is separate from koda's own `memory` file above.
+    #[serde(default)]
+    pub agent_memory: bool,
+    /// The TencentDB-Agent-Memory proxy base URL (e.g. http://localhost:8125/v1).
+    /// Only used when `agent_memory` is on.
+    #[serde(default)]
+    pub agent_memory_url: String,
 
     /// Self-improvement (Phase 1): watch how you work — the edits you make to
     /// koda's output, command outcomes — and distil deterministic, inspectable
@@ -758,6 +784,7 @@ impl Default for Config {
             browser_path: String::new(),
             browser_headless: true,
             browser_channel: default_browser_channel(),
+            browser_engine: default_browser_engine(),
             browser_interactive: true,
             browser_highlight: true,
             browser_session: true,
@@ -767,6 +794,8 @@ impl Default for Config {
             icons: "auto".into(),
             sessions: true,
             memory: true,
+            agent_memory: false,
+            agent_memory_url: String::new(),
             learning: false,
             learning_daily: true,
             learning_promote_days: 3,
@@ -818,6 +847,10 @@ fn default_browser_channel() -> String {
 
 fn default_browser_idle_timeout() -> String {
     "5m".into()
+}
+
+fn default_browser_engine() -> String {
+    "chrome".into()
 }
 
 /// serde default for a flag that should be on unless someone says otherwise.
@@ -1148,6 +1181,15 @@ impl Config {
 
     /// Normalized endpoint without a trailing slash.
     pub fn endpoint(&self) -> String {
+        // With the agent-memory proxy on, every model call goes through it: the
+        // proxy injects/retrieves memory, then forwards to the real LLM it was
+        // configured with. Falls back to the normal endpoint if no URL is set.
+        if self.agent_memory {
+            let url = self.agent_memory_url.trim().trim_end_matches('/');
+            if !url.is_empty() {
+                return url.to_string();
+            }
+        }
         self.base_url.trim_end_matches('/').to_string()
     }
 
@@ -1421,6 +1463,31 @@ watch_interval_ms = 1500
 
 #[cfg(test)]
 mod tests {
+    /// The agent-memory proxy, when on with a URL, becomes koda's endpoint; off
+    /// or empty, the normal base_url stands.
+    #[test]
+    fn agent_memory_proxy_overrides_the_endpoint() {
+        use super::Config;
+        let base = Config {
+            base_url: "http://127.0.0.1:8080/v1".into(),
+            ..Config::default()
+        };
+        assert_eq!(base.endpoint(), "http://127.0.0.1:8080/v1");
+        let proxied = Config {
+            agent_memory: true,
+            agent_memory_url: "http://localhost:8125/v1/".into(),
+            ..base.clone()
+        };
+        assert_eq!(proxied.endpoint(), "http://localhost:8125/v1");
+        // On but no URL: fall back to the normal endpoint rather than break.
+        let empty = Config {
+            agent_memory: true,
+            agent_memory_url: "  ".into(),
+            ..base.clone()
+        };
+        assert_eq!(empty.endpoint(), "http://127.0.0.1:8080/v1");
+    }
+
     /// The helper exists because state outlives the project directory. If it
     /// ever stops clearing that state, every test built on it starts inheriting
     /// the previous run again -- silently, and only failing once a fixture is a

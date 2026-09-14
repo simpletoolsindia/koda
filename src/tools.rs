@@ -3530,6 +3530,19 @@ fn tune_browser_launch(cmd: &mut std::process::Command, cfg: &Config) {
     if !idle.is_empty() {
         cmd.arg("--idle-timeout").arg(idle);
     }
+    // A non-default engine (lightpanda) is a deliberate choice; chrome needs no
+    // flag. If lightpanda is picked but not installed, agent-browser says so.
+    let engine = cfg.browser_engine.trim().to_ascii_lowercase();
+    if !engine.is_empty() && engine != "chrome" {
+        cmd.arg("--engine").arg(&engine);
+    }
+}
+
+/// True when this browse action needs rendered pixels, which the configured
+/// engine cannot produce (lightpanda has no renderer).
+fn engine_cannot_do(cfg: &Config, action: &str) -> bool {
+    let wants_pixels = matches!(action, "screenshot" | "screenshot_element");
+    wants_pixels && !cfg.browser_engine.trim().eq_ignore_ascii_case("chrome")
 }
 
 /// Canonical socket directory for agent-browser communication.
@@ -3665,6 +3678,15 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         return Ok(Outcome::err(
             "browse action must be \"navigate\"/\"read\", \"search\", \"click\", \"type\", \"select\", \"check\", \"uncheck\", \"hover\", \"press\", \"scroll\", \"back\", \"forward\", \"reload\", \"screenshot\", \"screenshot_element\", \"wait\", \"upload\", \"tab\", \"download\", or \"close\"",
         ));
+    }
+
+    if engine_cannot_do(&ctx.cfg, &action) {
+        return Ok(Outcome::err(format!(
+            "the `{}` browser engine cannot take screenshots (it has no renderer). \
+             Set `browser_engine = \"chrome\"` in /settings for screenshots, or use a text \
+             action like \"read\".",
+            ctx.cfg.browser_engine.trim()
+        )));
     }
 
     let session_id = browser_session_id(&ctx.root);
@@ -5193,6 +5215,26 @@ mod tests {
             crate::engine::engine_path().is_some(),
             "no engine path on this platform"
         );
+    }
+
+    /// Lightpanda has no renderer, so a screenshot must be refused up front with
+    /// a clear message; text actions and the Chrome engine are fine.
+    #[test]
+    fn lightpanda_cannot_screenshot() {
+        let chrome = Config {
+            browser_engine: "chrome".into(),
+            ..Config::default()
+        };
+        let light = Config {
+            browser_engine: "lightpanda".into(),
+            ..Config::default()
+        };
+        assert!(super::engine_cannot_do(&light, "screenshot"));
+        assert!(super::engine_cannot_do(&light, "screenshot_element"));
+        assert!(!super::engine_cannot_do(&light, "read"));
+        assert!(!super::engine_cannot_do(&light, "click"));
+        // Chrome can always screenshot.
+        assert!(!super::engine_cannot_do(&chrome, "screenshot"));
     }
 
     /// Auto-approve should skip the routine, not the irreversible. This is the
