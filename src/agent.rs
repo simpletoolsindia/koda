@@ -138,6 +138,9 @@ pub enum Command {
     /// Name the running conversation, or clear the name with an empty string.
     NameSession(String),
     Undo,
+    /// Generate a Conventional Commits message from the working tree's changes
+    /// and create the commit.
+    Commit,
     ReloadSkills,
     SetModel(String),
     SetEndpoint(String),
@@ -1149,6 +1152,9 @@ impl Agent {
                 let msg = self.undo_last();
                 let _ = tx.send(Event::Notice(msg));
             }
+            Command::Commit => {
+                self.generate_commit(tx).await;
+            }
             Command::WhichSession => {
                 let msg = match self.session.as_ref() {
                     Some(s) => match s.name() {
@@ -1793,6 +1799,152 @@ impl Agent {
              with a plain-text summary as soon as the task is done.]"
         )));
         Some(next)
+    }
+
+    /// Run a git subcommand in the workspace, returning trimmed stdout (or the
+    /// error text on failure).
+    fn git(&self, args: &[&str]) -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&self.ctx.root)
+            .output()
+            .map_err(|e| format!("running git: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    }
+
+    /// `/commit`: write a Conventional Commits message for the working tree's
+    /// changes and create the commit. Everything is staged first (`git add -A`),
+    /// so `git reset --soft HEAD~1` undoes it cleanly if the message is wrong.
+    async fn generate_commit(&self, tx: &mpsc::UnboundedSender<Event>) {
+        let notice = |m: String| {
+            let _ = tx.send(Event::Notice(m));
+        };
+        if self.git(&["rev-parse", "--is-inside-work-tree"]).is_err() {
+            notice("not a git repository".into());
+            return;
+        }
+        // Nothing to commit? Say so rather than making an empty commit.
+        match self.git(&["status", "--porcelain"]) {
+            Ok(s) if s.is_empty() => {
+                notice("nothing to commit — the working tree is clean".into());
+                return;
+            }
+            Err(e) => {
+                notice(format!("git status failed: {e}"));
+                return;
+            }
+            _ => {}
+        }
+        // Prefer the staged diff; fall back to everything, which `git add -A`
+        // below will stage. Either way the message describes what gets committed.
+        let staged = self.git(&["diff", "--cached"]).unwrap_or_default();
+        let diff = if staged.is_empty() {
+            self.git(&["diff", "HEAD"]).unwrap_or_default()
+        } else {
+            staged
+        };
+        let status = self.git(&["status", "--short"]).unwrap_or_default();
+        if diff.trim().is_empty() && status.trim().is_empty() {
+            notice("nothing to commit".into());
+            return;
+        }
+
+        notice("writing a commit message…".into());
+        let message = match self.write_commit_message(&status, &diff).await {
+            Some(m) => m,
+            None => {
+                notice("could not generate a commit message — try again, or commit by hand".into());
+                return;
+            }
+        };
+
+        if let Err(e) = self.git(&["add", "-A"]) {
+            notice(format!("git add failed: {e}"));
+            return;
+        }
+        // Pass the message on stdin via -F - so multi-line bodies survive intact.
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-F", "-"])
+            .current_dir(&self.ctx.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let mut child = match commit {
+            Ok(c) => c,
+            Err(e) => {
+                notice(format!("git commit failed to start: {e}"));
+                return;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write as _;
+            let _ = stdin.write_all(message.as_bytes());
+        }
+        let out = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                notice(format!("git commit failed: {e}"));
+                return;
+            }
+        };
+        if !out.status.success() {
+            notice(format!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+            return;
+        }
+        let short = self.git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+        let subject = message.lines().next().unwrap_or("").to_string();
+        notice(format!(
+            "committed {short} — {subject}\n(undo with: git reset --soft HEAD~1)"
+        ));
+    }
+
+    /// One tool-free model call: a Conventional Commits message for a diff.
+    async fn write_commit_message(&self, status: &str, diff: &str) -> Option<String> {
+        let diff = tools::truncate(diff, 12_000);
+        let messages = vec![
+            Message::system(
+                "You write git commit messages. Given a repository's changes, reply with ONLY a \
+                 Conventional Commits message and nothing else — no preamble, no code fences.\n\
+                 Format:\n\
+                 - First line: `type(scope): subject` in the imperative mood, no trailing period, \
+                 at most 72 characters. `scope` is optional.\n\
+                 - Then a blank line, then 2 to 5 `- ` bullet points saying what changed and why.\n\
+                 Types: feat, fix, refactor, perf, docs, test, build, ci, chore, style. Pick the \
+                 one that fits the change. Describe what the diff actually does; do not invent.",
+            ),
+            Message::user(format!(
+                "git status --short:\n{status}\n\ndiff:\n{diff}\n\nWrite the commit message."
+            )),
+        ];
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages,
+            temperature: 0.2,
+            top_p: self.cfg.top_p,
+            max_tokens: 512,
+            tools: None,
+            reasoning_effort: "off".into(),
+        };
+        let (stx, mut srx) = mpsc::unbounded_channel();
+        let res = self.client.stream_with_retry(&req, &stx, 1).await;
+        drop(stx);
+        let mut out = String::new();
+        while let Some(ev) = srx.recv().await {
+            if let StreamEvent::Text(t) = ev {
+                out.push_str(&t);
+            }
+        }
+        res.ok()?;
+        let cleaned = clean_commit_message(&out);
+        (!cleaned.is_empty()).then_some(cleaned)
     }
 
     /// One tool-free model call asking whether this turn has more real work to
@@ -5390,6 +5542,49 @@ impl Agent {
 /// close with `</parameter>` or run to the next `<parameter=`. Returns
 /// `(name, arguments-json)` pairs; a value that is itself valid JSON is kept as
 /// JSON so numbers and objects survive, otherwise it is a JSON string.
+/// The Conventional Commits types a subject line may open with.
+const COMMIT_TYPES: &[&str] = &[
+    "feat", "fix", "refactor", "perf", "docs", "test", "build", "ci", "chore", "style", "revert",
+];
+
+/// Whether a line looks like a Conventional Commits subject: `type(scope)!: …`.
+fn is_commit_subject(line: &str) -> bool {
+    let head = line.split(':').next().unwrap_or("");
+    let ty = head
+        .trim_end_matches('!')
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim();
+    COMMIT_TYPES.contains(&ty) && line.contains(": ")
+}
+
+/// Turn a model's reply into a clean commit message: drop any wrapping code
+/// fence, any preamble before the real subject line, and trailing fences.
+fn clean_commit_message(raw: &str) -> String {
+    let mut s = raw.trim();
+    // Unwrap a single fenced block that spans the whole reply.
+    if let Some(rest) = s.strip_prefix("```") {
+        let body = rest.splitn(2, '\n').nth(1).unwrap_or("");
+        let end = body.rfind("```").unwrap_or(body.len());
+        s = body[..end].trim();
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    // Start at the first real subject line if the model added a preamble; else
+    // at the first non-empty line.
+    let start = lines
+        .iter()
+        .position(|l| is_commit_subject(l.trim()))
+        .or_else(|| lines.iter().position(|l| !l.trim().is_empty()))
+        .unwrap_or(0);
+    lines[start..]
+        .join("\n")
+        .trim()
+        .trim_end_matches('`')
+        .trim()
+        .to_string()
+}
+
 fn parse_function_markup(text: &str) -> Vec<(String, String)> {
     const FN: &str = "<function=";
     let mut out = Vec::new();
@@ -6281,6 +6476,24 @@ mod tests {
             agent_with(crate::config::Config::default()).recent_requests(3),
             "(nothing recorded)"
         );
+    }
+
+    /// `/commit` feeds the model's reply straight to `git commit`, so a code
+    /// fence or a "Here's the message:" preamble would end up in the commit.
+    #[test]
+    fn commit_message_is_cleaned_of_wrappers_and_preamble() {
+        let fenced = "Here is the commit message:\n\n```\nfeat(auth): add SSO login\n\n- wires OIDC\n```";
+        assert_eq!(
+            clean_commit_message(fenced),
+            "feat(auth): add SSO login\n\n- wires OIDC"
+        );
+        // A plain message is unchanged.
+        let plain = "fix(db): close the pool on shutdown\n\n- was leaking connections";
+        assert_eq!(clean_commit_message(plain), plain);
+        // No recognizable subject: keep from the first real line, don't drop all.
+        assert_eq!(clean_commit_message("\n\nupdated the parser\n"), "updated the parser");
+        assert!(is_commit_subject("refactor(view)!: split the renderer"));
+        assert!(!is_commit_subject("this is just prose"));
     }
 
     /// The step check decides whether a turn keeps running. A reply with no

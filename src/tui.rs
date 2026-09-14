@@ -224,6 +224,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/fork", "branch this conversation into a copy"),
     ("/name", "name this conversation so the picker shows it"),
     ("/undo", "put back the last file the agent changed"),
+    ("/commit", "generate a conventional-commit message and commit"),
     ("/theme", "switch palette"),
     ("/url", "change the API base URL"),
     ("/clear", "drop the conversation context"),
@@ -2421,6 +2422,7 @@ impl App {
                 },
             },
             "undo" => self.send(Command::Undo),
+            "commit" => self.send(Command::Commit),
             "session" => self.send(Command::WhichSession),
             "name" | "rename" => {
                 // No argument is a question ("what is this called?"), not a
