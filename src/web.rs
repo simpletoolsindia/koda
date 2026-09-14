@@ -407,6 +407,54 @@ fn github_readme_url(url: &str) -> Option<(String, String)> {
     ))
 }
 
+/// Whether a response is a bot-mitigation challenge rather than a real error.
+///
+/// Cloudflare (and Cloudflare-fronted sites) answer a blocked bot with 403 or
+/// 503 and a `cf-ray` header, usually plus `cf-mitigated: challenge` or a
+/// `__cf_bm`/`cf_clearance` cookie. The signal is "served by Cloudflare AND
+/// refused", which a genuine origin 403 (no `cf-ray`) is not.
+fn is_challenge_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+    let code = status.as_u16();
+    if code != 403 && code != 503 && code != 429 {
+        return false;
+    }
+    let has = |name: &str| headers.contains_key(name);
+    let mitigated = headers
+        .get("cf-mitigated")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("challenge"))
+        .unwrap_or(false);
+    let server_cf = headers
+        .get(reqwest::header::SERVER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_ascii_lowercase().contains("cloudflare"))
+        .unwrap_or(false);
+    has("cf-ray") || mitigated || server_cf
+}
+
+/// Whether a 200 body is actually a Cloudflare interstitial, not the content.
+///
+/// Keyed on the interstitial's own text so a normal page that merely embeds the
+/// Cloudflare script (`challenge-platform`, present on most CF-fronted sites) is
+/// not flagged — that string alone is not a block.
+fn looks_like_challenge_page(body: &str) -> bool {
+    // A real article is large; an interstitial is a few KB. Above this, even a
+    // matching phrase is almost certainly real content quoting it.
+    if body.len() > 128 * 1024 {
+        return false;
+    }
+    let low = body.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "just a moment",
+        "cf-browser-verification",
+        "checking if the site connection is secure",
+        "attention required! | cloudflare",
+        "_cf_chl_opt",
+        "enable javascript and cookies to continue",
+    ];
+    MARKERS.iter().any(|m| low.contains(m))
+}
+
 async fn fetch_page(url: &str, timeout_secs: u64) -> Result<String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         bail!("web_fetch only supports http:// and https:// URLs");
@@ -414,25 +462,51 @@ async fn fetch_page(url: &str, timeout_secs: u64) -> Result<String> {
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(timeout_secs))
+        // A current Chrome UA on Windows: the most common real-browser string, so
+        // it is the least likely to be singled out by a UA allowlist.
         .user_agent(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         )
         .build()
         .context("building the fetch client")?;
     let started = std::time::Instant::now();
+    // The headers a real navigation sends. A UA alone, with none of these, is a
+    // classic bot tell; sending the set a browser sends gets past the simpler
+    // "bot fight" checks (though not a full JS challenge — nothing HTTP can).
     let resp = http
         .get(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", "none")
+        .header("Sec-Fetch-User", "?1")
+        .header("Upgrade-Insecure-Requests", "1")
         .send()
         .await
         .with_context(|| format!("fetching {url}"))?;
     let status = resp.status();
-    let content_type = resp
-        .headers()
+    let headers = resp.headers().clone();
+    let content_type = headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    // A Cloudflare (or similar) challenge is a distinct failure from a plain 4xx:
+    // the page exists and a real browser could read it, so say exactly that and
+    // point at the tool that can — rather than a dead-end "403 Forbidden".
+    if is_challenge_response(status, &headers) {
+        tel_warn!("web", "fetch challenged", "status" => status.as_u16());
+        bail!(
+            "{url} is behind a Cloudflare challenge (HTTP {status}) that a plain fetch cannot \
+             pass. Use the `browse` tool — it runs a real browser that clears the challenge; if \
+             you land on a \"Just a moment…\" page, `browse` with action=\"wait\" seconds=6, then read."
+        );
+    }
     if !status.is_success() {
         tel_warn!("web", "fetch rejected", "status" => status.as_u16());
         bail!("{url} replied {status}");
@@ -440,6 +514,14 @@ async fn fetch_page(url: &str, timeout_secs: u64) -> Result<String> {
     // Cap what we pull off the wire (5 MiB) regardless of the final text cap.
     const WIRE_CAP: usize = 5 * 1024 * 1024;
     let body = read_capped(resp, WIRE_CAP).await?;
+    // A 200 that is really a challenge interstitial ("Just a moment…") — same
+    // advice, before we hand the model a page of nothing.
+    if looks_like_challenge_page(&body) {
+        bail!(
+            "{url} returned a Cloudflare challenge page, not the content. Use the `browse` tool \
+             (a real browser); if you see \"Just a moment…\", `browse` action=\"wait\" seconds=6, then read."
+        );
+    }
     let text = if content_type.contains("html") || looks_like_html(&body) {
         html_to_text(&body)
     } else {
@@ -538,6 +620,36 @@ fn tidy_lines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Cloudflare challenge is a distinct case from a plain error or a normal
+    /// page that merely embeds the CF script.
+    #[test]
+    fn cloudflare_challenges_are_told_apart_from_real_pages() {
+        use reqwest::header::HeaderMap;
+        use reqwest::StatusCode;
+        let mut cf = HeaderMap::new();
+        cf.insert("cf-ray", "abc123".parse().unwrap());
+        cf.insert("server", "cloudflare".parse().unwrap());
+        // A CF-served 403 is a challenge…
+        assert!(is_challenge_response(StatusCode::FORBIDDEN, &cf));
+        assert!(is_challenge_response(StatusCode::SERVICE_UNAVAILABLE, &cf));
+        // …but a plain origin 403 with no CF fingerprint is a real refusal.
+        assert!(!is_challenge_response(StatusCode::FORBIDDEN, &HeaderMap::new()));
+        // A 200 is never a "challenge response" by status.
+        assert!(!is_challenge_response(StatusCode::OK, &cf));
+
+        // A 200 interstitial body is caught by text…
+        assert!(looks_like_challenge_page(
+            "<html><head><title>Just a moment...</title></head><body>_cf_chl_opt</body></html>"
+        ));
+        // …but a big real page that merely embeds the CF script is not.
+        let real = format!(
+            "<html><title>OneHack</title>{}<script>challenge-platform</script></html>",
+            "content ".repeat(30_000)
+        );
+        assert!(!looks_like_challenge_page(&real));
+        assert!(!looks_like_challenge_page("<html><body>an ordinary article</body></html>"));
+    }
 
     /// A bare repo URL fetches its README; anything deeper is what was asked.
     #[test]
