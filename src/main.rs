@@ -88,6 +88,10 @@ struct Cli {
     #[arg(long)]
     protocol: Option<ToolProtocol>,
 
+    /// Fast mode: a terse prompt and a lean tool set, for small local models.
+    #[arg(long)]
+    fast: bool,
+
     /// Allow file tools outside the workspace root.
     #[arg(long)]
     no_sandbox: bool,
@@ -266,6 +270,9 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
     if cli.yolo {
         cfg.auto_approve = true;
+    }
+    if cli.fast {
+        cfg.fast = true;
     }
     if cli.no_sandbox {
         cfg.sandbox = false;

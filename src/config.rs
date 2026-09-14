@@ -226,6 +226,17 @@ pub struct Config {
     /// Absolute ceiling on steps per turn once `step_check` starts extending
     /// the budget. Never below `max_steps`.
     pub max_steps_hard: usize,
+    /// Fast mode: trim everything a local model pays for on every request.
+    ///
+    /// A small model on a laptop is bottlenecked on prompt processing, and koda
+    /// re-sends a fixed ~4k tokens of system prompt and tool schemas each turn
+    /// (measured: 1.3k system + 2.9k tools on a coder model). Fast mode ships a
+    /// terse system prompt and advertises only the core coding tools, cutting
+    /// that overhead roughly in half so each step is processed faster and a
+    /// small model has fewer tools to be confused by. The hidden tools still
+    /// run if called, and `load_tools` still reaches the rest.
+    #[serde(default)]
+    pub fast: bool,
     /// Skip approval prompts for mutating tools.
     pub auto_approve: bool,
     /// Tiered autonomy: ask (default), write (auto-approve writes), or full
@@ -712,6 +723,7 @@ impl Default for Config {
             max_steps: 24,
             step_check: true,
             max_steps_hard: 96,
+            fast: false,
             auto_approve: false,
             auto_tier: AutoTier::Ask,
             sandbox: true,
@@ -1175,6 +1187,11 @@ max_steps = 24
 # `max_steps_hard`. Set false to stop hard at `max_steps` (one less model call).
 step_check = true
 max_steps_hard = 96
+# Fast mode (toggle live with /fastmode, or --fast): ship a terse system prompt
+# and advertise only the core coding tools. Cuts the fixed per-request overhead
+# a small local model re-processes every turn by ~60% (measured). Hidden tools
+# still run if called; `load_tools` reaches the rest. Off by default.
+fast = false
 auto_approve = false    # true = never ask before writes/commands (same as auto_tier=full)
 # Tiered autonomy, cycled live with /auto: ask (prompt for every write/command),
 # write (auto-approve writes, still ask before commands), full (approve everything).

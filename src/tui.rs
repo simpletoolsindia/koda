@@ -207,6 +207,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/watch", "watch files for AI! / AI? triggers"),
     ("/reason", "how hard the model thinks — pick from a list"),
     ("/websearch", "turn web search on or off"),
+    ("/fastmode", "lean prompt + core tools for local models"),
     ("/skills", "list skills, or reload them from disk"),
     (
         "/learn",
@@ -507,6 +508,7 @@ pub struct App {
     context_budget: usize,
     auto_tier: AutoTier,
     web: bool,
+    fast: bool,
     searx_configured: bool,
     mode: Mode,
     /// Set when plan mode blocked a change, so the hint bar can offer the switch.
@@ -2509,6 +2511,21 @@ impl App {
                     self.send(Command::ListSkills);
                 }
             }
+            "fastmode" | "fast" => {
+                // Explicit on/off if given, else toggle.
+                self.fast = match arg.trim().to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    _ => !self.fast,
+                };
+                let v = self.fast;
+                self.send(Command::SetFast(v));
+                if v {
+                    self.note("fast mode on — lean prompt and core tools (smaller, quicker per step on local models)");
+                } else {
+                    self.note("fast mode off — full prompt and all tools");
+                }
+            }
             "websearch" | "web" => {
                 self.web = !self.web;
                 let v = self.web;
@@ -4170,6 +4187,9 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     if app.web {
         right.push(Segment::new("web", t.info));
     }
+    if app.fast {
+        right.push(Segment::new("FAST", t.accent_alt).bold());
+    }
     // Which port the web UI landed on, so it stays answerable without scrolling
     // back to the banner — several sessions at once each get a different one.
     if let Some(addr) = crate::webui::address() {
@@ -5468,6 +5488,7 @@ pub async fn run(
             cfg.auto_tier
         },
         web: cfg.web_search,
+        fast: cfg.fast,
         searx_configured: !cfg.searx_url.trim().is_empty(),
         mode: cfg.mode,
         plan_blocked: false,

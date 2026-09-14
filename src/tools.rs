@@ -745,6 +745,27 @@ const SHELLS_OUT: &[&str] = &["search", "run_command", "browse", "view_image"];
 /// shared state matters.
 pub const PARALLEL_SAFE: &[&str] = &["read_file", "list_dir", "find_files", "search"];
 
+/// The tools fast mode advertises: the core read → edit → verify loop, plus the
+/// plan tool and the loader that reaches everything else.
+///
+/// Everything left out — codegraph, remember, manage_skill, ask_user, delegate,
+/// view_image, about_creator — still runs if the model calls it by name, and
+/// `load_tools`/its group brings the browser and debugger in. This is the tool
+/// half of fast mode: measured on a coder model the full 16-tool schema is
+/// ~2,895 tokens against a task of a few hundred, and a small model picks more
+/// reliably from eight relevant tools than sixteen mostly-irrelevant ones.
+pub const FAST_CORE: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "find_files",
+    "search",
+    "write_file",
+    "edit_file",
+    "run_command",
+    "todo",
+    "load_tools",
+];
+
 /// Tools held back from the schema until a session needs them.
 ///
 /// The schema is the largest fixed cost in every request: measured on this

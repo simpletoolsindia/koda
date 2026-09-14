@@ -32,6 +32,28 @@ Style:
 - Reply in plain text. Use fenced blocks only for writing code.
 - Stop calling tools and reply with a brief summary when finished.";
 
+/// The base for fast mode: the load-bearing rules a small model needs and
+/// nothing it does not.
+///
+/// The full BASE plus its guidance sections runs ~1.3k tokens, re-sent every
+/// request. A small local model is bottlenecked on exactly that, and reads the
+/// last few load-bearing lines more reliably than twenty. This keeps the rules
+/// that prevent real damage or rework (read before edit, verify, one write at a
+/// time, ask when a command is destructive) and drops the rest. The terseness
+/// line is stern because the failure it addresses is real: a coder model given
+/// this task wrote its summary twice.
+const FAST_BASE: &str = "\
+You are koda, an autonomous coding agent working in the user's terminal.
+
+Rules:
+- Read a file before editing it. `edit_file` needs an exact substring copied verbatim from `read_file`.
+- Prefer `edit_file` over `write_file` for existing files.
+- Verify with `run_command` (build, tests, linter) before you finish.
+- One write or command at a time; wait for the result before the next.
+- Do not run destructive commands, or delete what you set up, unless asked.
+
+Be terse. No preamble, no narration, no restating the task. When done, stop and give ONE short summary — never repeat it. Reply in plain text; fenced blocks only for code.";
+
 /// The built-in base system prompt, exposed so the settings editor can
 /// pre-populate its textarea when the user has no custom prompt yet — editing
 /// from the real text is far easier than starting from a blank field.
@@ -196,6 +218,14 @@ pub fn build_with_skills(
     learned: &str,
 ) -> String {
     let mut p = build(cfg, root, use_text_protocol, mode);
+    // Fast mode also drops the per-request context that is nice-to-have rather
+    // than load-bearing: the skill catalogue, remembered notes and learned
+    // rules. Each is a paragraph or more re-sent every turn; a small model on a
+    // quick task moves faster without them, and they return the moment fast is
+    // off.
+    if cfg.fast {
+        return p;
+    }
     p.push_str(&crate::skills::catalogue(skills));
     if cfg.memory {
         // One note per ~1k of window, between four and twenty: enough to be
@@ -223,20 +253,27 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     // built-in base; everything else (mode notes, workspace, tools, skills,
     // instructions) is still layered on so the agent stays functional.
     if cfg.system_prompt.trim().is_empty() {
-        p.push_str(BASE);
+        p.push_str(if cfg.fast { FAST_BASE } else { BASE });
     } else {
         p.push_str(cfg.system_prompt.trim());
     }
-    if cfg.codegraph {
-        p.push_str(CODEGRAPH_GUIDANCE);
-    } else {
-        p.push_str(FIND_GUIDANCE);
-    }
-    if cfg.lsp && !crate::lsp::available(root).is_empty() {
-        p.push_str(LSP_GUIDANCE);
-    }
-    if cfg.subagents {
-        p.push_str(DELEGATION);
+    // Fast mode drops the guidance sections a small local model pays for on
+    // every request: the codegraph workflow, the language-server note, the
+    // delegation explainer, the MORE TOOLS list and the parallel-reads note.
+    // The tools they describe are still reachable — `load_tools` and a direct
+    // call both work — so this costs discoverability, not capability.
+    if !cfg.fast {
+        if cfg.codegraph {
+            p.push_str(CODEGRAPH_GUIDANCE);
+        } else {
+            p.push_str(FIND_GUIDANCE);
+        }
+        if cfg.lsp && !crate::lsp::available(root).is_empty() {
+            p.push_str(LSP_GUIDANCE);
+        }
+        if cfg.subagents {
+            p.push_str(DELEGATION);
+        }
     }
     // Servers lending tools are named once, so the model knows that a
     // `mcp__…` name in its list reaches out of the project — and that `mcp`
@@ -260,22 +297,31 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     }
     // Name what is not in the schema. A tool the model cannot see and is not
     // told about is a tool that does not exist — which is the one way this
-    // could cost accuracy, so it is spelled out rather than implied.
-    let groups = crate::tools::deferred_summary(|t| match t {
-        "browse" => cfg.browser,
-        _ => true,
-    });
-    if !groups.trim().is_empty() {
-        let _ = write!(
-            p,
-            "\n\nMORE TOOLS — these exist but are not in your tool list yet, so that the \
-             list stays small:\n{groups}\
-             Call `load_tools` with the group name to bring one in. You may also just call the \
-             tool you want by name — it is loaded for you automatically, so a guess costs \
-             nothing."
+    // could cost accuracy, so it is spelled out rather than implied. Fast mode
+    // hides more tools but says so once, in one line, rather than a paragraph.
+    if cfg.fast {
+        p.push_str(
+            "\n\nMore tools (codegraph, delegate, remember, view_image, browse, …) are not \
+             listed to keep this small. Call `load_tools` for a group, or just call the tool \
+             by name — it loads automatically.",
         );
+    } else {
+        let groups = crate::tools::deferred_summary(|t| match t {
+            "browse" => cfg.browser,
+            _ => true,
+        });
+        if !groups.trim().is_empty() {
+            let _ = write!(
+                p,
+                "\n\nMORE TOOLS — these exist but are not in your tool list yet, so that the \
+                 list stays small:\n{groups}\
+                 Call `load_tools` with the group name to bring one in. You may also just call \
+                 the tool you want by name — it is loaded for you automatically, so a guess \
+                 costs nothing."
+            );
+        }
     }
-    if !(use_text_protocol || cfg.tool_protocol == ToolProtocol::Text) {
+    if !cfg.fast && !(use_text_protocol || cfg.tool_protocol == ToolProtocol::Text) {
         p.push_str(PARALLEL_READS);
     }
     match mode {
@@ -715,6 +761,42 @@ mod tests {
         // The workflow has to name the calls, not just the tool: a local model
         // that is told "use codegraph" without a shape reaches for grep.
         assert!(prompt.contains("query=symbol"), "{prompt}");
+    }
+
+    /// Fast mode exists to shrink what a local model prefills every request.
+    /// The prompt must come out far smaller, keep the load-bearing rules, and
+    /// drop the guidance sections whose tools are still reachable.
+    #[test]
+    fn fast_mode_ships_a_much_smaller_prompt() {
+        let root = Path::new("/tmp/koda-fast-prompt");
+        let full = build(&Config::default(), root, false, Mode::Execute);
+        let fast = build(
+            &Config {
+                fast: true,
+                ..Config::default()
+            },
+            root,
+            false,
+            Mode::Execute,
+        );
+        assert!(
+            fast.len() * 2 < full.len(),
+            "fast prompt should be well under half of full: {} vs {}",
+            fast.len(),
+            full.len()
+        );
+        // The rules that prevent damage or rework stay.
+        assert!(fast.contains("Read a file before editing"), "{fast}");
+        assert!(fast.contains("Verify"), "{fast}");
+        assert!(fast.contains("One write or command at a time"), "{fast}");
+        // The heavy guidance sections go.
+        assert!(!fast.contains("CODE ANALYSIS"), "{fast}");
+        assert!(!fast.contains("DELEGATION"), "{fast}");
+        assert!(!fast.contains("in ONE step"), "{fast}");
+        // But the model is still told the hidden tools exist and how to reach them.
+        assert!(fast.contains("load_tools"), "{fast}");
+        // And the terseness rule that stops the double-summary is stern.
+        assert!(fast.contains("never repeat"), "{fast}");
     }
 
     /// koda runs independent read-only calls concurrently, but only if the

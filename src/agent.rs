@@ -144,6 +144,7 @@ pub enum Command {
     SetAutoTier(crate::config::AutoTier),
     SetMode(Mode),
     SetWebSearch(bool),
+    SetFast(bool),
     /// Push a full updated config from the settings page so live-editable
     /// fields (web search + backend, reasoning effort, system prompt, debug)
     /// take effect without a restart.
@@ -1222,6 +1223,22 @@ impl Agent {
                     if v { "on" } else { "off" }
                 )));
             }
+            Command::SetFast(v) => {
+                let mut cfg = (*self.cfg).clone();
+                cfg.fast = v;
+                self.cfg = Arc::new(cfg);
+                self.ctx.cfg = self.cfg.clone();
+                self.rebuild_system();
+                let _ = tx.send(Event::Notice(format!(
+                    "fast mode {} — {}",
+                    if v { "on" } else { "off" },
+                    if v {
+                        "lean prompt and core tools only"
+                    } else {
+                        "full prompt and all tools"
+                    }
+                )));
+            }
             Command::SetAutoTier(tier) => {
                 self.auto_tier = tier;
                 // `auto_approve` stays as the hard override; the tier is the
@@ -1915,6 +1932,19 @@ impl Agent {
     /// tempted by a tool that will refuse it.
     fn advertised_tools(&self) -> Vec<serde_json::Value> {
         let mut list = tools::openai_schema_for(self.effective_allow());
+        // Fast mode: advertise only the core coding loop. The rest still run if
+        // called (dispatch is by name) and `load_tools` reaches the deferred
+        // groups, so nothing is lost but the per-request token cost. Web tools
+        // stay if the user turned them on, since fast is about size not policy.
+        if self.cfg.fast {
+            list.retain(|t| {
+                let name = t.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("");
+                tools::FAST_CORE.contains(&name)
+                    || (name == "web_search" && self.cfg.web_search)
+                    || (name == "web_fetch" && self.cfg.web_fetch)
+            });
+            return list;
+        }
         // Hold back the heavy, situational tools until this session asks. The
         // prompt names them and `load_tools` brings them in — and calling one
         // directly loads it too, so nothing is ever out of reach.
@@ -6942,6 +6972,44 @@ mod tests {
         ] {
             assert!(!looks_like_embedder(no), "{no} is not an embedder");
         }
+    }
+
+    /// Fast mode advertises only the core coding loop. The heavy, situational
+    /// tools drop off the schema — but they still dispatch by name, so this is
+    /// a size cut, not a capability cut.
+    #[test]
+    fn fast_mode_advertises_only_the_core_tools() {
+        let names = |a: &Agent| -> Vec<String> {
+            a.advertised_tools()
+                .iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+        let full = names(&test_agent());
+        let fast = names(&agent_with(crate::config::Config {
+            fast: true,
+            ..crate::config::Config::default()
+        }));
+        assert!(fast.len() < full.len(), "fast={fast:?} full={full:?}");
+        // The everyday loop is all there.
+        for core in [
+            "read_file",
+            "edit_file",
+            "write_file",
+            "run_command",
+            "search",
+            "todo",
+            "load_tools",
+        ] {
+            assert!(fast.contains(&core.to_string()), "{core} missing: {fast:?}");
+        }
+        // The heavy ones are gone from the schema…
+        for heavy in ["codegraph", "delegate", "manage_skill", "view_image"] {
+            assert!(!fast.contains(&heavy.to_string()), "{heavy} still advertised");
+        }
+        // …but still dispatch by name, so nothing is unreachable.
+        assert!(tools::spec("codegraph").is_some());
     }
 
     /// The tool schema is the largest fixed cost in every request, and most
