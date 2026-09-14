@@ -1194,8 +1194,12 @@ fn render_item(
                         lines.push(indent(l, 3, t, g, 0));
                     }
                 }
+                // Room after the expanded body, but a collapsed "thought for …"
+                // line is metadata — the tool call or reply it precedes sits
+                // directly under it, no blank, so a think→act sequence reads as
+                // one unit instead of a spread-out ladder.
+                lines.push(Line::default());
             }
-            lines.push(Line::default());
             lines
         }
 
@@ -2402,7 +2406,7 @@ mod tests {
             "same-length blocks must hash differently"
         );
 
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.raw(a);
         t.raw(b);
         t.relayout(60);
@@ -2412,7 +2416,7 @@ mod tests {
 
     #[test]
     fn caches_until_content_changes() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.assistant_delta("hello");
         let a = t.relayout(40);
         assert_eq!(a, t.relayout(40));
@@ -2422,7 +2426,7 @@ mod tests {
 
     #[test]
     fn window_slices_lines() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.user("one".into());
         t.assistant_delta("two");
         assert!(t.relayout(40) >= 3);
@@ -2431,7 +2435,7 @@ mod tests {
 
     /// Render one tool view and return the plain text, for eyeballing layout.
     fn render_view(name: &str, label: &str, v: crate::tools::ToolView, w: u16) -> String {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("1".into(), name.into(), label.into(), 0);
         t.tool_end("1", true, label.into(), String::new(), v);
         t.relayout(w);
@@ -2497,7 +2501,7 @@ mod tests {
         assert_eq!(crate::theme::UNICODE.fail, "✘");
         assert_eq!(crate::theme::UNICODE.warning, "⚠");
 
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("2".into(), "run_command".into(), "$ false".into(), 0);
         t.tool_end(
             "2",
@@ -2643,7 +2647,7 @@ mod tests {
 
     #[test]
     fn failed_tool_expands_with_detail() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("1".into(), "read_file".into(), "read a".into(), 0);
         t.tool_end(
             "1",
@@ -2662,7 +2666,7 @@ mod tests {
 
     #[test]
     fn successful_tool_stays_collapsed_and_shows_summary() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("1".into(), "read_file".into(), "read a.rs".into(), 0);
         t.tool_end(
             "1",
@@ -2688,7 +2692,7 @@ mod tests {
         // The reported bug: after ctrl+r expands output, the NEXT tool call's
         // output would come back collapsed. With the global preference it stays
         // expanded for every block, old and new, until toggled off.
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.expand_tools = true; // as if the user pressed ctrl+r
         t.tool_start("1".into(), "read_file".into(), "read a.rs".into(), 0);
         t.tool_end(
@@ -2726,7 +2730,7 @@ mod tests {
 
     #[test]
     fn reasoning_collapses_to_a_duration() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.reasoning_delta("let me think about this carefully");
         t.assistant_delta("answer"); // closing the reasoning stamps elapsed
         t.relayout(60);
@@ -2742,9 +2746,44 @@ mod tests {
         assert!(flat(&t.window(0, 20)).contains("carefully"));
     }
 
+    /// A collapsed "thought for …" line is metadata; the block it precedes sits
+    /// directly under it, with no blank line spreading the transcript out.
+    #[test]
+    fn collapsed_reasoning_has_no_trailing_blank() {
+        let mut t = tr();
+        t.reasoning_delta("deciding what to do");
+        t.tool_start("1".into(), "run_command".into(), "$ ls".into(), 0);
+        t.tool_end(
+            "1",
+            true,
+            "$ ls".into(),
+            "a.txt".into(),
+            crate::tools::ToolView::Run {
+                command: "ls".into(),
+                stdout: "a.txt".into(),
+                stderr: String::new(),
+                code: 0,
+            },
+        );
+        t.relayout(80);
+        let lines = t.window(0, 40);
+        let flat_lines: Vec<String> = lines
+            .iter()
+            .map(|l| flat(std::slice::from_ref(l)).trim_end().to_string())
+            .collect();
+        let thought = flat_lines
+            .iter()
+            .position(|l| l.contains("thought for"))
+            .expect("a thought line");
+        assert!(
+            !flat_lines[thought + 1].trim().is_empty(),
+            "no blank directly after a collapsed thought line: {flat_lines:?}"
+        );
+    }
+
     #[test]
     fn reasoning_shows_a_token_estimate() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         // ~120 chars of reasoning -> ~30 tokens at 4 chars/token.
         t.reasoning_delta(&"analyze the failing case and pick the fix. ".repeat(3));
         t.assistant_delta("done");
@@ -2759,7 +2798,7 @@ mod tests {
 
     #[test]
     fn running_tool_shows_a_progress_bar() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("1".into(), "run_command".into(), "cargo build".into(), 0);
         // Backdate the start so it's past the 250ms reveal threshold.
         if let Item::Tool { started, .. } = &mut t.blocks.last_mut().unwrap().item {
@@ -2775,7 +2814,7 @@ mod tests {
 
     #[test]
     fn hiding_reasoning_removes_it_entirely() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.reasoning_delta("hidden thoughts");
         t.show_reasoning = false;
         t.relayout(60);
@@ -2784,7 +2823,7 @@ mod tests {
 
     #[test]
     fn expanded_detail_gets_a_rail() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("1".into(), "run_command".into(), "$ ls".into(), 0);
         t.tool_end(
             "1",
@@ -2803,7 +2842,7 @@ mod tests {
 
     #[test]
     fn nested_tools_get_a_rail() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.tool_start("1".into(), "search".into(), "search /x/".into(), 1);
         t.tool_end(
             "1",
@@ -2818,7 +2857,7 @@ mod tests {
 
     #[test]
     fn assistant_prose_has_no_marker() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.assistant_delta("plain answer");
         t.relayout(60);
         let first = t.window(0, 1);
@@ -2830,7 +2869,7 @@ mod tests {
     /// cost anything per frame.
     #[test]
     fn idle_relayout_of_a_large_transcript_does_no_work() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         for i in 0..3000 {
             t.user(format!("message number {i}"));
             t.assistant_delta(&format!("reply number {i}\n"));
@@ -2850,7 +2889,7 @@ mod tests {
     /// microseconds. Generous bound so this is not flaky on a loaded machine.
     #[test]
     fn idle_frames_are_cheap_at_scale() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         for i in 0..4000 {
             t.user(format!(
                 "message number {i} with enough text to wrap once or twice"
@@ -2873,7 +2912,7 @@ mod tests {
 
     #[test]
     fn window_seeks_instead_of_walking() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         for i in 0..2000 {
             t.user(format!("m{i}"));
         }
@@ -2895,7 +2934,7 @@ mod tests {
 
     #[test]
     fn appending_only_relayouts_the_new_block() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         for i in 0..500 {
             t.user(format!("m{i}"));
         }
@@ -2910,7 +2949,7 @@ mod tests {
 
     #[test]
     fn width_change_invalidates_everything() {
-        let mut t = tr();
+        let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
         t.user("a fairly long message that will wrap differently at other widths".into());
         let wide = t.relayout(100);
         let narrow = t.relayout(30);
@@ -3038,3 +3077,4 @@ mod perf {
         );
     }
 }
+
