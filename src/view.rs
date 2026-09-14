@@ -14,6 +14,12 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use std::time::{Duration, Instant};
 
+/// How long each running-spinner frame is held, in ms. 80ms is oh-my-pi's
+/// spinner cadence: calm and deliberate rather than a blur, and independent of
+/// the terminal's redraw rate. It also sets the granularity at which a running
+/// tool's cache signature changes, so the spinner actually advances this often.
+const SPINNER_STEP_MS: u128 = 80;
+
 #[derive(Debug)]
 pub enum Item {
     User(String),
@@ -671,10 +677,12 @@ impl Transcript {
     /// is O(transcript) per frame for a transcript that is almost entirely
     /// static. This walks only from the earliest block that could have changed.
     pub fn relayout(&mut self, width: u16) -> usize {
-        // A running block re-renders about ten times a second; quantising the
-        // clock into the cache signature is what lets an otherwise-cached
-        // transcript animate without a full relayout.
-        let tick = (self.now.elapsed().as_millis() / 100) as usize;
+        // A running block re-renders on this quantised clock; folding it into
+        // the cache signature is what lets an otherwise-cached transcript
+        // animate without a full relayout. 80ms per step is oh-my-pi's spinner
+        // cadence — calm and deliberate, and the granularity at which the
+        // running spinner actually advances.
+        let tick = (self.now.elapsed().as_millis() / SPINNER_STEP_MS) as usize;
         let show = self.show_reasoning;
         let expand_tools = self.expand_tools;
         let expand_reasoning = self.expand_reasoning;
@@ -832,7 +840,7 @@ impl Transcript {
         // here — the one cost of not keeping every block's spans for ever. It is
         // a single block's layout, on the frame that needs it.
         let width = self.laid_out_at;
-        let tick = (self.now.elapsed().as_millis() / 100) as usize;
+        let tick = (self.now.elapsed().as_millis() / SPINNER_STEP_MS) as usize;
         let (show, expand_tools, expand_reasoning) = (
             self.show_reasoning,
             self.expand_tools,
