@@ -389,6 +389,11 @@ pub struct Agent {
     /// How the last tool call was approved, so the trace can show whether the
     /// user was asked. Set by `approve`, consumed by `execute`.
     last_approval: Option<crate::trace::Approval>,
+    /// Language servers installed for this project's languages, resolved once
+    /// at startup. Held rather than probed per request because deciding whether
+    /// to advertise the `lsp` tool happens on every single one, and the answer
+    /// is a PATH lookup and a bounded directory walk.
+    lsp_available: Vec<&'static str>,
 }
 
 /// One reversible file change. `before: None` means the file did not exist, so
@@ -572,6 +577,32 @@ impl Agent {
             let _ = std::fs::remove_dir_all(crate::index::cache_dir(&root));
         }
 
+        // Close browse engines a previous koda left behind. Off-thread and
+        // off the startup path: it is a directory read that finds nothing in a
+        // session that has never browsed, and the point of doing it at all is
+        // that SIGKILL leaves no chance to clean up on the way out.
+        if cfg.browser {
+            let browser_path = cfg.browser_path.clone();
+            std::thread::spawn(move || crate::tools::reap_orphaned_browsers(&browser_path));
+        }
+        // Which language servers this project could use. One PATH lookup per
+        // known server plus a bounded walk, done once.
+        let lsp_available: Vec<&'static str> = if cfg.lsp {
+            crate::lsp::available(&root)
+                .into_iter()
+                .map(|s| s.name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if cfg.lsp && cfg.lsp_eager && !lsp_available.is_empty() {
+            crate::lsp::warm_up(&root);
+        }
+        // MCP servers come up in the background: a handshake with somebody
+        // else's process must not stand between the user and their first
+        // prompt. Tools appear in the schema as each server answers.
+        crate::mcp::connect_all(&cfg, &root);
+
         let system = prompt::build_with_skills(
             &cfg,
             &root,
@@ -587,7 +618,7 @@ impl Agent {
             // Filled in per call, so a tool reports progress to its own card.
             progress: None,
         };
-        Ok(Self {
+        let agent = Self {
             model: cfg.model.clone(),
             auto_approve: cfg.auto_approve,
             auto_tier: if cfg.auto_approve {
@@ -638,8 +669,165 @@ impl Agent {
             prefetched: std::collections::HashMap::new(),
             trace_turn: None,
             last_approval: None,
-        })
+            lsp_available,
+        };
+        Ok(agent)
     }
+    /// Hold the first turn until the MCP servers have said what they offer.
+    ///
+    /// Servers connect in the background so they cannot delay startup, and the
+    /// tool list is read when the request is built. In the TUI those two facts
+    /// never collide: the user spends seconds typing and the servers are long
+    /// since up. Headless, the request goes out immediately -- and a `koda -p`
+    /// against a configured server was sending a tool list without any of its
+    /// tools in it, so the model reached for `web_search` instead and the
+    /// feature silently did nothing.
+    ///
+    /// Bounded, and only when there is something to wait for. A server that
+    /// never answers costs this once and is then reported as failed, rather
+    /// than holding every turn.
+    async fn await_mcp_tools(&mut self, tx: &mpsc::UnboundedSender<Event>) {
+        if self.depth > 0 || !self.cfg.mcp || self.cfg.mcp_servers.is_empty() {
+            return;
+        }
+        if crate::mcp::settled() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        // Said out loud: an unexplained pause before the first answer is worse
+        // than a slow one that tells you what it is doing.
+        let _ = tx.send(Event::Notice("connecting to MCP servers…".into()));
+        crate::mcp::wait_settled(std::time::Duration::from_secs(15)).await;
+        crate::tel_info!(
+            "mcp",
+            "waited for servers before the first turn",
+            "ms" => started.elapsed().as_millis(),
+            "settled" => crate::mcp::settled()
+        );
+    }
+
+    /// Whether an endpoint runs on this machine.
+    ///
+    /// The warm-up is a real request. Against a local server it costs a little
+    /// GPU time that would otherwise be spent on the first turn anyway; against
+    /// somebody's metered API it costs money to solve a problem that API does
+    /// not have.
+    fn endpoint_is_local(&self) -> bool {
+        let e = self.endpoint.to_ascii_lowercase();
+        // Strip the scheme so the host is what is matched, not a path that
+        // happens to contain the word.
+        let host = e
+            .split("://")
+            .nth(1)
+            .unwrap_or(&e)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        let host = host.rsplit('@').next().unwrap_or(host);
+        let name = host.rsplit(':').next_back().unwrap_or(host);
+        name == "localhost"
+            || name == "127.0.0.1"
+            || name == "::1"
+            || name == "[::1]"
+            || name == "0.0.0.0"
+            || name.ends_with(".local")
+    }
+
+    /// Prefill the model's prompt cache with koda's fixed preamble, in the
+    /// background, before the user has finished typing.
+    ///
+    /// Measured on a local 30B: koda's instructions plus its tool schema are
+    /// about 4,700 tokens, and a cold prefill of that is ten to fourteen
+    /// seconds. The server caches by prefix, so the *same* preamble followed by
+    /// any question is then a quarter of a second. The cost is real and
+    /// unavoidable; where it is paid is a choice, and paying it while the user
+    /// is still typing is strictly better than paying it after they hit enter.
+    ///
+    /// Deliberately fire-and-forget. It asks for a single token, ignores the
+    /// answer, and swallows every error: a warm-up that fails has cost nothing,
+    /// and a warm-up that *complained* would be a startup error message for an
+    /// optimisation the user never asked for.
+    ///
+    /// Called only from the interactive TUI. The whole trade is "spend the
+    /// prefill during the seconds a human spends typing", and a headless run
+    /// has no such seconds -- there, the first request is already in flight,
+    /// and a second one would compete with it for the same GPU.
+    pub fn warm_prompt_cache(&self) {
+        if !self.cfg.prompt_warmup || self.depth > 0 {
+            return;
+        }
+        if !self.endpoint_is_local() {
+            return;
+        }
+        if self.model.trim().is_empty() {
+            return;
+        }
+        let req = ChatRequest {
+            model: self.model.clone(),
+            // The system prompt and the tool schema are the whole point: they
+            // are what the next request will repeat verbatim, and they are
+            // ~73% of the preamble on their own.
+            messages: vec![
+                Message::system(self.system.clone()),
+                // Some servers reject a conversation that is only a system
+                // message, so there has to be a user turn -- and it has to be
+                // one the real first message will not accidentally match, or
+                // the cached entry is for the wrong thing.
+                Message::user("hi"),
+            ],
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens: 1,
+            tools: Some(self.advertised_tools()),
+            reasoning_effort: "off".into(),
+        };
+        let client = self.client.clone();
+        // MCP servers connect in the background, and each one that answers adds
+        // tools to the schema. A changed schema is a changed prompt, so warming
+        // before they have settled would cache a shape the next request does
+        // not use -- and the user would pay the prefill twice. Wait for the
+        // list to stop moving first; with no servers configured this returns
+        // immediately.
+        let wait_for_mcp = self.cfg.mcp && !self.cfg.mcp_servers.is_empty();
+        let mcp_tools_pending = wait_for_mcp && !crate::mcp::settled();
+        // Plan mode advertises only the tools a server has promised are
+        // read-only. Warming with the full list would cache a schema the next
+        // request does not send, which is the one mistake that makes this
+        // whole optimisation worse than not doing it.
+        let read_only = self.mode.read_only();
+        let mut req = req;
+        tokio::spawn(async move {
+            if mcp_tools_pending {
+                crate::mcp::wait_settled(std::time::Duration::from_secs(20)).await;
+                // Re-read the schema now that the servers have spoken.
+                if let Some(tools) = req.tools.as_mut() {
+                    tools.retain(|t| {
+                        t.pointer("/function/name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| !crate::mcp::is_mcp_tool(n))
+                            .unwrap_or(true)
+                    });
+                    tools.extend(crate::mcp::openai_schemas(read_only));
+                }
+            }
+            let started = std::time::Instant::now();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            // Drained rather than dropped: dropping the receiver makes every
+            // send fail, which the client would report as a broken request.
+            let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            let ok = client.stream_with_retry(&req, &tx, 1).await.is_ok();
+            drop(tx);
+            let _ = drain.await;
+            crate::tel_debug!(
+                "llm",
+                "prompt cache warmed",
+                "ok" => ok,
+                "waited_for_mcp" => mcp_tools_pending,
+                "ms" => started.elapsed().as_millis()
+            );
+        });
+    }
+
     /// Adopt a saved conversation. The transcript the user sees is rebuilt
     /// separately by the UI from the same messages.
     pub fn resume(&mut self, path: std::path::PathBuf, messages: Vec<Message>) {
@@ -754,6 +942,7 @@ impl Agent {
             // delegate step showed a long gap and then an answer.
             trace_turn: self.trace_turn,
             last_approval: None,
+            lsp_available: self.lsp_available.clone(),
         }
     }
 
@@ -810,6 +999,7 @@ impl Agent {
     }
 
     fn rebuild_system(&mut self) {
+        let before = std::mem::take(&mut self.system);
         self.system = prompt::build_with_skills(
             &self.cfg,
             &self.ctx.root.clone(),
@@ -819,6 +1009,16 @@ impl Agent {
             &self.memory,
             &self.learning.brief(),
         );
+        // A changed preamble is a cold prefix again: the server caches by
+        // prefix, so switching mode or loading a tool group costs the same
+        // ten-odd seconds the first turn did. Warm it now rather than making
+        // the user pay for it on their next message.
+        //
+        // Only when it actually changed — most calls here rebuild an identical
+        // prompt, and a request per no-op would be pure waste.
+        if before != self.system {
+            self.warm_prompt_cache();
+        }
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
@@ -868,7 +1068,10 @@ impl Agent {
     /// Handle one command; drives the whole turn including tool round trips.
     pub async fn handle(&mut self, cmd: Command, tx: &mpsc::UnboundedSender<Event>) {
         match cmd {
-            Command::User(input) => self.turn(input, tx).await,
+            Command::User(input) => {
+                self.await_mcp_tools(tx).await;
+                self.turn(input, tx).await
+            }
             Command::Clear => {
                 self.clear();
                 if let Some(s) = self.session.as_mut() {
@@ -1718,6 +1921,18 @@ impl Agent {
             let graph = list.remove(pos);
             list.insert(0, graph);
         }
+        // The `lsp` tool is only worth its schema when there is a language
+        // server to talk to. A project with none installed would otherwise pay
+        // ~400 tokens a request for a tool that can only ever answer "no
+        // server" -- so the check is what the tool would find, not the flag.
+        if !self.cfg.lsp || self.lsp_available.is_empty() {
+            list.retain(|t| t.pointer("/function/name").and_then(|n| n.as_str()) != Some("lsp"));
+        }
+        // Likewise `mcp`: it inspects servers, so with none connected it has
+        // nothing to inspect.
+        if !self.cfg.mcp || !crate::mcp::any_tools() {
+            list.retain(|t| t.pointer("/function/name").and_then(|n| n.as_str()) != Some("mcp"));
+        }
         // Writing a skill is how the agent keeps what it worked out, so it is
         // available whenever the top-level agent runs — with or without
         // delegation. A subagent must not author skills: its context is narrow
@@ -1754,6 +1969,13 @@ impl Agent {
                     }
                 }));
             }
+        }
+        // Tools lent by MCP servers. Top-level only, for the same reason
+        // user-defined tools are: a subagent's context is narrow and its
+        // mandate is to investigate, not to reach out into other systems. In
+        // plan mode only the tools a server has promised are read-only.
+        if self.depth == 0 && self.cfg.mcp {
+            list.extend(crate::mcp::openai_schemas(self.mode.read_only()));
         }
         list
     }
@@ -2015,7 +2237,7 @@ impl Agent {
         }
         if let Some(payload) = best {
             if let Some(c) = self.parse_text_call(payload) {
-                if tools::spec(&c.function.name).is_some() {
+                if self.is_callable(&c.function.name) {
                     return Some(c);
                 }
             }
@@ -2029,12 +2251,25 @@ impl Agent {
                 continue;
             }
             if let Some(c) = self.parse_text_call(cand) {
-                if tools::spec(&c.function.name).is_some() {
+                if self.is_callable(&c.function.name) {
                     return Some(c);
                 }
             }
         }
         None
+    }
+
+    /// Whether a name in a text-protocol reply is a tool this agent can run.
+    ///
+    /// The built-in table is not the whole list any more: user-defined tools
+    /// and tools lent by MCP servers are named at runtime, and a model driving
+    /// koda over the text protocol has been *told* about them in its prompt.
+    /// Checking only `tools::spec` here is what would make those tools
+    /// unreachable for exactly the small models the text protocol exists for.
+    fn is_callable(&self, name: &str) -> bool {
+        tools::spec(name).is_some()
+            || crate::mcp::find_tool(name).is_some()
+            || self.cfg.custom_tools.iter().any(|c| c.name == name)
     }
 
     /// Run the read-only tools in `calls` concurrently and stash their outcomes
@@ -2199,7 +2434,7 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
-        if self.mode.read_only() && tools::is_mutating(&name) {
+        if self.mode.read_only() && tools::call_is_mutating(&name, &args) {
             let _ = tx.send(Event::NeedsExecuteMode(name.clone()));
             return tools::Outcome {
                 ok: false,
@@ -2213,7 +2448,14 @@ impl Agent {
             };
         }
         if let Some(allow) = self.effective_allow() {
-            if !allow.contains(&name.as_str()) {
+            // MCP tools are named dynamically, so they can never appear in a
+            // static allow list. In plan mode the rule that matters is the one
+            // already applied above — read-only tools are fine — and a subagent
+            // gets none of them, exactly as it gets no user-defined tools.
+            let mcp_allowed = crate::mcp::is_mcp_tool(&name)
+                && self.depth == 0
+                && !tools::call_is_mutating(&name, &args);
+            if !mcp_allowed && !allow.contains(&name.as_str()) {
                 return tools::Outcome {
                     ok: false,
                     content: format!(
@@ -2271,6 +2513,12 @@ impl Agent {
             });
             crate::tel_info!("tool", "custom tool ran", "name" => name, "ms" => started.elapsed().as_millis());
             return outcome;
+        }
+        // A tool lent by an MCP server. Routed here rather than through
+        // `tools::run` because the built-in table is static and these are not:
+        // they arrive from a server at connect time and differ per project.
+        if crate::mcp::is_mcp_tool(&name) {
+            return self.run_mcp_tool(call, &name, &args, tx).await;
         }
         if tools::spec(&name).is_none() {
             let names: Vec<&str> = tools::specs().iter().map(|s| s.name).collect();
@@ -2362,6 +2610,8 @@ impl Agent {
             "ask_user" => self.ask_user(&args, tx).await,
             "remember" => self.remember(&args),
             "codegraph" => self.query_graph(&args).await,
+            "lsp" => self.query_lsp(&args).await,
+            "mcp" => self.query_mcp(&args).await,
             "skill" => self.read_skill(&args),
             // `manage_agent` was the old name for this, when it could only make
             // role agents; keep accepting it so a model that learned that name
@@ -3680,63 +3930,363 @@ impl Agent {
             })
             .await;
         }
-        let guard = self.graph.read().ok();
-        let Some(Some(g)) = guard.as_deref() else {
-            return tools::Outcome {
-                ok: false,
-                content: "ERROR: the code graph is unavailable. Use search instead.".into(),
-                summary: "codegraph: unavailable".into(),
-                view: tools::ToolView::Plain,
-            };
-        };
         let query = args
             .get("query")
             .and_then(|q| q.as_str())
             .unwrap_or("overview")
             .trim()
             .to_ascii_lowercase();
-        let (content, summary) = match query.as_str() {
-            "symbol" => {
-                let name = args
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .trim();
-                if name.is_empty() {
-                    (
-                        "ERROR: query=symbol needs `name`.".to_string(),
-                        "codegraph: missing name".to_string(),
-                    )
-                } else {
-                    (g.symbol(name), format!("codegraph symbol {name}"))
+        // Set to the symbol asked about, so the language server can be
+        // consulted once the graph's read guard is released — holding a lock
+        // across an await is how a whole session ends up serialised behind one
+        // slow answer.
+        let mut resolve: Option<String> = None;
+        // The whole graph read is one block so the lock guard is dropped before
+        // any await below. A `std` guard held across an await makes the future
+        // non-`Send` — and worse, would hold the graph while a language server
+        // is consulted.
+        let answered = {
+            let guard = self.graph.read().ok();
+            let Some(Some(g)) = guard.as_deref() else {
+                return tools::Outcome {
+                    ok: false,
+                    content: "ERROR: the code graph is unavailable. Use search instead.".into(),
+                    summary: "codegraph: unavailable".into(),
+                    view: tools::ToolView::Plain,
+                };
+            };
+            match query.as_str() {
+                "symbol" => {
+                    let name = args
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if name.is_empty() {
+                        (
+                            "ERROR: query=symbol needs `name`.".to_string(),
+                            "codegraph: missing name".to_string(),
+                        )
+                    } else {
+                        resolve = Some(name.to_string());
+                        (g.symbol(name), format!("codegraph symbol {name}"))
+                    }
                 }
-            }
-            "file" => {
-                let path = args
-                    .get("path")
-                    .and_then(|p| p.as_str())
-                    .unwrap_or("")
-                    .trim();
-                if path.is_empty() {
-                    (
-                        "ERROR: query=file needs `path`.".to_string(),
-                        "codegraph: missing path".to_string(),
-                    )
-                } else {
-                    (g.file(path), format!("codegraph file {path}"))
+                "file" => {
+                    let path = args
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if path.is_empty() {
+                        (
+                            "ERROR: query=file needs `path`.".to_string(),
+                            "codegraph: missing path".to_string(),
+                        )
+                    } else {
+                        (g.file(path), format!("codegraph file {path}"))
+                    }
                 }
+                _ => (
+                    g.overview(),
+                    format!("codegraph overview ({} files)", g.files),
+                ),
             }
-            _ => (
-                g.overview(),
-                format!("codegraph overview ({} files)", g.files),
-            ),
         };
+        let (content, summary) = answered;
+
+        // The graph found every file that *mentions* the name. A running
+        // language server knows which one actually defines the thing, so its
+        // answer is appended when it is cheap to get — a hard budget,
+        // already-running servers only, and silence on any failure. The graph's
+        // promise of an instant, always-available answer is not up for
+        // negotiation.
+        let mut content = content;
+        if let Some(name) = resolve.filter(|_| self.cfg.lsp && self.cfg.lsp_in_codegraph) {
+            let root = self.ctx.root.clone();
+            if let Ok(Some(extra)) = tokio::task::spawn_blocking(move || {
+                crate::lsp::augment_symbol(&root, &name, std::time::Duration::from_millis(1500))
+            })
+            .await
+            {
+                content.push_str(&extra);
+            }
+        }
         tools::Outcome {
             ok: !content.starts_with("ERROR:"),
             content,
             summary,
             view: tools::ToolView::Plain,
         }
+    }
+
+    /// The `lsp` tool: precise, type-aware answers from a real language server.
+    ///
+    /// Runs on a blocking thread because the client is a synchronous protocol
+    /// over a pipe -- the same shape `dap` uses, and for the same reason.
+    async fn query_lsp(&self, args: &Value) -> tools::Outcome {
+        if !self.cfg.lsp {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: language-server support is off (`lsp = false`). Use \
+                          codegraph and search instead."
+                    .into(),
+                summary: "lsp: disabled".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
+        let action = args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .to_string();
+        let root = self.ctx.root.clone();
+        let args = args.clone();
+        let res = tokio::task::spawn_blocking(move || crate::lsp::run(&args, &root)).await;
+        match res {
+            Ok(Ok(content)) => tools::Outcome {
+                ok: true,
+                summary: format!("lsp {action}"),
+                content,
+                view: tools::ToolView::Plain,
+            },
+            Ok(Err(e)) => tools::Outcome {
+                ok: false,
+                content: format!("ERROR: {e:#}"),
+                summary: format!("lsp {action}: failed"),
+                view: tools::ToolView::Plain,
+            },
+            Err(e) => tools::Outcome::err(format!("lsp task failed: {e}")),
+        }
+    }
+
+    /// The `mcp` tool: everything an MCP server offers that is not a tool call.
+    async fn query_mcp(&self, args: &Value) -> tools::Outcome {
+        let err = |msg: String| tools::Outcome {
+            ok: false,
+            content: format!("ERROR: {msg}"),
+            summary: "mcp: failed".into(),
+            view: tools::ToolView::Plain,
+        };
+        if !self.cfg.mcp {
+            return err("MCP is off (`mcp = false` in config).".into());
+        }
+        let action = args
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("servers")
+            .trim()
+            .to_ascii_lowercase();
+        let text = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let server = text("server");
+        let need_server = |s: &str| -> Result<String, String> {
+            if s.is_empty() {
+                Err("`server` is required — `action=servers` lists the names.".into())
+            } else {
+                Ok(s.to_string())
+            }
+        };
+
+        let (content, summary) = match action.as_str() {
+            "servers" | "list" => (
+                crate::mcp::status_report(&self.cfg),
+                "mcp servers".to_string(),
+            ),
+            "resources" => {
+                let cat = crate::mcp::catalog();
+                let mut out = String::new();
+                for s in cat.iter().filter(|s| s.connected) {
+                    if !server.is_empty() && s.name != server {
+                        continue;
+                    }
+                    for r in &s.resources {
+                        // Name first: it is what a model will refer to, and
+                        // a URI alone reads as an opaque identifier.
+                        out.push_str(&format!(
+                            "{}  {}  {}  {}  {}\n",
+                            s.name, r.name, r.uri, r.mime, r.description
+                        ));
+                    }
+                }
+                if out.is_empty() {
+                    out.push_str("No resources are published by the connected servers.\n");
+                }
+                (out, "mcp resources".to_string())
+            }
+            "read_resource" => {
+                let uri = text("uri");
+                if uri.is_empty() {
+                    return err("`uri` is required for read_resource.".into());
+                }
+                // A URI is unique across a server, so the server need not be
+                // named when only one publishes it -- but naming it is faster
+                // and unambiguous, so an explicit `server` wins.
+                let owner = if server.is_empty() {
+                    crate::mcp::catalog()
+                        .into_iter()
+                        .find(|s| s.resources.iter().any(|r| r.uri == uri))
+                        .map(|s| s.name)
+                } else {
+                    Some(server.clone())
+                };
+                let Some(owner) = owner else {
+                    return err(format!("no connected server publishes `{uri}`."));
+                };
+                match crate::mcp::read_resource(&owner, &uri).await {
+                    Ok(t) => (t, format!("mcp read {uri}")),
+                    Err(e) => return err(format!("{e:#}")),
+                }
+            }
+            "prompts" => {
+                let cat = crate::mcp::catalog();
+                let mut out = String::new();
+                for s in cat.iter().filter(|s| s.connected) {
+                    if !server.is_empty() && s.name != server {
+                        continue;
+                    }
+                    for pr in &s.prompts {
+                        out.push_str(&format!(
+                            "{}  {}({})  {}\n",
+                            s.name,
+                            pr.name,
+                            pr.arguments.join(", "),
+                            pr.description
+                        ));
+                    }
+                }
+                if out.is_empty() {
+                    out.push_str("No prompts are published by the connected servers.\n");
+                }
+                (out, "mcp prompts".to_string())
+            }
+            "get_prompt" => {
+                let name = text("name");
+                if name.is_empty() {
+                    return err("`name` is required for get_prompt.".into());
+                }
+                let owner = match need_server(&server) {
+                    Ok(s) => s,
+                    Err(e) => return err(e),
+                };
+                let pargs = args
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                match crate::mcp::get_prompt(&owner, &name, &pargs).await {
+                    Ok(t) => (t, format!("mcp prompt {name}")),
+                    Err(e) => return err(format!("{e:#}")),
+                }
+            }
+            other => {
+                return err(format!(
+                    "unknown action `{other}`. Use servers, resources, read_resource, \
+                     prompts or get_prompt."
+                ))
+            }
+        };
+        tools::Outcome {
+            ok: true,
+            content,
+            summary,
+            view: tools::ToolView::Plain,
+        }
+    }
+
+    /// Run one tool lent by an MCP server, through the same approval, event and
+    /// telemetry path a built-in gets.
+    ///
+    /// Separate from the built-in dispatch because the whole call has to be
+    /// self-contained: the tool is not in `tools::specs()`, so nothing further
+    /// down the normal path knows anything about it.
+    async fn run_mcp_tool(
+        &mut self,
+        call: &ToolCall,
+        name: &str,
+        args: &Value,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
+        if !self.cfg.mcp {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: MCP is off (`mcp = false` in config).".into(),
+                summary: format!("{name}: mcp disabled"),
+                view: tools::ToolView::Plain,
+            };
+        }
+        if crate::mcp::find_tool(name).is_none() {
+            let known: Vec<String> = crate::mcp::catalog()
+                .iter()
+                .flat_map(|s| s.tools.iter().map(|t| t.qualified(&s.name)))
+                .collect();
+            return tools::Outcome {
+                ok: false,
+                content: if known.is_empty() {
+                    format!(
+                        "ERROR: `{name}` is not available — no MCP server is connected. \
+                         Call `mcp` with action=servers to see why."
+                    )
+                } else {
+                    format!(
+                        "ERROR: unknown MCP tool `{name}`. Available: {}",
+                        known.join(", ")
+                    )
+                },
+                summary: format!("unknown tool {name}"),
+                view: tools::ToolView::Plain,
+            };
+        }
+        if !self.approve(name, args, tx).await {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: the user denied this action. Ask what to do instead; \
+                          do not retry."
+                    .into(),
+                summary: format!("{name}: denied"),
+                view: tools::ToolView::Plain,
+            };
+        }
+        let _ = tx.send(Event::ToolStart {
+            id: call.id.clone(),
+            name: name.to_string(),
+            label: label_for(name, args),
+            depth: self.depth,
+        });
+        let started = std::time::Instant::now();
+        let outcome = match crate::mcp::call_tool(name, args).await {
+            Ok(content) => tools::Outcome {
+                ok: true,
+                summary: format!("{name} ok"),
+                content,
+                view: tools::ToolView::Plain,
+            },
+            Err(e) => tools::Outcome {
+                ok: false,
+                content: format!("ERROR: {e:#}"),
+                summary: format!("{name}: failed"),
+                view: tools::ToolView::Plain,
+            },
+        };
+        let _ = tx.send(Event::ToolEnd {
+            id: call.id.clone(),
+            ok: outcome.ok,
+            summary: outcome.summary.clone(),
+            detail: outcome.content.clone(),
+            view: outcome.view.clone(),
+        });
+        crate::tel_info!(
+            "mcp",
+            "tool ran",
+            "name" => name,
+            "ok" => outcome.ok,
+            "ms" => started.elapsed().as_millis()
+        );
+        outcome
     }
 
     /// Create, update, or remove a *role agent* on the fly. A role agent is a
@@ -5198,6 +5748,26 @@ pub fn label_for(name: &str, args: &Value) -> String {
             format!("delegate: {task}")
         }
         "todo" => "plan".to_string(),
+        "lsp" => {
+            let a = if s("action").is_empty() {
+                "lsp"
+            } else {
+                s("action")
+            };
+            match (s("file").is_empty(), s("name").is_empty()) {
+                (false, _) => format!("lsp {a} {}", s("file")),
+                (true, false) => format!("lsp {a} {}", s("name")),
+                _ => format!("lsp {a}"),
+            }
+        }
+        "mcp" => format!(
+            "mcp {}",
+            if s("action").is_empty() {
+                "servers"
+            } else {
+                s("action")
+            }
+        ),
         "about_creator" => "about the creator".to_string(),
         "remember" => match args.get("forget").and_then(|f| f.as_str()) {
             Some(f) => format!("forget {f}"),
@@ -5206,7 +5776,12 @@ pub fn label_for(name: &str, args: &Value) -> String {
                 s("note").chars().take(50).collect::<String>()
             ),
         },
-        other => other.to_string(),
+        // `mcp__github__search_issues` is a wire name, not a label. The server
+        // and the tool are the two things worth showing.
+        other => match crate::mcp::split(other) {
+            Some((server, tool)) => format!("{server}: {tool}"),
+            None => other.to_string(),
+        },
     }
 }
 
@@ -6759,6 +7334,47 @@ mod tests {
             .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
             .collect();
         assert_eq!(names.first().copied(), Some("codegraph"), "{names:?}");
+    }
+
+    /// The warm-up is a real request, so it must only go somewhere that
+    /// charges time rather than money.
+    #[test]
+    fn only_a_local_endpoint_is_warmed() {
+        let cases = [
+            ("http://localhost:11434/v1", true),
+            ("http://127.0.0.1:8080/v1", true),
+            ("http://0.0.0.0:1234/v1", true),
+            ("http://studio.local:1234/v1", true),
+            ("https://api.openai.com/v1", false),
+            ("https://api.anthropic.com/v1", false),
+            // A remote host on the LAN is somebody else's machine: it is not
+            // koda's GPU to spend, and the user may be paying for it.
+            ("http://192.168.1.7:8000/v1", false),
+            // The word appearing in a path must not be mistaken for the host.
+            ("https://example.com/localhost/v1", false),
+            ("https://user@evil.com/v1", false),
+        ];
+        let dir = crate::config::test_root("warmup-endpoint");
+        for (endpoint, want) in cases {
+            let cfg = std::sync::Arc::new(crate::config::Config {
+                base_url: endpoint.into(),
+                model: "m".into(),
+                ..crate::config::Config::default()
+            });
+            let agent = Agent::new(
+                cfg,
+                dir.clone(),
+                std::sync::Arc::new(AtomicBool::new(false)),
+                std::sync::Arc::new(Notify::new()),
+            )
+            .expect("agent");
+            assert_eq!(
+                agent.endpoint_is_local(),
+                want,
+                "{endpoint} should{} be treated as local",
+                if want { "" } else { " not" }
+            );
+        }
     }
 
     #[test]

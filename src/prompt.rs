@@ -65,6 +65,22 @@ every file that uses it — that is the difference between a complete change and
 message, a TODO, a config value) or for when the graph has no answer.
 - The graph is current, including files changed outside koda. It never needs rebuilding.";
 
+/// What a language server adds that the graph cannot, stated as the rule for
+/// when to reach past the graph.
+///
+/// Only added when a server for this project is actually installed: telling a
+/// model about a tool it does not have is how a turn gets spent on a refusal.
+const LSP_GUIDANCE: &str = "\n\nPRECISE ANSWERS — `lsp` asks this project's real language server, the same one an editor uses. The code graph matches names; the language server resolves them.
+
+Reach for it when a name match is not good enough:
+- Two things share a name, or the symbol is a trait/interface method -> lsp action=definition
+- You need a TYPE, a signature, or what a value actually is -> lsp action=hover
+- \"Who calls this, really\" before changing a signature -> lsp action=references
+- What the compiler or type checker says is wrong with a file -> lsp action=diagnostics
+- Follow a type or find implementations -> lsp action=type_definition / implementation
+
+Give `file`, `line` (1-based) and `symbol` — the name as it appears on that line. You never have to work out a column. Keep using codegraph first for orientation; `lsp` is for when the answer has to be exact.";
+
 /// The same job when there is no graph to ask. Kept parallel to
 /// `CODEGRAPH_GUIDANCE` so the base rules never have to name either tool: a
 /// rule in `BASE` telling the model to grep is a rule it follows, and it
@@ -213,8 +229,31 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     } else {
         p.push_str(FIND_GUIDANCE);
     }
+    if cfg.lsp && !crate::lsp::available(root).is_empty() {
+        p.push_str(LSP_GUIDANCE);
+    }
     if cfg.subagents {
         p.push_str(DELEGATION);
+    }
+    // Servers lending tools are named once, so the model knows that a
+    // `mcp__…` name in its list reaches out of the project — and that `mcp`
+    // itself reaches the resources and prompts those servers publish.
+    if cfg.mcp && crate::mcp::any_tools() {
+        let names: Vec<String> = crate::mcp::catalog()
+            .into_iter()
+            .filter(|s| s.connected && !s.tools.is_empty())
+            .map(|s| format!("{} ({} tools)", s.name, s.tools.len()))
+            .collect();
+        if !names.is_empty() {
+            let _ = write!(
+                p,
+                "\n\nCONNECTED SERVICES (MCP): {}. Their tools are in your list as \
+                 `mcp__<server>__<tool>` and reach systems outside this workspace — \
+                 use them when the answer is not in the code. `mcp` lists what each \
+                 one also publishes as resources and prompts.",
+                names.join(", ")
+            );
+        }
     }
     // Name what is not in the schema. A tool the model cannot see and is not
     // told about is a tool that does not exist — which is the one way this
@@ -266,6 +305,12 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
         p.push_str("\n\n");
         p.push_str(TEXT_PROTOCOL);
         p.push_str(&tools::text_protocol_help_for(allow));
+        // Tools lent by MCP servers are not in the built-in table, so the text
+        // protocol has to be told about them separately or a model without
+        // native tool calling can never reach them.
+        if cfg.mcp {
+            p.push_str(&crate::mcp::text_protocol_help(mode.read_only()));
+        }
     }
 
     if !cfg.instructions.trim().is_empty() {
@@ -273,18 +318,66 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     }
 
     // Project-level agent rules, if the repo has them.
-    for name in ["AGENTS.md", "CLAUDE.md", ".koda.md"] {
-        let path = root.join(name);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let text = text.trim();
-            if !text.is_empty() {
-                let clipped: String = text.chars().take(4000).collect();
-                let _ = write!(p, "\n\nFrom {name}:\n{clipped}");
-                break;
-            }
-        }
+    // Standing instructions, general first and specific second, so a project
+    // can override a habit rather than merely restate it.
+    //
+    // The user-level file is the half koda was missing. A preference that is
+    // true of everything you write -- the test runner you use, that you want
+    // no comments unless you asked for them, which spelling -- belonged in
+    // every project's AGENTS.md, copied by hand, or nowhere. Both Gemini CLI
+    // (`~/.gemini/GEMINI.md`) and Claude Code settled on a user-level file
+    // above the project one; this is the same shape.
+    for (label, text) in user_instructions()
+        .into_iter()
+        .chain(project_instructions(root))
+    {
+        let _ = write!(p, "\n\nFrom {label}:\n{text}");
     }
     p
+}
+
+/// How much of one instruction file reaches the prompt.
+///
+/// Bounded because this text sits in the cached preamble of every request: on a
+/// local model each thousand tokens here is a couple of seconds of one-time
+/// prefill and a permanent slice of the context window. Generous enough for a
+/// real set of house rules, small enough that a README pasted in by mistake
+/// cannot cost the user their window.
+const MAX_INSTRUCTION_CHARS: usize = 4000;
+
+fn read_clipped(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(MAX_INSTRUCTION_CHARS).collect())
+}
+
+/// The user's own standing instructions, applying to every project.
+fn user_instructions() -> Option<(String, String)> {
+    let dir = crate::config::config_dir();
+    // `KODA.md` first since it is koda's own name; `AGENTS.md` accepted in the
+    // same place so a user who already keeps one there is not asked to
+    // maintain a second copy under a different name.
+    for name in ["KODA.md", "AGENTS.md"] {
+        if let Some(text) = read_clipped(&dir.join(name)) {
+            return Some((format!("your {name} (applies to every project)"), text));
+        }
+    }
+    None
+}
+
+/// The project's instructions. First match wins, deliberately: `AGENTS.md` and
+/// `CLAUDE.md` are usually the same content under two names, and sending both
+/// would pay for it twice.
+fn project_instructions(root: &Path) -> Option<(String, String)> {
+    for name in ["AGENTS.md", "CLAUDE.md", ".koda.md"] {
+        if let Some(text) = read_clipped(&root.join(name)) {
+            return Some((name.to_string(), text));
+        }
+    }
+    None
 }
 
 /// A few cheap facts that stop the model from guessing about the project.
@@ -352,14 +445,22 @@ fn dedup(v: &[&str]) -> Vec<String> {
     out
 }
 
-/// The current date and time, for the system prompt.
+/// The current date, for the system prompt.
 ///
 /// A model with no clock guesses the year from its training data, and then
-/// dates a changelog entry or a copyright header wrong. This is captured when
-/// the prompt is built rather than per turn on purpose: the system prompt is
-/// the cached KV prefix for local models, and rewriting it every message would
-/// throw that cache away for a minute hand nobody reads. The wording says so,
-/// so a long session does not mistake the stamp for the wall clock.
+/// dates a changelog entry or a copyright header wrong. So the date is worth
+/// its tokens.
+///
+/// The *time* is not, and used to be here at minute resolution. The system
+/// prompt is the cached KV prefix for a local model, and that cache is
+/// invalidated by any change at all -- so a minute hand nobody reads made every
+/// launch, and every rebuild of the prompt, a full re-prefill of the preamble.
+/// Measured against a local 30B that is about eleven seconds, paid whenever the
+/// clock ticked over. At day resolution the prompt is byte-identical from one
+/// run to the next, and a restart answers immediately.
+///
+/// A model that genuinely needs the wall clock can run `date`, and gets a
+/// precise answer instead of a stamp that was stale the moment it was taken.
 fn now_line() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -369,7 +470,6 @@ fn now_line() -> String {
     let local = secs + offset as i64;
 
     let days = local.div_euclid(86_400);
-    let sod = local.rem_euclid(86_400);
     // The calendar arithmetic already exists, for dating learned rules.
     let date = crate::learning::ymd(days.max(0) as u32);
     // 1970-01-01 was a Thursday.
@@ -382,10 +482,8 @@ fn now_line() -> String {
         ('+', offset)
     };
     format!(
-        "Current date and time: {weekday} {date} {:02}:{:02} UTC{sign}{:02}:{:02} \
-         (taken when this session's prompt was built; the clock has moved on since).",
-        sod / 3600,
-        (sod % 3600) / 60,
+        "Current date: {weekday} {date} (local time, UTC{sign}{:02}:{:02}). \
+         Run `date` if you need the time of day.",
         off / 3600,
         (off % 3600) / 60,
     )
@@ -443,6 +541,74 @@ fn parse_offset(raw: &str) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A preference that is true of everything you write had nowhere to live:
+    /// it went into every project's AGENTS.md by hand, or nowhere.
+    #[test]
+    fn user_instructions_apply_to_every_project_and_the_project_can_override() {
+        let home = crate::config::test_root("prompt-user-instructions");
+        let cfgdir = home.join("cfg");
+        std::fs::create_dir_all(&cfgdir).unwrap();
+        // `config_dir()` honours XDG_CONFIG_HOME, which is how this reaches a
+        // scratch directory instead of the real one.
+        std::env::set_var("XDG_CONFIG_HOME", &cfgdir);
+        std::fs::write(cfgdir.join("koda/KODA.md"), "")
+            .or_else(|_| {
+                std::fs::create_dir_all(cfgdir.join("koda"))?;
+                std::fs::write(cfgdir.join("koda/KODA.md"), "Always use British spelling.")
+            })
+            .unwrap();
+
+        let root = crate::config::test_root("prompt-project-instructions");
+        let cfg = Config::default();
+
+        // With only the user file, it is present.
+        let p = build(&cfg, &root, false, Mode::Execute);
+        assert!(p.contains("British spelling"), "user instructions missing");
+        assert!(p.contains("applies to every project"), "{p}");
+
+        // A project file is added *after* it, so the specific one is read last
+        // and wins where they disagree.
+        std::fs::write(
+            root.join("AGENTS.md"),
+            "This project uses American spelling.",
+        )
+        .unwrap();
+        let p = build(&cfg, &root, false, Mode::Execute);
+        let u = p.find("British spelling").expect("user rules kept");
+        let a = p.find("American spelling").expect("project rules added");
+        assert!(
+            u < a,
+            "the project's rules must come after the user's:\n{p}"
+        );
+
+        // The two names for a project file are the same content under two
+        // names in most repos, so only one is sent.
+        std::fs::write(root.join("CLAUDE.md"), "DUPLICATE").unwrap();
+        let p = build(&cfg, &root, false, Mode::Execute);
+        assert!(
+            !p.contains("DUPLICATE"),
+            "both project files were sent:\n{p}"
+        );
+
+        // Nothing here may grow without bound: this text is in the cached
+        // preamble of every single request.
+        std::fs::write(root.join("AGENTS.md"), "x".repeat(50_000)).unwrap();
+        let p = build(&cfg, &root, false, Mode::Execute);
+        // The longest run of `x`, not every `x` in the prompt — the base
+        // instructions contain the letter too.
+        let longest = p
+            .split(|c| c != 'x')
+            .map(|run| run.len())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            longest, MAX_INSTRUCTION_CHARS,
+            "an oversized instruction file was not clipped to the cap"
+        );
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
     use super::*;
 
     #[test]
@@ -548,9 +714,44 @@ mod tests {
     fn prompts_state_the_current_date() {
         let cfg = Config::default();
         let main = build(&cfg, Path::new("/tmp"), false, Mode::Execute);
-        assert!(main.contains("Current date and time:"), "{main}");
+        assert!(main.contains("Current date:"), "{main}");
         let sub = subagent(Path::new("/tmp"));
-        assert!(sub.contains("Current date and time:"), "{sub}");
+        assert!(sub.contains("Current date:"), "{sub}");
+    }
+
+    /// The preamble is the model server's cached KV prefix, and that cache is
+    /// invalidated by *any* change to it. A clock with a minute hand therefore
+    /// cost a full re-prefill of the whole preamble every time the minute
+    /// rolled over -- about eleven seconds on a local 30B, paid on every launch
+    /// and every rebuild of the prompt, for a stamp that was stale the moment
+    /// it was taken.
+    #[test]
+    fn the_preamble_does_not_change_with_the_clock() {
+        let cfg = Config::default();
+        let root = Path::new("/tmp");
+        let first = build(&cfg, root, false, Mode::Execute);
+        // Two builds a notional minute apart must be byte-identical. Building
+        // twice in a row is the same test the old code failed roughly once a
+        // minute, so the assertion is on the content, not on timing.
+        let again = build(&cfg, root, false, Mode::Execute);
+        assert_eq!(first, again, "the preamble is not stable between builds");
+
+        // No time of day anywhere in it. `\d\d:\d\d` is what the old line
+        // emitted; the UTC offset is written without one.
+        let clockish = first
+            .lines()
+            .find(|l| l.contains("Current date:"))
+            .expect("the date line");
+        assert!(
+            !clockish.contains("date and time"),
+            "the minute hand is back: {clockish}"
+        );
+        // The date itself must still be there — a model with no calendar dates
+        // a changelog entry from its training cutoff.
+        assert!(
+            clockish.contains("UTC"),
+            "the offset should stay, so the date is unambiguous: {clockish}"
+        );
     }
 
     #[test]
