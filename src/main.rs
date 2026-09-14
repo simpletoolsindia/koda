@@ -15,6 +15,8 @@ mod index;
 mod learning;
 mod llm;
 mod log;
+mod lsp;
+mod mcp;
 mod md;
 mod memory;
 mod panel;
@@ -143,6 +145,19 @@ enum Sub {
         #[command(subcommand)]
         cmd: BrowserCmd,
     },
+    /// Show the configured MCP servers, connecting to each to list what it offers.
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
+    /// Show which language servers koda knows, and which are usable here.
+    Lsp,
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCmd {
+    /// Connect to every configured server and list its tools, resources and prompts.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -267,6 +282,11 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Some(Sub::Models) => return list_models(&cfg).await,
+        Some(Sub::Mcp { .. }) => return show_mcp(&cfg, &root).await,
+        Some(Sub::Lsp) => {
+            print!("{}", lsp::status_report(&root));
+            return Ok(());
+        }
         Some(Sub::Skills { init }) => return show_skills(&root, init),
         Some(Sub::Config { init, paths }) => {
             if paths {
@@ -387,6 +407,36 @@ async fn browser_cmd(cfg: &Config, cmd: BrowserCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `koda mcp`: connect to every configured server and report what it offers.
+///
+/// Synchronous where the TUI is not: run from a terminal the user is waiting
+/// for an answer, so this waits for the handshakes instead of reporting
+/// "connecting…" and exiting.
+async fn show_mcp(cfg: &Config, root: &Path) -> Result<()> {
+    if !cfg.mcp || cfg.mcp_servers.is_empty() {
+        print!("{}", mcp::status_report(cfg));
+        return Ok(());
+    }
+    mcp::connect_all(cfg, root);
+    // Poll until every server has either answered or failed, with a ceiling so
+    // one wedged server cannot hold the command open for ever.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let want = cfg.mcp_servers.iter().filter(|s| s.enabled).count();
+    loop {
+        let settled = mcp::catalog()
+            .iter()
+            .filter(|s| s.connected || s.error.is_some())
+            .count();
+        if settled >= want || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    print!("{}", mcp::status_report(cfg));
+    mcp::shutdown().await;
+    Ok(())
 }
 
 async fn list_models(cfg: &Config) -> Result<()> {

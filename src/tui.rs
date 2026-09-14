@@ -229,6 +229,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/compact", "summarize context to free tokens"),
     ("/auto", "toggle auto-approve for writes"),
     ("/tools", "list available tools"),
+    ("/mcp", "MCP servers and the tools they lend"),
+    ("/lsp", "language servers: installed, running, problems"),
     ("/think", "show or hide model reasoning"),
     ("/motion", "turn animation on or off"),
     ("/provider", "list saved providers, or switch to one"),
@@ -828,6 +830,29 @@ impl App {
             Ok(()) => self.note(format!("copied {n} characters")),
             Err(e) => self.note(format!("copy failed: {e}")),
         }
+    }
+
+    /// Put a plain multi-line report into the transcript.
+    ///
+    /// Not a `Panel`: a server report carries URLs and tool descriptions of
+    /// unpredictable width, and a box would wrap them into something that is
+    /// harder to read than the text itself.
+    fn report_lines(&mut self, text: &str) {
+        let lines: Vec<Line<'static>> = text
+            .lines()
+            .map(|l| {
+                // The first column of a nested line is indentation, which reads
+                // better dim; a flush-left line is a heading.
+                let style = if l.starts_with(' ') {
+                    self.theme.dim()
+                } else {
+                    self.theme.fg(self.theme.accent)
+                };
+                Line::from(Span::styled(l.to_string(), style))
+            })
+            .collect();
+        self.transcript.raw(lines);
+        self.follow = true;
     }
 
     fn note(&mut self, msg: impl Into<String>) {
@@ -2709,6 +2734,21 @@ impl App {
                 self.transcript.raw(lines);
                 self.follow = true;
             }
+            "mcp" => {
+                // Plain text rather than a panel: a server report is variable
+                // width — a URL, a tool description — and a boxed table would
+                // wrap it into something unreadable at any terminal size.
+                let report = crate::mcp::status_report(&self.cfg);
+                self.report_lines(&report);
+            }
+            "lsp" => {
+                let mut report = crate::lsp::status_report(&self.root);
+                if crate::lsp::any_running() {
+                    report.push('\n');
+                    report.push_str(&crate::lsp::workspace_diagnostics(&self.root));
+                }
+                self.report_lines(&report);
+            }
             "provider" | "providers" => {
                 if arg == "add" || arg == "new" {
                     // new_provider, not new: `new` pre-fills the active
@@ -3994,12 +4034,16 @@ fn activity_label(name: &str, label: &str) -> String {
         "search" => "searching",
         "run_command" => "running",
         "codegraph" => "mapping the code",
+        "lsp" => "asking the language server",
+        "mcp" => "asking a connected service",
         "delegate" => "delegating",
         "web_search" => "searching the web",
         "skill" => "reading a skill",
         "remember" => "noting",
         "ask_user" => "waiting for you",
         "todo" => "planning",
+        // Every tool an MCP server lends, without naming them one by one.
+        other if crate::mcp::is_mcp_tool(other) => "calling a connected service",
         _ => "working on",
     };
     if target.is_empty() {
@@ -5325,6 +5369,9 @@ pub fn restore() {
     // left a browser behind -- reparented to init, ~1.2 GB, until the machine
     // started swapping.
     crate::tools::shutdown_browser();
+    // Language servers and MCP servers are children too, and rust-analyzer in
+    // particular is a gigabyte of resident memory to leave orphaned.
+    crate::lsp::shutdown();
     let mut out = io::stdout();
     let _ = execute!(
         out,

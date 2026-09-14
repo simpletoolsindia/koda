@@ -375,6 +375,68 @@ fn build_specs() -> Vec<Spec> {
             mutating: false,
         },
         Spec {
+            name: "lsp",
+            desc: "Ask the language server — the same one your editor uses — a question the \
+                   code graph cannot answer precisely. Use it when the answer has to be \
+                   RIGHT rather than fast: `definition` resolves the symbol under a position \
+                   (the real one, not a name match), `references` finds every genuine use, \
+                   `hover` gives the type and doc of an expression, `type_definition` and \
+                   `implementation` follow types and traits/interfaces, `diagnostics` reports \
+                   what the compiler or type checker thinks is wrong with a file, \
+                   `document_symbols` outlines one file, `workspace_symbols` finds a symbol \
+                   by name across the project. Positions are 1-based; give `line` plus \
+                   `symbol` (the name as it appears on that line) and koda finds the column. \
+                   Prefer codegraph for a first orientation and this when a name is \
+                   ambiguous, overloaded, or you need a type. `servers` says which language \
+                   servers are installed.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["definition", "references", "hover", "type_definition",
+                                 "implementation", "document_symbols", "workspace_symbols",
+                                 "diagnostics", "servers"],
+                        "description": "Which question to ask."
+                    },
+                    "file": str_prop("The source file, relative to the workspace."),
+                    "line": { "type": "integer", "description": "1-based line the symbol is on." },
+                    "symbol": str_prop("The name as it appears on that line. koda finds the column from it — you do not have to count characters."),
+                    "column": { "type": "integer", "description": "1-based column, if you would rather give one than name the symbol." },
+                    "name": str_prop("For workspace_symbols: the symbol name to look for."),
+                    "k": { "type": "integer", "description": "For workspace_symbols: how many to return (default 20)." },
+                    "include_declaration": { "type": "boolean", "description": "For references: count the declaration itself (default true)." }
+                },
+                "required": ["action"]
+            }),
+            mutating: false,
+        },
+        Spec {
+            name: "mcp",
+            desc: "Inspect the connected MCP servers and read what they expose beyond tools. \
+                   `servers` lists every server and the tools it lends (those you call \
+                   directly, by their `mcp__server__tool` names). `resources` lists the \
+                   documents a server offers and `read_resource` fetches one by URI — that is \
+                   how you get at data a server publishes rather than acts on. `prompts` and \
+                   `get_prompt` fetch a server's prepared prompt templates.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["servers", "resources", "read_resource", "prompts", "get_prompt"],
+                        "description": "What to do."
+                    },
+                    "server": str_prop("Which server, for everything but `servers`."),
+                    "uri": str_prop("For read_resource: the resource URI, as listed."),
+                    "name": str_prop("For get_prompt: the prompt's name."),
+                    "arguments": { "type": "object", "description": "For get_prompt: the template's arguments." }
+                },
+                "required": ["action"]
+            }),
+            mutating: false,
+        },
+        Spec {
             name: "skill",
             desc: "Read a project skill: conventions and rules for a kind of work. The \
                    available skills are listed in your instructions. Read the relevant one \
@@ -812,6 +874,8 @@ pub const PLAN_TOOLS: &[&str] = &[
     "browse",
     "view_image",
     "codegraph",
+    "lsp",
+    "mcp",
     "remember",
     "about_creator",
 ];
@@ -1000,6 +1064,13 @@ pub fn call_is_mutating(name: &str, args: &Value) -> bool {
     if name == "debug" {
         let action = args.get("action").and_then(Value::as_str).unwrap_or("");
         return crate::dap::action_is_mutating(action);
+    }
+    // An MCP tool has no entry in the built-in table, so `is_mutating` would
+    // call every one of them mutating. The server's own `readOnlyHint`, or the
+    // user's trust of that server, is the better answer — and without either,
+    // it still asks.
+    if crate::mcp::is_mcp_tool(name) {
+        return crate::mcp::tool_is_mutating(name);
     }
     is_mutating(name)
 }
