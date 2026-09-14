@@ -262,7 +262,18 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     // delegation explainer, the MORE TOOLS list and the parallel-reads note.
     // The tools they describe are still reachable — `load_tools` and a direct
     // call both work — so this costs discoverability, not capability.
-    if !cfg.fast {
+    if cfg.fast {
+        // One line, not the full workflow: a small model still needs to know
+        // codegraph is the fast way to locate a symbol, or it greps and reads
+        // whole files across several round-trips. Only when it is enabled.
+        if cfg.codegraph {
+            p.push_str(
+                "\n\nTo locate code, use `codegraph` (query=symbol name=X for where a symbol is \
+                 defined and who calls it; query=search text=… when you have no name) rather than \
+                 grepping and reading whole files.",
+            );
+        }
+    } else {
         if cfg.codegraph {
             p.push_str(CODEGRAPH_GUIDANCE);
         } else {
@@ -301,7 +312,7 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
     // hides more tools but says so once, in one line, rather than a paragraph.
     if cfg.fast {
         p.push_str(
-            "\n\nMore tools (codegraph, delegate, remember, view_image, browse, …) are not \
+            "\n\nMore tools (delegate, remember, view_image, browse, …) are not \
              listed to keep this small. Call `load_tools` for a group, or just call the tool \
              by name — it loads automatically.",
         );
@@ -789,10 +800,11 @@ mod tests {
         assert!(fast.contains("Read a file before editing"), "{fast}");
         assert!(fast.contains("Verify"), "{fast}");
         assert!(fast.contains("One write or command at a time"), "{fast}");
-        // The heavy guidance sections go.
+        // The heavy guidance sections go, replaced by a one-line codegraph hint.
         assert!(!fast.contains("CODE ANALYSIS"), "{fast}");
         assert!(!fast.contains("DELEGATION"), "{fast}");
         assert!(!fast.contains("in ONE step"), "{fast}");
+        assert!(fast.contains("codegraph"), "fast keeps a codegraph hint: {fast}");
         // But the model is still told the hidden tools exist and how to reach them.
         assert!(fast.contains("load_tools"), "{fast}");
         // And the terseness rule that stops the double-summary is stern.

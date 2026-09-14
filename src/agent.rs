@@ -1939,6 +1939,11 @@ impl Agent {
         if self.cfg.fast {
             list.retain(|t| {
                 let name = t.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("");
+                // codegraph is in the core set but only usable when enabled;
+                // advertising it while off would spend a turn on a refusal.
+                if name == "codegraph" {
+                    return self.cfg.codegraph;
+                }
                 tools::FAST_CORE.contains(&name)
                     || (name == "web_search" && self.cfg.web_search)
                     || (name == "web_fetch" && self.cfg.web_fetch)
@@ -7133,24 +7138,27 @@ mod tests {
             ..crate::config::Config::default()
         }));
         assert!(fast.len() < full.len(), "fast={fast:?} full={full:?}");
-        // The everyday loop is all there.
+        // The everyday loop is all there, including codegraph for locating
+        // symbols (its schema is big but it collapses grep-and-read round-trips
+        // that cost far more on a local model).
         for core in [
             "read_file",
             "edit_file",
             "write_file",
             "run_command",
             "search",
+            "codegraph",
             "todo",
             "load_tools",
         ] {
             assert!(fast.contains(&core.to_string()), "{core} missing: {fast:?}");
         }
-        // The heavy ones are gone from the schema…
-        for heavy in ["codegraph", "delegate", "manage_skill", "view_image"] {
+        // The situational ones are gone from the schema…
+        for heavy in ["delegate", "manage_skill", "view_image", "about_creator"] {
             assert!(!fast.contains(&heavy.to_string()), "{heavy} still advertised");
         }
         // …but still dispatch by name, so nothing is unreachable.
-        assert!(tools::spec("codegraph").is_some());
+        assert!(tools::spec("delegate").is_some());
     }
 
     /// The tool schema is the largest fixed cost in every request, and most

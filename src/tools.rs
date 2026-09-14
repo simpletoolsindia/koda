@@ -745,15 +745,22 @@ const SHELLS_OUT: &[&str] = &["search", "run_command", "browse", "view_image"];
 /// shared state matters.
 pub const PARALLEL_SAFE: &[&str] = &["read_file", "list_dir", "find_files", "search"];
 
-/// The tools fast mode advertises: the core read → edit → verify loop, plus the
-/// plan tool and the loader that reaches everything else.
+/// The tools fast mode advertises: the core read → edit → verify loop, plus
+/// `codegraph` for locating symbols, the plan tool, and the loader that reaches
+/// everything else.
 ///
-/// Everything left out — codegraph, remember, manage_skill, ask_user, delegate,
-/// view_image, about_creator — still runs if the model calls it by name, and
-/// `load_tools`/its group brings the browser and debugger in. This is the tool
-/// half of fast mode: measured on a coder model the full 16-tool schema is
-/// ~2,895 tokens against a task of a few hundred, and a small model picks more
-/// reliably from eight relevant tools than sixteen mostly-irrelevant ones.
+/// `codegraph` earns its place even though it is the single largest schema:
+/// without it a small model greps and reads whole files to find a symbol —
+/// several round-trips, each re-processing the entire prompt on a local server —
+/// where one codegraph call answers "where is X defined and who calls it". On a
+/// real codebase that trades a bigger request for fewer of them. (It is dropped
+/// automatically when `codegraph` is disabled, in `advertised_tools`.)
+///
+/// Everything still left out — remember, manage_skill, ask_user, delegate,
+/// view_image, about_creator — runs if the model calls it by name, and
+/// `load_tools`/its group brings the browser and debugger in. Measured on a
+/// coder model the full 16-tool schema is ~2,895 tokens against a task of a few
+/// hundred; a small model also picks more reliably from a short, relevant list.
 pub const FAST_CORE: &[&str] = &[
     "read_file",
     "list_dir",
@@ -762,6 +769,7 @@ pub const FAST_CORE: &[&str] = &[
     "write_file",
     "edit_file",
     "run_command",
+    "codegraph",
     "todo",
     "load_tools",
 ];
