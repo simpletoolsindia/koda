@@ -5467,7 +5467,12 @@ fn plan_reminder(plan: &[tools::Todo], steps_since: usize) -> Option<String> {
     if steps_since < PLAN_STALE_AFTER {
         return None;
     }
-    let step = plan.iter().find(|i| i.status != tools::TodoStatus::Done)?;
+    // The step in progress, not merely the first unfinished one: naming a
+    // pending step as "current" sent the model to finish work it had not begun.
+    let step = plan
+        .iter()
+        .find(|i| i.status == tools::TodoStatus::Active)
+        .or_else(|| plan.iter().find(|i| i.status != tools::TodoStatus::Done))?;
     Some(format!(
         "\n\nPLAN REMINDER: the task list still shows \"{}\" as the current step, \
          {steps_since} steps later. If it is done, call `todo` now with it marked done \
@@ -7071,6 +7076,13 @@ mod tests {
         let nudge = plan_reminder(&plan, PLAN_STALE_AFTER).expect("stale");
         assert!(nudge.contains("add the token"), "{nudge}");
         assert!(nudge.contains("call `todo` now"), "{nudge}");
+        // The step in progress is the current one, even when a pending step is
+        // listed above it.
+        let mut shuffled = plan.clone();
+        shuffled.swap(0, 2);
+        shuffled[0].status = tools::TodoStatus::Pending;
+        let nudge = plan_reminder(&shuffled, PLAN_STALE_AFTER).expect("stale");
+        assert!(nudge.contains("add the token"), "{nudge}");
         // Nothing to chase when there is no plan, or it is finished.
         assert_eq!(plan_reminder(&[], 99), None);
         let done: Vec<tools::Todo> = plan

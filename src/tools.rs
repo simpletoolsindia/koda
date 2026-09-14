@@ -931,6 +931,14 @@ pub fn merge_todos(current: &[Todo], update: &[Todo]) -> Vec<Todo> {
     if !overlap && update.len() > 1 {
         return update.to_vec();
     }
+    // A full resend — it names existing steps and is no shorter than the plan —
+    // is the whole plan, in the order the model means it. Folding it into the
+    // old list kept old positions, so a new four-step plan that reworded one old
+    // step ("Share results and workflow" → "Share results with comparisons")
+    // came back with its last step listed first.
+    if overlap && update.len() >= current.len() {
+        return update.to_vec();
+    }
     let mut merged = current.to_vec();
     let mut matched: Vec<bool> = vec![false; merged.len()];
     for item in update {
@@ -951,19 +959,6 @@ pub fn merge_todos(current: &[Todo], update: &[Todo]) -> Vec<Todo> {
                 merged.push(item.clone());
             }
         }
-    }
-    // A full resend that dropped a step means the step is gone — but only when
-    // the update really is a full resend: it has to name existing steps and be
-    // no shorter than the plan. Otherwise a one-line status update, or a lone
-    // appended step, would silently delete the rest.
-    if overlap && update.len() >= current.len() {
-        let keep: Vec<bool> = matched.clone();
-        let mut i = 0;
-        merged.retain(|_| {
-            let k = keep.get(i).copied().unwrap_or(true);
-            i += 1;
-            k
-        });
     }
     merged
 }
@@ -5200,6 +5195,33 @@ mod tests {
         );
         assert_eq!(merged.len(), 2, "a new plan should replace: {merged:?}");
         assert_eq!(merged[0].text, "write the changelog");
+
+        // A real session: a new four-step plan whose last step rewords a step
+        // of the old plan. It must come back in the model's order, not with
+        // "Share results…" hoisted into the old step's slot at the top.
+        let old = plan(&[
+            ("Research FaceFusion forks", TodoStatus::Done),
+            ("Test face swap with sample inputs", TodoStatus::Pending),
+            ("Share results and workflow", TodoStatus::Active),
+            ("Test via Google Colab", TodoStatus::Done),
+        ]);
+        let new = plan(&[
+            ("Install FaceFusion locally", TodoStatus::Active),
+            ("Prepare test images", TodoStatus::Pending),
+            ("Run face swap test", TodoStatus::Pending),
+            ("Share results with comparisons", TodoStatus::Pending),
+        ]);
+        let merged = merge_todos(&old, &new);
+        let order: Vec<&str> = merged.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "Install FaceFusion locally",
+                "Prepare test images",
+                "Run face swap test",
+                "Share results with comparisons"
+            ]
+        );
 
         // Distinct steps that share a verb must stay distinct.
         let merged = merge_todos(
