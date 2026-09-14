@@ -13,6 +13,11 @@ cd "$(dirname "$0")/.."
 # endpoint in the status bar. Five failures that say nothing about the code.
 KODA_E2E_CONFIG=$(mktemp -d)
 export XDG_CONFIG_HOME="$KODA_E2E_CONFIG"
+# And against an empty data directory. Sessions, the index, learned rules and
+# koda.log live under the user's data and state directories, which on macOS
+# ignore XDG_CONFIG_HOME: every run used to leave mock-coder sessions and log
+# lines in the developer's real koda data.
+export HOME="$KODA_E2E_CONFIG"
 trap 'rm -rf "$KODA_E2E_CONFIG"' EXIT
 
 BIN="${BIN:-./target/release/koda}"
@@ -119,6 +124,15 @@ check "exit status 0" "$RC"
 echo "$OUT" | grep -q "All six steps done"; check "the job ran to the end" $?
 grep -q "continuing to 6 steps" /tmp/koda-err.log; check "budget extended" $?
 ! grep -q "stopped after 3 steps" /tmp/koda-err.log; check "no early stop" $?
+rm -rf "$WS"
+
+echo "== out of steps, the user still gets a status report =="
+printf 'max_steps = 3\n' >"$KODA_E2E_CONFIG/koda/config.toml"
+run_case stepstop -p -y "run the six-step job"
+rm -f "$KODA_E2E_CONFIG/koda/config.toml"
+echo "$OUT" | grep -q "Status: ran 3 of the 6 steps"; check "status report given" $?
+grep -q "step check: The remaining steps need the user" /tmp/koda-err.log; check "stop reason shown" $?
+! grep -q "echo step 3" /tmp/koda-err.log; check "no work after the limit" $?
 rm -rf "$WS"
 
 echo "== undo puts the file back =="
