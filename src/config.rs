@@ -832,6 +832,12 @@ pub fn shell_flag(shell: &str) -> &'static str {
 /// status`. Falls back to the config directory when the platform has no data
 /// directory, which keeps a single writable location rather than none.
 pub fn data_dir() -> PathBuf {
+    // Unit tests create sessions, indexes and rules by the dozen. Under the
+    // real data directory they piled up among the developer's own transcripts
+    // ("the first prompt of session 8") and showed in `/resume`.
+    if cfg!(test) {
+        return std::env::temp_dir().join("koda-test-data");
+    }
     dirs::data_dir()
         .map(|d| d.join("koda"))
         .unwrap_or_else(config_dir)
