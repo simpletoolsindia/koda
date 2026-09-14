@@ -1688,10 +1688,11 @@ impl Agent {
 
     /// The step budget ran out. Rather than cutting the turn off mid-task,
     /// ask the model — in one cheap, tool-free call — whether the work is
-    /// actually finished. "STOP" (or `step_check = false`, or a failed/garbled
-    /// answer) ends the turn as before; "CONTINUE" buys another `max_steps`,
-    /// bounded by `max_steps_hard` so a confused model still cannot spin
-    /// forever. Returns the new budget, or `None` to break the loop.
+    /// actually finished. "STOP" (or `step_check = false`, or a failed request)
+    /// ends the turn as before; "CONTINUE" — or a reply with no verdict in it —
+    /// buys another `max_steps`, bounded by `max_steps_hard` so a confused
+    /// model still cannot spin forever. Returns the new budget, or `None` to
+    /// break the loop.
     async fn extend_budget(
         &mut self,
         input: &str,
@@ -1724,36 +1725,44 @@ impl Agent {
             // Esc during the check: the loop's own cancel handling reports it.
             return None;
         }
-        match verdict {
-            Ok(Some(reason)) => {
-                let next = (budget + self.cfg.max_steps.max(1)).min(cap);
-                crate::tel_info!(
-                    "agent", "step budget extended",
-                    "steps" => steps, "budget" => next, "reason" => reason.clone(),
-                );
-                let _ = tx.send(Event::Notice(format!(
-                    "continuing to {next} steps — {reason}"
-                )));
-                // Tell the model what it has left, so it spends the extension
-                // on finishing rather than on more exploration.
-                self.history.push(Message::user(format!(
-                    "[Step budget check: you have used {steps} of {next} steps for this turn. \
-                     Finish the remaining work now — do the essential steps first and stop \
-                     with a plain-text summary as soon as the task is done.]"
-                )));
-                Some(next)
+        let reason = match verdict {
+            Ok(Verdict::Continue(reason)) => reason,
+            // No verdict is not a verdict to stop. It is what a thinking model
+            // sends when the check's reply budget runs out mid-thought, and
+            // reading it as "done" ended long turns flat at `max_steps` while
+            // claiming the model had judged them complete. `max_steps_hard`
+            // still bounds a model that never answers.
+            Ok(Verdict::Unclear) => {
+                crate::tel_warn!("agent", "step check gave no verdict", "steps" => steps);
+                "the step check gave no clear answer".to_string()
             }
-            Ok(None) => stop(tx, "the model reported the task complete"),
+            Ok(Verdict::Stop(why)) => return stop(tx, &format!("step check: {why}")),
             Err(e) => {
                 crate::tel_warn!("agent", "step check failed", "detail" => format!("{e:#}"));
-                stop(tx, "max_steps")
+                return stop(tx, "max_steps");
             }
-        }
+        };
+        let next = (budget + self.cfg.max_steps.max(1)).min(cap);
+        crate::tel_info!(
+            "agent", "step budget extended",
+            "steps" => steps, "budget" => next, "reason" => reason.clone(),
+        );
+        let _ = tx.send(Event::Notice(format!(
+            "continuing to {next} steps — {reason}"
+        )));
+        // Tell the model what it has left, so it spends the extension
+        // on finishing rather than on more exploration.
+        self.history.push(Message::user(format!(
+            "[Step budget check: you have used {steps} of {next} steps for this turn. \
+             Finish the remaining work now — do the essential steps first and stop \
+             with a plain-text summary as soon as the task is done.]"
+        )));
+        Some(next)
     }
 
     /// One tool-free model call asking whether this turn has more real work to
-    /// do. `Some(reason)` means keep going, `None` means the task is done.
-    async fn ask_should_continue(&self, input: &str) -> anyhow::Result<Option<String>> {
+    /// do.
+    async fn ask_should_continue(&self, input: &str) -> anyhow::Result<Verdict> {
         let messages = vec![
             Message::system(
                 "You are supervising a coding agent that has just used up its step budget. \
@@ -1776,7 +1785,7 @@ impl Agent {
             messages,
             temperature: 0.0,
             top_p: self.cfg.top_p,
-            max_tokens: 128,
+            max_tokens: STEP_CHECK_TOKENS,
             tools: None,
             reasoning_effort: "off".into(),
         };
@@ -1793,7 +1802,7 @@ impl Agent {
         }
         res?;
         if self.cancelled() {
-            return Ok(None);
+            return Ok(Verdict::Stop("cancelled".into()));
         }
         Ok(parse_continue(&out))
     }
@@ -5598,16 +5607,33 @@ fn required_params_hint(name: &str) -> String {
 /// message; anything else gets its chain flattened rather than debug-printed.
 /// Read the step-check verdict. `Some(reason)` = continue, `None` = stop.
 /// Anything ambiguous counts as a stop: the old behaviour is the safe one.
-fn parse_continue(reply: &str) -> Option<String> {
+/// Room for the step check's reply. Thinking models reason before answering
+/// whatever `reasoning_effort` says: MiniMax-M2.7 spent all of 128 tokens inside
+/// `<think>` and never reached a verdict **[measured]**, and gave one in 130–180
+/// tokens once it had 1024.
+const STEP_CHECK_TOKENS: u32 = 1024;
+
+/// What the step check concluded.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// More work remains, and why.
+    Continue(String),
+    /// The task is done, or stuck, and why.
+    Stop(String),
+    /// Neither word appeared — typically a thinking model whose reply budget
+    /// ran out mid-thought. That is no answer, not an answer of "stop".
+    Unclear,
+}
+
+fn parse_continue(reply: &str) -> Verdict {
     // Thinking models may narrate first; the verdict is the last decisive word.
     let upper = reply.to_ascii_uppercase();
-    let cont = upper.rfind("CONTINUE");
-    let stop = upper.rfind("STOP");
-    match (cont, stop) {
-        (Some(c), Some(s)) if c < s => return None,
-        (None, _) => return None,
-        _ => {}
-    }
+    let go = match (upper.rfind("CONTINUE"), upper.rfind("STOP")) {
+        (None, None) => return Verdict::Unclear,
+        (Some(c), Some(s)) => c > s,
+        (cont, _) => cont.is_some(),
+    };
+    let word = if go { "CONTINUE" } else { "STOP" };
     let reason = reply
         .lines()
         .map(str::trim)
@@ -5615,15 +5641,23 @@ fn parse_continue(reply: &str) -> Option<String> {
         .find(|l| {
             let u = l.to_ascii_uppercase();
             let bare = u.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-            bare != "CONTINUE" && !u.starts_with("CONTINUE:")
+            bare != word && !u.starts_with(&format!("{word}:"))
         })
         .map(|l| {
             l.trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
                 .trim()
         })
-        .filter(|l| !l.is_empty())
-        .unwrap_or("more work left");
-    Some(crate::tools::truncate(reason, 160).trim().to_string())
+        .filter(|l| !l.is_empty());
+    let reason = |fallback: &str| {
+        crate::tools::truncate(reason.unwrap_or(fallback), 160)
+            .trim()
+            .to_string()
+    };
+    if go {
+        Verdict::Continue(reason("more work left"))
+    } else {
+        Verdict::Stop(reason("the model reported the task complete"))
+    }
 }
 
 /// What undoing one file means.
@@ -6028,25 +6062,45 @@ mod tests {
         assert!(compaction_tail(&history, 100).is_empty());
     }
 
-    /// The step check decides whether a turn keeps running, so an ambiguous
-    /// or failed answer must fall back to the old hard stop.
+    /// The step check decides whether a turn keeps running. A reply with no
+    /// verdict in it is not "stop": it is exactly what a thinking model sends
+    /// when the check's budget runs out mid-thought, and treating it as stop
+    /// ended real turns at `max_steps` with the work half done.
     #[test]
     fn step_check_verdict_parsing() {
         assert_eq!(
             parse_continue("CONTINUE\nThe tests still need to be run."),
-            Some("The tests still need to be run.".to_string())
+            Verdict::Continue("The tests still need to be run.".into())
         );
-        assert!(parse_continue("STOP\nThe file was written and verified.").is_none());
+        assert_eq!(
+            parse_continue("STOP\n\nThe file was written and verified."),
+            Verdict::Stop("The file was written and verified.".into())
+        );
         // A thinking model narrating both words: the last one is the verdict.
-        assert!(parse_continue("It could continue, but really: STOP. Done.").is_none());
-        assert!(parse_continue("Maybe stop? No — CONTINUE, the build is unfinished.").is_some());
-        // Nothing decisive, an empty reply, or a refusal all mean stop.
-        assert!(parse_continue("").is_none());
-        assert!(parse_continue("I am not sure what you mean.").is_none());
-        // A verdict with no reason still continues, with a placeholder.
+        assert!(matches!(
+            parse_continue("It could continue, but really: STOP. Done."),
+            Verdict::Stop(_)
+        ));
+        assert!(matches!(
+            parse_continue("Maybe stop? No — CONTINUE, the build is unfinished."),
+            Verdict::Continue(_)
+        ));
+        // Nothing decisive: what is left of a `<think>`-only reply once the
+        // reasoning is split off, or a reply that ignored the question.
+        assert_eq!(parse_continue(""), Verdict::Unclear);
+        assert_eq!(parse_continue("\n"), Verdict::Unclear);
+        assert_eq!(
+            parse_continue("I am not sure what you mean."),
+            Verdict::Unclear
+        );
+        // A verdict with no reason still counts, with a placeholder.
         assert_eq!(
             parse_continue("CONTINUE"),
-            Some("more work left".to_string())
+            Verdict::Continue("more work left".into())
+        );
+        assert_eq!(
+            parse_continue("STOP"),
+            Verdict::Stop("the model reported the task complete".into())
         );
     }
 

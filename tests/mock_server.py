@@ -237,6 +237,14 @@ def script(step, is_subagent=False, last_user=""):
                                     {"task": "find where the greeting lives"})
         return text_frames("The greeting is in demo.txt line 1, per the subagent.")
 
+    if MODE == "stepcheck":
+        # A job longer than the `max_steps` the e2e sets, so the turn only
+        # finishes if the step check extends the budget.
+        if step < 6:
+            return tool_call_frames(f"k{step}", "run_command",
+                                    {"command": f"echo step {step}"})
+        return text_frames("All six steps done.")
+
     if MODE == "docread":
         # Read a document fixture (path from DOC_PATH), then echo a short reply.
         # Used by the doc-parsing e2e to prove read_file extracts DOCX/XLSX/PDF.
@@ -337,6 +345,38 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 for frame in text_frames("SUMMARY: earlier work condensed for the record."):
+                    self.write_chunk(frame)
+                self.write_chunk(b"data: [DONE]\n\n")
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except BrokenPipeError:
+                pass
+            return
+        # The step check (tool-free, "supervising a coding agent") answers the
+        # way MiniMax-M2.7 does: inline <think> reasoning first, whatever
+        # reasoning_effort says. A small max_tokens is spent before any verdict
+        # arrives; with room, the verdict follows the reasoning.
+        is_step_check = MODE == "stepcheck" and any(
+            m.get("role") == "system"
+            and "supervising a coding agent" in str(m.get("content", ""))
+            for m in messages
+        )
+        if is_step_check:
+            thought = ("The agent has run some of the planned commands and the job "
+                       "is not finished, so more steps would help. " * 8).split()
+            budget = int(req.get("max_tokens") or 0) or len(thought) * 2
+            if len(thought) + 16 > budget:
+                frames = [delta({"content": "<think>\n" + " ".join(thought[:budget])}),
+                          delta({}, finish="length")]
+            else:
+                frames = text_frames("<think>\n" + " ".join(thought) + "\n</think>\n\n"
+                                     "CONTINUE\nNot all six steps have run yet.")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                for frame in frames:
                     self.write_chunk(frame)
                 self.write_chunk(b"data: [DONE]\n\n")
                 self.wfile.write(b"0\r\n\r\n")

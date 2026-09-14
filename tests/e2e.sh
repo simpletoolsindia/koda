@@ -101,6 +101,20 @@ run_case thinky -p -y "do something"
 grep -q "only reasoning and no answer" /tmp/koda-err.log; check "reasoning-only explained" $?
 rm -rf "$WS"
 
+echo "== the step check survives a model that thinks before answering =="
+# Six steps of work against max_steps = 3: the turn finishes only if the step
+# check extends the budget, and the mock thinks through any small reply budget
+# before reaching a verdict, as MiniMax-M2.7 does.
+mkdir -p "$KODA_E2E_CONFIG/koda"
+printf 'max_steps = 3\n' >"$KODA_E2E_CONFIG/koda/config.toml"
+run_case stepcheck -p -y "run the six-step job"
+rm -f "$KODA_E2E_CONFIG/koda/config.toml"
+check "exit status 0" "$RC"
+echo "$OUT" | grep -q "All six steps done"; check "the job ran to the end" $?
+grep -q "continuing to 6 steps" /tmp/koda-err.log; check "budget extended" $?
+! grep -q "stopped after 3 steps" /tmp/koda-err.log; check "no early stop" $?
+rm -rf "$WS"
+
 echo "== undo puts the file back =="
 start_server undo
 new_workspace
