@@ -249,9 +249,12 @@ def script(step, is_subagent=False, last_user=""):
         frames.append(delta({}, finish="stop"))
         return frames
 
-    if MODE == "stepcheck":
+    if MODE in ("stepcheck", "stepstop"):
         # A job longer than the `max_steps` the e2e sets, so the turn only
-        # finishes if the step check extends the budget.
+        # finishes if the step check extends the budget. Out of steps, koda asks
+        # for a status report instead.
+        if last_user.startswith("[Step limit"):
+            return text_frames("Status: ran 3 of the 6 steps; 3 remain.")
         if step < 6:
             return tool_call_frames(f"k{step}", "run_command",
                                     {"command": f"echo step {step}"})
@@ -368,7 +371,7 @@ class Handler(BaseHTTPRequestHandler):
         # way MiniMax-M2.7 does: inline <think> reasoning first, whatever
         # reasoning_effort says. A small max_tokens is spent before any verdict
         # arrives; with room, the verdict follows the reasoning.
-        is_step_check = MODE == "stepcheck" and any(
+        is_step_check = MODE in ("stepcheck", "stepstop") and any(
             m.get("role") == "system"
             and "supervising a coding agent" in str(m.get("content", ""))
             for m in messages
@@ -381,8 +384,10 @@ class Handler(BaseHTTPRequestHandler):
                 frames = [delta({"content": "<think>\n" + " ".join(thought[:budget])}),
                           delta({}, finish="length")]
             else:
+                verdict = ("STOP\nThe remaining steps need the user." if MODE == "stepstop"
+                           else "CONTINUE\nNot all six steps have run yet.")
                 frames = text_frames("<think>\n" + " ".join(thought) + "\n</think>\n\n"
-                                     "CONTINUE\nNot all six steps have run yet.")
+                                     + verdict)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")

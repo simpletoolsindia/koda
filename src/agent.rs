@@ -1388,6 +1388,9 @@ impl Agent {
         // of the turn: when it runs out `extend_budget` asks the model whether
         // the work is actually finished, and grants another slice if not.
         let mut budget = self.cfg.max_steps.max(1);
+        // Set once the budget is spent for good: the next request is for a
+        // status report, and nothing it asks to run is run.
+        let mut summarising = false;
         loop {
             if self.cancelled() {
                 let _ = tx.send(Event::Notice("cancelled".into()));
@@ -1395,17 +1398,29 @@ impl Agent {
                 break;
             }
             if steps >= budget {
-                match self.extend_budget(&input, steps, budget, tx).await {
+                if summarising {
+                    break;
+                }
+                match self.extend_budget(steps, budget, tx).await {
                     Some(next) => budget = next,
                     None => {
+                        stopped_early = true;
                         // Esc pressed during the step check: report it as a
                         // cancellation, not as a clean stop.
                         if self.cancelled() {
                             let _ = tx.send(Event::Notice("cancelled".into()));
                             status = crate::trace::Status::Cancelled;
+                            break;
                         }
-                        stopped_early = true;
-                        break;
+                        // Stopping without a word left the user asking "done ?".
+                        // One more request, for a status report instead of work.
+                        self.history.push(Message::user(
+                            "[Step limit reached for this turn. Do not call any tools. In a \
+                             few sentences, tell the user what is done, what is left, and \
+                             anything you need from them to continue.]",
+                        ));
+                        summarising = true;
+                        budget = steps + 1;
                     }
                 }
             }
@@ -1495,6 +1510,16 @@ impl Agent {
                 self.history.push(Message::assistant(result.text));
                 break;
             }
+            if summarising {
+                // The extra request was for a report, not more work: keep what
+                // it said and run none of the calls it asked for.
+                if !result.text.trim().is_empty() {
+                    reply = result.text.clone();
+                    self.history.push(Message::assistant(result.text));
+                }
+                break;
+            }
+
             // Any usable progress resets the empty-reply guard.
             self.empty_replies = 0;
 
@@ -1695,7 +1720,6 @@ impl Agent {
     /// break the loop.
     async fn extend_budget(
         &mut self,
-        input: &str,
         steps: usize,
         budget: usize,
         tx: &mpsc::UnboundedSender<Event>,
@@ -1720,7 +1744,7 @@ impl Agent {
         let _ = tx.send(Event::Notice(format!(
             "{steps} steps used — checking whether the task still needs more"
         )));
-        let verdict = self.ask_should_continue(input).await;
+        let verdict = self.ask_should_continue().await;
         if self.cancelled() {
             // Esc during the check: the loop's own cancel handling reports it.
             return None;
@@ -1762,7 +1786,7 @@ impl Agent {
 
     /// One tool-free model call asking whether this turn has more real work to
     /// do.
-    async fn ask_should_continue(&self, input: &str) -> anyhow::Result<Verdict> {
+    async fn ask_should_continue(&self) -> anyhow::Result<Verdict> {
         let messages = vec![
             Message::system(
                 "You are supervising a coding agent that has just used up its step budget. \
@@ -1774,9 +1798,10 @@ impl Agent {
                  CONTINUE only when concrete steps remain that the agent can do on its own.",
             ),
             Message::user(format!(
-                "The user asked:\n{}\n\nRecent activity (oldest first):\n{}\n\n\
+                "What the user asked for (their recent messages, oldest first):\n{}\n\n\
+                 Recent activity (oldest first):\n{}\n\n\
                  Does the agent need more steps? Answer CONTINUE or STOP.",
-                tools::truncate(input.trim(), 2_000),
+                self.recent_requests(3),
                 self.recent_digest(14),
             )),
         ];
@@ -1805,6 +1830,36 @@ impl Agent {
             return Ok(Verdict::Stop("cancelled".into()));
         }
         Ok(parse_continue(&out))
+    }
+
+    /// The user's own last `n` messages, oldest first, for the step check.
+    ///
+    /// The latest message alone can be a bare "done ?" that says nothing about
+    /// the task being judged. koda's bracketed notes, its empty-reply nudge and
+    /// text-protocol tool results sit in the history as user messages too, but
+    /// they are not the user's.
+    fn recent_requests(&self, n: usize) -> String {
+        let mut asked: Vec<String> = self
+            .history
+            .iter()
+            .rev()
+            .filter(|m| matches!(m.role, Role::User))
+            .filter_map(|m| m.content.as_deref())
+            .map(str::trim)
+            .filter(|t| {
+                !t.is_empty()
+                    && !t.starts_with('[')
+                    && !t.starts_with("Tool result (")
+                    && !t.starts_with("You replied with no answer")
+            })
+            .take(n)
+            .map(|t| format!("- {}", tools::truncate(t, 600)))
+            .collect();
+        if asked.is_empty() {
+            return "(nothing recorded)".into();
+        }
+        asked.reverse();
+        asked.join("\n")
     }
 
     /// A compact, readable trace of the last `n` history entries for the step
@@ -6065,6 +6120,30 @@ mod tests {
     fn compaction_tail_can_be_empty() {
         let history = vec![Message::tool("c1", "read_file", "y".repeat(8_000))];
         assert!(compaction_tail(&history, 100).is_empty());
+    }
+
+    /// The step check judges the task, so it needs the request that set it —
+    /// not just a follow-up like "done ?" — and none of koda's own notes.
+    #[test]
+    fn the_step_check_sees_what_the_user_asked_for() {
+        let mut agent = agent_with(crate::config::Config::default());
+        agent.history.extend([
+            Message::user("install facefusion and test it with images"),
+            Message::assistant("On it."),
+            Message::user("[Step budget check: you have used 24 of 48 steps]"),
+            Message::user("Tool result (run_command):\nexit code: 0"),
+            Message::user("done ?"),
+        ]);
+        let asked = agent.recent_requests(3);
+        assert_eq!(
+            asked,
+            "- install facefusion and test it with images\n- done ?",
+            "{asked}"
+        );
+        assert_eq!(
+            agent_with(crate::config::Config::default()).recent_requests(3),
+            "(nothing recorded)"
+        );
     }
 
     /// The step check decides whether a turn keeps running. A reply with no
