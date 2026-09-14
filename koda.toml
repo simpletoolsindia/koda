@@ -16,6 +16,14 @@ description = "Run the full pre-commit gate for this repo: rustfmt, clippy (all 
 command = "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
 mutating = false
 
+# Context7 MCP - fetches up-to-date library documentation
+# Get your free API key at https://context7.com/dashboard
+# [[mcp_server]]
+# name = "context7"
+# command = "npx"
+# args = ["-y", "@upstash/context7-mcp"]
+# env = { CONTEXT7_API_KEY = "your-key-here" }
+
 # The live browser tests are #[ignore]d because they need a real agent-browser
 # binary, so a plain `cargo test` silently skips them. This is how to actually
 # exercise the browse tool's twenty-one actions.
