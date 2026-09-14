@@ -2691,10 +2691,20 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         .unwrap_or(ctx.cfg.command_timeout_ms)
         .clamp(100, 30 * 60_000);
 
+    // `pip install … | tail` reports tail's status, so a failed build read as
+    // exit 0 — and the transcript, the UI and learned memory all recorded it as
+    // a success. With pipefail a pipeline fails when any stage does. Probed in
+    // a subshell first: in a shell without it, `set -o` is a fatal error.
+    let flag = crate::config::shell_flag(&ctx.cfg.shell);
+    let script = if flag == "-c" {
+        format!("(set -o pipefail) 2>/dev/null && set -o pipefail\n{cmd}")
+    } else {
+        cmd.clone()
+    };
     let mut cmd_builder = tokio::process::Command::new(&ctx.cfg.shell);
     cmd_builder
-        .arg(crate::config::shell_flag(&ctx.cfg.shell))
-        .arg(&cmd)
+        .arg(flag)
+        .arg(&script)
         .current_dir(&ctx.root)
         .env("KODA", "1")
         .env("TERM", "dumb")
@@ -2709,31 +2719,67 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         cmd_builder.env("PATH", path);
     }
 
-    let child = match cmd_builder.spawn() {
+    let mut child = match cmd_builder.spawn() {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("spawning `{}`: {e}", ctx.cfg.shell)),
     };
 
-    let wait = child.wait_with_output();
+    // Collect output as it arrives rather than at exit. A command that times
+    // out has usually said why — a download at 3%, a prompt waiting for input —
+    // and waiting for exit threw that away along with the process.
+    let out_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let err_buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let readers = [
+        drain_pipe(child.stdout.take(), out_buf.clone()),
+        drain_pipe(child.stderr.take(), err_buf.clone()),
+    ];
+    let aborts: Vec<_> = readers.iter().map(|r| r.abort_handle()).collect();
+    // `child` moves in, so a timeout drops it — and `kill_on_drop` stops it.
+    let wait = async move {
+        let status = child.wait().await;
+        for r in readers {
+            let _ = r.await;
+        }
+        status
+    };
     let result = tokio::time::timeout(std::time::Duration::from_millis(timeout), wait).await;
-
-    let (code, stdout, stderr, timed_out) = match result {
-        Ok(Ok(out)) => (
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            String::from_utf8_lossy(&out.stderr).to_string(),
-            false,
-        ),
-        Ok(Err(e)) => return Outcome::err(format!("running command: {e}")),
-        Err(_) => (-1, String::new(), String::new(), true),
+    let taken = |b: &Arc<std::sync::Mutex<Vec<u8>>>| {
+        let bytes = b.lock().map(|g| g.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).to_string()
     };
 
-    if timed_out {
-        return Outcome::err(format!("command timed out after {timeout}ms: {cmd}"));
-    }
+    let code = match result {
+        Ok(Ok(status)) => status.code().unwrap_or(-1),
+        Ok(Err(e)) => return Outcome::err(format!("running command: {e}")),
+        Err(_) => {
+            aborts.iter().for_each(|a| a.abort());
+            let seen = format!("{}{}", taken(&out_buf), taken(&err_buf));
+            let mut msg = format!("command timed out after {timeout}ms and was stopped: {cmd}");
+            if !seen.trim().is_empty() {
+                let _ = write!(
+                    msg,
+                    "\n--- output before the timeout (tail) ---\n{}",
+                    tail_lines(seen.trim_end(), 30, ctx.cfg.max_tool_output_bytes / 2)
+                );
+            }
+            msg.push_str(
+                "\nIf this is a long job (a download, build or server), start it in the \
+                 background with its output going to a log file, then check the log.",
+            );
+            return Outcome::err(msg);
+        }
+    };
+    let (stdout, stderr) = (taken(&out_buf), taken(&err_buf));
+    // With pipefail, a producer cut off by `| head` exits 141 (SIGPIPE): the
+    // pipeline did what it was asked, so that is not a failure.
+    let sigpipe = code == 141;
 
     let cap = ctx.cfg.max_tool_output_bytes;
-    let mut body = format!("$ {cmd}\nexit code: {code}\n");
+    let mut body = if sigpipe {
+        format!("$ {cmd}\nexit code: 141 (SIGPIPE: a later stage such as `head` stopped reading; normal)\n")
+    } else {
+        format!("$ {cmd}\nexit code: {code}\n")
+    };
     if !stdout.trim().is_empty() {
         let _ = write!(
             body,
@@ -2752,7 +2798,7 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         body.push_str("(no output)\n");
     }
     Outcome {
-        ok: code == 0,
+        ok: code == 0 || sigpipe,
         content: body,
         summary: format!("$ {} → exit {code}", first_line(&cmd)),
         view: ToolView::Run {
@@ -2762,6 +2808,44 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
             code,
         },
     }
+}
+
+/// Read a child's pipe to the end into `buf`, chunk by chunk, so what arrived
+/// is available even if the child never finishes.
+fn drain_pipe<R>(
+    pipe: Option<R>,
+    buf: Arc<std::sync::Mutex<Vec<u8>>>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt as _;
+    tokio::spawn(async move {
+        let Some(mut pipe) = pipe else { return };
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = pipe.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            if let Ok(mut b) = buf.lock() {
+                b.extend_from_slice(&chunk[..n]);
+            }
+        }
+    })
+}
+
+/// The last `lines` lines of `text`, capped at `max_bytes`.
+fn tail_lines(text: &str, lines: usize, max_bytes: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    let tail = all[all.len().saturating_sub(lines)..].join("\n");
+    if tail.len() <= max_bytes {
+        return tail;
+    }
+    let mut start = tail.len() - max_bytes;
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    tail[start..].to_string()
 }
 
 pub fn first_line(s: &str) -> String {
@@ -5840,9 +5924,26 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         assert!(!bad.ok);
         assert!(bad.content.contains("exit code: 3"));
 
-        let slow = run_command(&json!({"command": "sleep 5", "timeout_ms": 200}), &c).await;
+        // A timeout keeps what the command printed before it was stopped.
+        let slow = run_command(
+            &json!({"command": "echo downloading 3%; sleep 5", "timeout_ms": 500}),
+            &c,
+        )
+        .await;
         assert!(!slow.ok);
         assert!(slow.content.contains("timed out"), "{}", slow.content);
+        assert!(slow.content.contains("downloading 3%"), "{}", slow.content);
+
+        // A failure early in a pipeline is not hidden by the last stage…
+        let piped = run_command(
+            &json!({"command": "sh -c 'echo ERROR: build failed; exit 1' 2>&1 | tail -1"}),
+            &c,
+        )
+        .await;
+        assert!(!piped.ok, "{}", piped.content);
+        // …but a producer cut short by `head` is not a failure either.
+        let cut = run_command(&json!({"command": "yes | head -n 2"}), &c).await;
+        assert!(cut.ok, "{}", cut.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 
