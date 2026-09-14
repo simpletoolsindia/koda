@@ -5060,7 +5060,7 @@ impl Agent {
             .then(|| {
                 args.get("command")
                     .and_then(|c| c.as_str())
-                    .and_then(tools::destructive_reason)
+                    .and_then(|c| tools::destructive_reason(c, &self.ctx.root))
             })
             .flatten();
         if destructive.is_none()

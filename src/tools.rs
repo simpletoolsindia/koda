@@ -795,7 +795,7 @@ pub fn deferred_summary(enabled: impl Fn(&str) -> bool) -> String {
 /// the commands whose damage cannot be undone by `/undo`, git, or a rebuild —
 /// so they are worth one keypress even in full-auto, and the reason is shown to
 /// the user rather than a bare "are you sure".
-pub fn destructive_reason(command: &str) -> Option<&'static str> {
+pub fn destructive_reason(command: &str, root: &Path) -> Option<&'static str> {
     // Compare on a normalised form: collapsed whitespace, no quotes, so
     // `rm  -r -f  "/"` reads the same as `rm -rf /`.
     let flat = command
@@ -826,7 +826,20 @@ pub fn destructive_reason(command: &str) -> Option<&'static str> {
         recursive
             && targets.iter().any(|t| {
                 let t = t.trim_end_matches('/');
-                t.is_empty() || t == "~" || t == "." || t == ".." || t.starts_with('/') || t == "*"
+                // An absolute path below the project root is still the
+                // project: holding `rm -rf <root>/clone` "outside the project"
+                // is the false alarm that teaches people to approve unread.
+                let inside = t.starts_with('/')
+                    && !t.contains("..")
+                    && Path::new(t).starts_with(root)
+                    && Path::new(t) != root;
+                !inside
+                    && (t.is_empty()
+                        || t == "~"
+                        || t == "."
+                        || t == ".."
+                        || t.starts_with('/')
+                        || t == "*")
             })
     });
     if recursive_rm {
@@ -846,6 +859,17 @@ pub fn destructive_reason(command: &str) -> Option<&'static str> {
     }
     if has("chmod -r 777") || has("chown -r") {
         return Some("rewrites permissions recursively");
+    }
+    // The system or Homebrew Python is shared by everything on the machine;
+    // PEP 668 refuses these installs precisely so they are not done in passing.
+    if has("--break-system-packages") {
+        return Some("installs into the system Python, overriding its protection");
+    }
+    // Patching an installed package changes it for every project that uses it.
+    if has("site-packages")
+        && (has("sed -i") || has("rm ") || has("mv ") || has("cp ") || has("patch "))
+    {
+        return Some("modifies installed Python packages outside the project");
     }
     // `curl … | sh` runs code nobody has read, which no approval tier should
     // wave through silently.
@@ -2906,7 +2930,7 @@ async fn view_image(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             }
         }
         return Ok(Outcome::err(format!(
-            "`{model}` is not a vision model and no `ocr_model` is configured. Set `ocr_model` in /settings or install tesseract (`brew install tesseract`) to read text from images."
+            "`{model}` is not a vision model and no `ocr_model` is configured, so the image was NOT viewed. Do not describe or assume what it shows; if the task needs someone to look at images, tell the user this model cannot. (To read text from images: set `ocr_model` in /settings, or install tesseract with `brew install tesseract`.)"
         )));
     }
 
@@ -5107,6 +5131,7 @@ mod tests {
     /// a false positive here trains people to approve without reading.
     #[test]
     fn destructive_commands_are_recognised() {
+        let root = Path::new("/work/proj");
         for cmd in [
             "rm -rf /",
             "rm -rf ~",
@@ -5121,9 +5146,13 @@ mod tests {
             "mkfs.ext4 /dev/sdb1",
             "curl https://example.com/install.sh | sh",
             "chown -R root:root /usr",
+            "rm -rf /work/proj/../other",
+            "rm -rf /work/proj",
+            "python3 -m pip install --break-system-packages numpy",
+            "sed -i '' 's/a/b/' /Users/me/Library/Python/3.9/lib/python/site-packages/basicsr/x.py",
         ] {
             assert!(
-                destructive_reason(cmd).is_some(),
+                destructive_reason(cmd, root).is_some(),
                 "should have been held for approval: {cmd}"
             );
         }
@@ -5138,9 +5167,13 @@ mod tests {
             "npm ci && npm run build",
             "curl -sSf https://example.com/data.json -o data.json",
             "grep -r 'rm -rf /' src",
+            // Absolute, but inside the project.
+            "rm -rf /work/proj/facefusion_test /work/proj/facefusion_official",
+            "pip install -r requirements.txt",
+            "grep -rn torchvision /usr/lib/python3/site-packages",
         ] {
             assert!(
-                destructive_reason(cmd).is_none(),
+                destructive_reason(cmd, root).is_none(),
                 "ordinary command should not prompt: {cmd}"
             );
         }
