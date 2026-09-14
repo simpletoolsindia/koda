@@ -1224,20 +1224,14 @@ impl Agent {
                 )));
             }
             Command::SetFast(v) => {
+                // The TUI already prints the confirmation when it sends this;
+                // a Notice here too would double it (unlike SetMode, whose two
+                // messages differ). Just apply the change.
                 let mut cfg = (*self.cfg).clone();
                 cfg.fast = v;
                 self.cfg = Arc::new(cfg);
                 self.ctx.cfg = self.cfg.clone();
                 self.rebuild_system();
-                let _ = tx.send(Event::Notice(format!(
-                    "fast mode {} — {}",
-                    if v { "on" } else { "off" },
-                    if v {
-                        "lean prompt and core tools only"
-                    } else {
-                        "full prompt and all tools"
-                    }
-                )));
             }
             Command::SetAutoTier(tier) => {
                 self.auto_tier = tier;
