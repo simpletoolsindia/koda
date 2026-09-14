@@ -3498,6 +3498,40 @@ fn close_engine_once(bin: &Path, session: &str) {
     }
 }
 
+/// Chromium launch flags that cut a browser's resident memory: no GPU process,
+/// no per-origin renderer fan-out (the biggest single saving), a smaller V8
+/// heap, and none of the extension/background machinery an automation browser
+/// never uses. `--disable-blink-features=AutomationControlled` also helps the
+/// page look less automated, which is a small bonus against bot checks. Passed
+/// newline-separated so the comma inside `--disable-features=…` stays intact.
+const LOW_MEMORY_CHROME_ARGS: &str = "--disable-gpu\n\
+     --disable-dev-shm-usage\n\
+     --disable-extensions\n\
+     --disable-background-networking\n\
+     --disable-blink-features=AutomationControlled\n\
+     --disable-features=IsolateOrigins,site-per-process\n\
+     --js-flags=--max-old-space-size=512";
+
+/// Apply koda's memory tuning to an agent-browser invocation: memory-saving
+/// Chrome flags, a page-output cap, and an idle shutdown that reclaims the
+/// browser's RAM once nobody is using it. All are only read when agent-browser
+/// *starts* the daemon; a call that connects to a running one ignores them.
+fn tune_browser_launch(cmd: &mut std::process::Command, cfg: &Config) {
+    // Respect a user who set their own args rather than layering onto them.
+    if cfg.browser_low_memory && std::env::var_os("AGENT_BROWSER_ARGS").is_none() {
+        cmd.env("AGENT_BROWSER_ARGS", LOW_MEMORY_CHROME_ARGS);
+    }
+    // Cap the page dump at the source, so a huge DOM never crosses into koda's
+    // memory or the model's context. koda would truncate it anyway.
+    if std::env::var_os("AGENT_BROWSER_MAX_OUTPUT").is_none() {
+        cmd.env("AGENT_BROWSER_MAX_OUTPUT", cfg.max_tool_output_bytes.to_string());
+    }
+    let idle = cfg.browser_idle_timeout.trim();
+    if !idle.is_empty() {
+        cmd.arg("--idle-timeout").arg(idle);
+    }
+}
+
 /// Canonical socket directory for agent-browser communication.
 pub fn browser_socket_dir() -> &'static Path {
     static SOCK_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -3533,6 +3567,7 @@ fn run_agent_browser_batch(
     bin: &Path,
     session: &str,
     headless: bool,
+    cfg: &Config,
     commands: &[Vec<String>],
 ) -> Result<Vec<Value>> {
     let input_json = serde_json::to_vec(commands)?;
@@ -3542,6 +3577,7 @@ fn run_agent_browser_batch(
         cmd.arg("--headed");
     }
     cmd.env("AGENT_BROWSER_SOCKET_DIR", browser_socket_dir());
+    tune_browser_launch(&mut cmd, cfg);
 
     cmd.args(["batch", "--json", "--bail"]);
     cmd.stdin(std::process::Stdio::piped());
@@ -3837,6 +3873,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             cmd.arg("--headed");
         }
         cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
+        tune_browser_launch(&mut cmd, &ctx.cfg);
         cmd.arg("screenshot");
         if highlight {
             cmd.arg("--annotate");
@@ -3867,6 +3904,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             cmd.arg("--headed");
         }
         cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
+        tune_browser_launch(&mut cmd, &ctx.cfg);
         cmd.args(["screenshot", &target]);
         cmd.arg(p);
         let res = cmd
@@ -3895,6 +3933,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
                 cmd.arg("--headed");
             }
             cmd.env("AGENT_BROWSER_SOCKET_DIR", sock_dir);
+            tune_browser_launch(&mut cmd, &ctx.cfg);
             cmd.args(["download", &target]);
             cmd.arg(p);
             let res = cmd
@@ -4090,6 +4129,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         &agent_browser_bin,
         &session_id,
         ctx.cfg.browser_headless,
+        &ctx.cfg,
         &action_cmds,
     );
 

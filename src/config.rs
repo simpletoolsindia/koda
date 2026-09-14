@@ -339,6 +339,18 @@ pub struct Config {
     /// remote debugging, preserving login sessions, tabs, and page state.
     #[serde(default = "yes")]
     pub browser_session: bool,
+    /// Launch Chromium with memory-saving flags (no GPU process, no site-per-
+    /// process fan-out of renderers, a capped V8 heap). A real browser is the
+    /// heaviest thing koda runs; this trims its footprint noticeably, at a small
+    /// cost to isolation that does not matter for automation. Off restores
+    /// Chromium's defaults. Ignored if you set `AGENT_BROWSER_ARGS` yourself.
+    #[serde(default = "yes")]
+    pub browser_low_memory: bool,
+    /// Shut the browser down after this much inactivity, reclaiming its RAM
+    /// (e.g. "5m", "30s", "1h", or raw milliseconds). The next browse relaunches
+    /// it. Empty keeps it running for the whole session. Default "5m".
+    #[serde(default = "default_browser_idle_timeout")]
+    pub browser_idle_timeout: String,
 
     /// Whether the model accepts images: "auto" | "on" | "off".
     ///
@@ -749,6 +761,8 @@ impl Default for Config {
             browser_interactive: true,
             browser_highlight: true,
             browser_session: true,
+            browser_low_memory: true,
+            browser_idle_timeout: default_browser_idle_timeout(),
             theme: "auto".into(),
             icons: "auto".into(),
             sessions: true,
@@ -800,6 +814,10 @@ impl Default for Config {
 
 fn default_browser_channel() -> String {
     "chrome".into()
+}
+
+fn default_browser_idle_timeout() -> String {
+    "5m".into()
 }
 
 /// serde default for a flag that should be on unless someone says otherwise.
