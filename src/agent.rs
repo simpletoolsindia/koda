@@ -2247,10 +2247,26 @@ impl Agent {
             }
         }
 
-        // Last resort: a bare JSON tool call in a fenced block.
+        // Last resort: a bare JSON tool call in a fenced block, or a Qwen-style
+        // `<function=…>` block the model emitted as prose instead of a native
+        // call. Measured: Qwen3-Coder speaks tool calls in this XML markup even
+        // when native tools are offered, and without this the tool never runs
+        // and the raw markup lands in front of the user as the "answer".
         if calls.is_empty() && !cancelled {
             if let Some(c) = self.parse_fenced_call(&text) {
                 calls.push(c);
+            } else {
+                for (name, args) in parse_function_markup(&text) {
+                    if self.is_callable(&name) {
+                        let id = self.next_call_id();
+                        calls.push(ToolCall::new(id, name, args));
+                    }
+                }
+                // The markup was the model's tool call, not its answer: keep it
+                // out of the transcript and off the screen once salvaged.
+                if !calls.is_empty() {
+                    text = strip_function_markup(&text);
+                }
             }
         }
 
@@ -2284,6 +2300,11 @@ impl Agent {
     fn next_call_id(&mut self) -> String {
         self.call_seq += 1;
         format!("call_{}", self.call_seq)
+    }
+
+    #[cfg(test)]
+    fn parse_function_markup_calls(text: &str) -> Vec<(String, String)> {
+        parse_function_markup(text)
     }
 
     fn parse_text_call(&mut self, payload: &str) -> Option<ToolCall> {
@@ -5360,6 +5381,93 @@ impl Agent {
 /// Extract top-level balanced `{...}` substrings from arbitrary text, ignoring
 /// braces that appear inside JSON strings. Used as a lenient last resort to
 /// find a tool call a model buried in prose without code fences.
+/// Tool calls a model emitted as Qwen/hermes `<function=…>` markup instead of a
+/// native call or a `<tool_call>` JSON block.
+///
+/// Shape (whitespace-tolerant), one or more times:
+///   `<function=NAME>` `<parameter=KEY>VALUE</parameter>` … `</function>`
+/// The models that use it are loose about the close: `</tool_call>`, a bare
+/// `</function>`, or the next `<function=` all end a block, and a parameter may
+/// close with `</parameter>` or run to the next `<parameter=`. Returns
+/// `(name, arguments-json)` pairs; a value that is itself valid JSON is kept as
+/// JSON so numbers and objects survive, otherwise it is a JSON string.
+fn parse_function_markup(text: &str) -> Vec<(String, String)> {
+    const FN: &str = "<function=";
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(FN) {
+        let after = &rest[start + FN.len()..];
+        // `<function=name>` — the name runs to the first `>` (or whitespace).
+        let name_end = after.find(['>', ' ', '\n']).unwrap_or(after.len());
+        let name = after[..name_end].trim().trim_end_matches('>').to_string();
+        // The block body ends at the first close marker or the next function.
+        let body_start = after.find('>').map(|g| g + 1).unwrap_or(name_end);
+        let body_all = &after[body_start..];
+        let block_end = ["</function>", "</tool_call>", "<function="]
+            .iter()
+            .filter_map(|m| body_all.find(m))
+            .min()
+            .unwrap_or(body_all.len());
+        let body = &body_all[..block_end];
+
+        let mut args = serde_json::Map::new();
+        let mut pbody = body;
+        while let Some(ps) = pbody.find("<parameter=") {
+            let pa = &pbody[ps + "<parameter=".len()..];
+            let key_end = pa.find(['>', ' ', '\n']).unwrap_or(pa.len());
+            let key = pa[..key_end].trim().trim_end_matches('>').to_string();
+            let val_start = pa.find('>').map(|g| g + 1).unwrap_or(key_end);
+            let va = &pa[val_start..];
+            let val_end = ["</parameter>", "<parameter=", "</function>", "</tool_call>"]
+                .iter()
+                .filter_map(|m| va.find(m))
+                .min()
+                .unwrap_or(va.len());
+            let val = va[..val_end].trim();
+            if !key.is_empty() {
+                let parsed = serde_json::from_str::<Value>(val)
+                    .ok()
+                    .filter(|v| !v.is_string())
+                    .unwrap_or_else(|| Value::String(val.to_string()));
+                args.insert(key, parsed);
+            }
+            pbody = &va[val_end..];
+        }
+        if !name.is_empty() {
+            out.push((name, Value::Object(args).to_string()));
+        }
+        // Advance past this block.
+        let consumed = start + FN.len() + body_start + block_end;
+        rest = &rest[consumed.min(rest.len())..];
+    }
+    out
+}
+
+/// Remove `<function=…>` markup (and a trailing stray `</tool_call>`/`</function>`)
+/// once its calls have been salvaged, so it never reaches the transcript or the
+/// screen.
+fn strip_function_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("<function=") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        let end = ["</function>", "</tool_call>"]
+            .iter()
+            .filter_map(|m| after.find(m).map(|p| p + m.len()))
+            .min()
+            // No close: drop to the next function block, or the end.
+            .or_else(|| after[1..].find("<function=").map(|p| p + 1))
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    // A dangling close tag with no opener, left by a mismatched block.
+    out.replace("</tool_call>", "").replace("</function>", "")
+        .trim()
+        .to_string()
+}
+
 fn balanced_json_objects(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -6889,6 +6997,39 @@ mod tests {
             !idx.hybrid_search("distinctive alpaca", None, 5).is_empty(),
             "the rebuild after a bad cache did not happen"
         );
+    }
+
+    /// Qwen3-Coder emits tool calls as `<function=…>` markup even under the
+    /// native protocol (measured: ~1 in 3 vague prompts). Without salvage the
+    /// tool never runs and the raw markup lands in front of the user. Parse the
+    /// name and parameters, tolerating the loose `</tool_call>` close it uses.
+    #[test]
+    fn function_markup_tool_calls_are_salvaged() {
+        // The exact shape seen from the model: `<function=` open, `</tool_call>` close.
+        let real = "I'll read the file.\n<function=read_file>\n\
+                    <parameter=path>\nmain.py\n</parameter>\n</tool_call>";
+        let calls = Agent::parse_function_markup_calls(real);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, "read_file");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["path"], "main.py");
+        // Salvaged markup does not reach the screen.
+        assert_eq!(strip_function_markup(real), "I'll read the file.");
+
+        // Numbers survive as JSON; two blocks; proper `</function>` close.
+        let two = "<function=edit_file><parameter=path>a.py</parameter>\
+                   <parameter=start>3</parameter></function>\
+                   <function=run_command><parameter=command>pytest</parameter></function>";
+        let calls = Agent::parse_function_markup_calls(two);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        let a: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(a["path"], "a.py");
+        assert_eq!(a["start"], 3, "numeric value should stay a number");
+        assert_eq!(calls[1].0, "run_command");
+
+        // Ordinary prose with no markup yields nothing and is left untouched.
+        assert!(Agent::parse_function_markup_calls("just a normal answer").is_empty());
+        assert_eq!(strip_function_markup("just a normal answer"), "just a normal answer");
     }
 
     /// Balanced-object extraction ignores braces inside strings and returns
