@@ -1400,12 +1400,21 @@ fn render_tool(
     }
     let timing = timing;
 
+    // A coloured [done]/[failed] badge after the title, oh-my-pi style. None
+    // while the tool is still running — the spinner already says "working".
+    let badge = match ok {
+        Some(true) => Some(("done".to_string(), t.success)),
+        Some(false) => Some(("failed".to_string(), t.error)),
+        None => None,
+    };
+
     // Failures are the same shape for every tool: the header plus the message.
     if *ok == Some(false) {
-        let head = panel::status_line(
+        let head = panel::status_line_badged(
             Some(icon),
             title,
             Some((first_word_target(label), t.text)),
+            badge.clone(),
             &timing,
             t,
             g,
@@ -1441,10 +1450,11 @@ fn render_tool(
             tokens,
         } => {
             let verb = if *created { "Create" } else { title };
-            let head = panel::status_line(
+            let head = panel::status_line_badged(
                 Some(icon),
                 verb,
                 Some((path.clone(), t.info)),
+                badge.clone(),
                 &timing,
                 t,
                 g,
@@ -1490,7 +1500,7 @@ fn render_tool(
             if *code != 0 {
                 meta.push(format!("exit {code}"));
             }
-            let head = panel::status_line(Some(icon), title, None, &meta, t, g);
+            let head = panel::status_line_badged(Some(icon), title, None, badge.clone(), &meta, t, g);
             let mut body = vec![Line::from(vec![
                 Span::styled("$ ".to_string(), t.dim()),
                 Span::styled(command.clone(), t.emphasis(t.text)),
@@ -1551,7 +1561,7 @@ fn render_tool(
                 meta.push("truncated".into());
             }
             let head =
-                panel::status_line(Some(icon), title, Some((path.clone(), t.info)), &meta, t, g);
+                panel::status_line_badged(Some(icon), title, Some((path.clone(), t.info)), badge.clone(), &meta, t, g);
             let gw = (start + src.len()).to_string().len().max(2);
             let (src, skipped) = visible_slice(src, expanded, 14);
             let mut body: Vec<Line<'static>> = src
@@ -1600,10 +1610,11 @@ fn render_tool(
             if *truncated {
                 meta.push("truncated".into());
             }
-            let mut out = vec![Line::from(panel::status_line(
+            let mut out = vec![Line::from(panel::status_line_badged(
                 Some(icon),
                 title,
                 Some((pattern.clone(), t.accent)),
+                badge.clone(),
                 &meta,
                 t,
                 g,
@@ -1666,10 +1677,11 @@ fn render_tool(
             if *truncated {
                 meta.push("truncated".into());
             }
-            let mut out = vec![Line::from(panel::status_line(
+            let mut out = vec![Line::from(panel::status_line_badged(
                 Some(icon),
                 title,
                 Some((pattern.clone(), t.accent)),
+                badge.clone(),
                 &meta,
                 t,
                 g,
@@ -1698,10 +1710,11 @@ fn render_tool(
         V::Listing { path, entries, .. } => {
             let mut meta = vec![plural(entries.len(), "entry", "entries")];
             meta.extend(timing.clone());
-            let mut out = vec![Line::from(panel::status_line(
+            let mut out = vec![Line::from(panel::status_line_badged(
                 Some(icon),
                 title,
                 Some((path.clone(), t.info)),
+                badge.clone(),
                 &meta,
                 t,
                 g,
@@ -2452,6 +2465,48 @@ mod tests {
             72,
         );
         assert!(out.contains("exit 1"), "{out}");
+    }
+
+    /// A settled tool card wears a coloured [done]/[failed] badge (oh-my-pi
+    /// style), and success uses the heavier ✔ glyph.
+    #[test]
+    fn tool_cards_show_a_status_badge() {
+        use crate::tools::ToolView;
+        let done = render_view(
+            "run_command",
+            "$ pytest",
+            ToolView::Run {
+                command: "pytest".into(),
+                stdout: "ok".into(),
+                stderr: String::new(),
+                code: 0,
+            },
+            72,
+        );
+        assert!(done.contains("[done]"), "success card needs a badge: {done}");
+        // The heavier oh-my-pi status glyphs are in force.
+        assert_eq!(crate::theme::UNICODE.ok, "✔");
+        assert_eq!(crate::theme::UNICODE.fail, "✘");
+        assert_eq!(crate::theme::UNICODE.warning, "⚠");
+
+        let mut t = tr();
+        t.tool_start("2".into(), "run_command".into(), "$ false".into(), 0);
+        t.tool_end(
+            "2",
+            false,
+            "$ false".into(),
+            "boom".into(),
+            ToolView::Run {
+                command: "false".into(),
+                stdout: String::new(),
+                stderr: "boom".into(),
+                code: 1,
+            },
+        );
+        t.relayout(72);
+        let failed = flat(&t.window(0, 40));
+        assert!(failed.contains("[failed]"), "failure card needs a badge: {failed}");
+        assert!(failed.contains('✘'), "failure uses the heavy cross: {failed}");
     }
 
     #[test]

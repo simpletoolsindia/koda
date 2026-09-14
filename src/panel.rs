@@ -230,6 +230,21 @@ pub fn status_line(
     t: &Theme,
     g: &Glyphs,
 ) -> Vec<Span<'static>> {
+    status_line_badged(icon, title, desc, None, meta, t, g)
+}
+
+/// `status_line` plus an optional coloured `[badge]` after the title/description
+/// and before the meta — the shape oh-my-pi uses to mark `[done]`/`[failed]`.
+#[allow(clippy::too_many_arguments)]
+pub fn status_line_badged(
+    icon: Option<(String, Color)>,
+    title: &str,
+    desc: Option<(String, Color)>,
+    badge: Option<(String, Color)>,
+    meta: &[String],
+    t: &Theme,
+    g: &Glyphs,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if let Some((ic, c)) = icon {
         spans.push(Span::styled(format!("{ic} "), t.fg(c)));
@@ -243,6 +258,9 @@ pub fn status_line(
     if let Some((d, c)) = desc {
         spans.push(Span::styled(": ".to_string(), t.dim()));
         spans.push(Span::styled(d, t.fg(c)));
+    }
+    if let Some((label, c)) = badge {
+        spans.push(Span::styled(format!("  [{label}]"), t.fg(c)));
     }
     if !meta.is_empty() {
         // Their sep.dot is space-dot-space; without the spaces the meta reads

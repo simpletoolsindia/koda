@@ -559,6 +559,7 @@ pub struct Glyphs {
     pub fine_blocks: bool,
     pub ok: &'static str,
     pub fail: &'static str,
+    pub warning: &'static str,
     pub running: &'static str,
     pub pending: &'static str,
     pub prompt: &'static str,
@@ -595,8 +596,9 @@ pub const UNICODE: Glyphs = Glyphs {
     dot: "▪",
     gauge_empty: '░',
     fine_blocks: true,
-    ok: "✓",
-    fail: "✗",
+    ok: "✔",
+    fail: "✘",
+    warning: "⚠",
     running: "◐",
     pending: "◌",
     prompt: "❯",
@@ -610,7 +612,9 @@ pub const UNICODE: Glyphs = Glyphs {
     tree_end: "└─",
     scroll_track: "│",
     scroll_thumb: "█",
-    spinner: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    // The heavier braille cycle (as used by oh-my-pi's tool status): reads as a
+    // denser, busier "working" than the light ⠋⠙ dots.
+    spinner: &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
     ready: "●",
 };
 
@@ -635,6 +639,7 @@ pub const ASCII: Glyphs = Glyphs {
     fine_blocks: false,
     ok: "+",
     fail: "x",
+    warning: "!",
     running: "*",
     pending: "-",
     prompt: ">",
