@@ -141,8 +141,6 @@ pub enum Command {
     ReloadSkills,
     SetModel(String),
     SetEndpoint(String),
-    #[allow(dead_code)]
-    SetAutoApprove(bool),
     SetAutoTier(crate::config::AutoTier),
     SetMode(Mode),
     SetWebSearch(bool),
@@ -1221,13 +1219,6 @@ impl Agent {
                 self.rebuild_system();
                 let _ = tx.send(Event::Notice(format!(
                     "web search {}",
-                    if v { "on" } else { "off" }
-                )));
-            }
-            Command::SetAutoApprove(v) => {
-                self.auto_approve = v;
-                let _ = tx.send(Event::Notice(format!(
-                    "auto-approve {}",
                     if v { "on" } else { "off" }
                 )));
             }

@@ -102,7 +102,11 @@ impl Watcher {
     }
 
     /// How many specific files are being watched.
-    #[allow(dead_code)]
+    ///
+    /// `cfg(test)` rather than `allow(dead_code)`: it is only ever called from
+    /// the tests, and saying which is true is more useful than silencing the
+    /// warning that says so.
+    #[cfg(test)]
     pub fn watched_count(&self) -> usize {
         self.watched.len()
     }
