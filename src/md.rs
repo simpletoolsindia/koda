@@ -707,12 +707,6 @@ fn normalize_lang(info: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
-pub fn lang_for_path(path: &str) -> String {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    normalize_lang(ext)
-}
-
 fn keywords(lang: &str) -> &'static [&'static str] {
     const RUST: &[&str] = &[
         "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",

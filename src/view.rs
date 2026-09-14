@@ -554,24 +554,12 @@ impl Transcript {
         }
     }
 
-    /// Expand or collapse the most recent tool block. Superseded in the UI by
-    /// the sticky `toggle_tools_pref`, but retained for tests and completeness.
-    #[allow(dead_code)]
-    pub fn toggle_last_tool(&mut self) -> bool {
-        for (i, b) in self.blocks.iter_mut().enumerate().rev() {
-            if let Item::Tool { expanded, .. } = &mut b.item {
-                *expanded = !*expanded;
-                b.cache = None;
-                self.dirty_from = self.dirty_from.min(i);
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Expand or collapse the most recent reasoning block. Superseded in the UI
-    /// by the sticky `toggle_reasoning_pref`, but retained for tests.
-    #[allow(dead_code)]
+    /// Expand or collapse the most recent reasoning block.
+    ///
+    /// `cfg(test)` rather than `allow(dead_code)`: the UI drives this through
+    /// the sticky preference, so the only caller is a test -- and saying which
+    /// is true is more useful than silencing the warning that says so.
+    #[cfg(test)]
     pub fn toggle_last_reasoning(&mut self) -> bool {
         for (i, b) in self.blocks.iter_mut().enumerate().rev() {
             if let Item::Reasoning { expanded, .. } = &mut b.item {

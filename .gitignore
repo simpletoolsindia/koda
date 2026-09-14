@@ -38,3 +38,7 @@ demos/*.gif
 # Scratch and unrelated work that lives beside the repo, not in it.
 /sridhar-portfolio/
 /iframe_page.html
+
+# Python bytecode from the demo recording scripts.
+__pycache__/
+*.pyc
