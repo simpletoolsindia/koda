@@ -101,6 +101,12 @@ run_case thinky -p -y "do something"
 grep -q "only reasoning and no answer" /tmp/koda-err.log; check "reasoning-only explained" $?
 rm -rf "$WS"
 
+echo "== multi-byte text split across network chunks stays intact =="
+run_case utf8split -p -y "tamil news"
+echo "$OUT" | grep -q "தமிழ்நாடு செய்திகள்: முதல்வர் வாழ்த்து 🎯"; check "Tamil and emoji intact" $?
+! printf '%s' "$OUT" | grep -q $'\xef\xbf\xbd'; check "no replacement characters" $?
+rm -rf "$WS"
+
 echo "== the step check survives a model that thinks before answering =="
 # Six steps of work against max_steps = 3: the turn finishes only if the step
 # check extends the budget, and the mock thinks through any small reply budget

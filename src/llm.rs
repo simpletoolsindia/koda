@@ -820,6 +820,8 @@ impl Client {
         let mut finished = false;
         // Per-stream, because the tag state has to survive across frames.
         let mut think = ThinkSplit::default();
+        // Likewise a character: network chunks split wherever they like.
+        let mut utf8 = Utf8Stream::default();
 
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
@@ -840,7 +842,7 @@ impl Client {
                 cap.write_chunk(&bytes);
             }
             crate::trace::append_sse(trace, &bytes);
-            buf.push_str(&String::from_utf8_lossy(&bytes));
+            buf.push_str(&utf8.push(&bytes));
 
             // SSE frames are newline-delimited; process complete lines only.
             while let Some(nl) = buf.find('\n') {
@@ -878,6 +880,52 @@ impl Client {
             let _ = tx.send(StreamEvent::Text(text));
         }
         Ok(())
+    }
+}
+
+/// Decodes a byte stream as UTF-8 when chunk boundaries can fall inside a
+/// character.
+///
+/// Decoding each network chunk on its own turned every character split across
+/// two chunks into U+FFFD. English rarely shows it; Tamil, Hindi, CJK and emoji
+/// are multi-byte throughout, and a real Tamil news answer came back with a
+/// `���` every few words while the tool results it was built from were clean.
+/// An incomplete sequence at the end of a chunk is held for the next one;
+/// genuinely invalid bytes still become U+FFFD.
+#[derive(Default)]
+struct Utf8Stream {
+    tail: Vec<u8>,
+}
+
+impl Utf8Stream {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        self.tail.extend_from_slice(bytes);
+        let mut out = String::new();
+        loop {
+            match std::str::from_utf8(&self.tail) {
+                Ok(s) => {
+                    out.push_str(s);
+                    self.tail.clear();
+                    return out;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    // SAFETY-free: `valid_up_to` marks a prefix that is UTF-8.
+                    out.push_str(std::str::from_utf8(&self.tail[..valid]).unwrap_or_default());
+                    match e.error_len() {
+                        // Cut off mid-character: wait for the rest.
+                        None => {
+                            self.tail.drain(..valid);
+                            return out;
+                        }
+                        Some(bad) => {
+                            out.push('\u{FFFD}');
+                            self.tail.drain(..valid + bad);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1088,6 +1136,26 @@ mod tests {
     /// GLM and most local builds wrap it in `<think>` inside `content`. Those
     /// were treated as ordinary prose -- printed raw, immune to `/think`, and
     /// kept in the transcript to be sent back on every later turn.
+    /// Every split point of a multi-byte reply must decode to the same text.
+    #[test]
+    fn characters_split_across_chunks_survive() {
+        let text = "தமிழ்நாடு செய்திகள் 🎯 — naïve";
+        let bytes = text.as_bytes();
+        for cut in 0..=bytes.len() {
+            let mut d = super::Utf8Stream::default();
+            let mut got = d.push(&bytes[..cut]);
+            got.push_str(&d.push(&bytes[cut..]));
+            assert_eq!(got, text, "split at byte {cut}");
+        }
+        // One byte at a time, the worst a network can do.
+        let mut d = super::Utf8Stream::default();
+        let got: String = bytes.iter().map(|b| d.push(&[*b])).collect();
+        assert_eq!(got, text);
+        // Bytes that are not UTF-8 at all still degrade to U+FFFD, not a stall.
+        let mut d = super::Utf8Stream::default();
+        assert_eq!(d.push(b"a\xFFb"), "a\u{FFFD}b");
+    }
+
     #[test]
     fn inline_think_blocks_are_reasoning_not_prose() {
         let mut sp = ThinkSplit::default();

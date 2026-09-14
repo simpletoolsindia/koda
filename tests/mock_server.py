@@ -237,6 +237,18 @@ def script(step, is_subagent=False, last_user=""):
                                     {"task": "find where the greeting lives"})
         return text_frames("The greeting is in demo.txt line 1, per the subagent.")
 
+    if MODE == "utf8split":
+        # Raw UTF-8 on the wire, as MiniMax sends it (json.dumps would escape
+        # it to ASCII); the write loop cuts each frame inside a character.
+        text = "தமிழ்நாடு செய்திகள்: முதல்வர் வாழ்த்து 🎯"
+        frames = []
+        for i in range(0, len(text), 3):
+            obj = {"object": "chat.completion.chunk", "model": MODEL,
+                   "choices": [{"index": 0, "delta": {"content": text[i:i + 3]}}]}
+            frames.append(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode())
+        frames.append(delta({}, finish="stop"))
+        return frames
+
     if MODE == "stepcheck":
         # A job longer than the `max_steps` the e2e sets, so the turn only
         # finishes if the step check extends the budget.
@@ -432,7 +444,16 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                     return
-                self.write_chunk(frame)
+                cut = next((i for i in range(len(frame) // 2, len(frame))
+                            if 0x80 <= frame[i] <= 0xBF), None)
+                if MODE == "utf8split" and cut:
+                    # Two chunks, the boundary inside a multi-byte character,
+                    # with a pause so the client really reads them separately.
+                    self.write_chunk(frame[:cut])
+                    time.sleep(0.02)
+                    self.write_chunk(frame[cut:])
+                else:
+                    self.write_chunk(frame)
                 if DELAY:
                     time.sleep(DELAY)
             self.write_chunk(b"data: [DONE]\n\n")
