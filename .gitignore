@@ -34,3 +34,7 @@ examples/**/target/
 # committed; the GIFs rendered from them are build output. The copies the docs
 # site publishes live in docs-site/public/demos and are committed there.
 demos/*.gif
+
+# Scratch and unrelated work that lives beside the repo, not in it.
+/sridhar-portfolio/
+/iframe_page.html
