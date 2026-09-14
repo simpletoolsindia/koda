@@ -44,11 +44,6 @@ impl Panel {
         self.rows.push(Line::from(spans));
     }
 
-    #[allow(dead_code)]
-    pub fn blank(&mut self) {
-        self.rows.push(Line::default());
-    }
-
     /// Inner width available to row content.
     pub fn inner(&self) -> usize {
         self.width.saturating_sub(4)
@@ -102,8 +97,6 @@ impl Panel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame {
     /// Still running. Used by the streaming tool frames.
-    #[allow(dead_code)]
-    Pending,
     /// Finished cleanly.
     Done,
     /// Finished badly.
@@ -113,7 +106,6 @@ pub enum Frame {
 impl Frame {
     fn border(self, t: &Theme) -> Color {
         match self {
-            Frame::Pending => t.border,
             // A muted border on success: the result is the content, not the box.
             Frame::Done => t.border,
             Frame::Failed => t.error,
@@ -219,87 +211,6 @@ pub fn railed(
         format!("{}{}", g.corner_bl, g.hline.repeat(3)),
         t.fg(rail_color),
     )));
-    out
-}
-
-/// A rounded block with its label inlaid in the top edge:
-///
-/// ```text
-/// ╭─── Edit: cart.py ──────────────── [+3/-1] ╮
-/// │ body                                      │
-/// ╰───────────────────────────────────────────╯
-/// ```
-///
-/// Tool results now use [`railed`] (rail + fill) instead; `framed` is kept for
-/// the full four-sided box a modal overlay may still want — a modal is the one
-/// deliberate layer break where a box is the right signal.
-#[allow(dead_code)]
-pub fn framed(
-    head: Vec<Span<'static>>,
-    body: Vec<Line<'static>>,
-    tail: Option<Vec<Span<'static>>>,
-    width: usize,
-    state: Frame,
-    t: &Theme,
-    g: &Glyphs,
-) -> Vec<Line<'static>> {
-    let bw = width.max(12);
-    let inner = bw.saturating_sub(4);
-    let bs = t.fg(state.border(t));
-    let mut out = Vec::with_capacity(body.len() + 2);
-
-    // Top edge: ╭─── <head> ───…───╮
-    let head_w: usize = head.iter().map(|s| s.content.width()).sum();
-    let lead = 3usize;
-    let mut top = vec![Span::styled(
-        format!("{}{}", g.corner_tl, g.hline.repeat(lead)),
-        bs,
-    )];
-    if head_w > 0 {
-        top.push(Span::styled(" ".to_string(), bs));
-        top.extend(head);
-        top.push(Span::styled(" ".to_string(), bs));
-    }
-    let used = 1 + lead + if head_w > 0 { head_w + 2 } else { 0 };
-    let fill_w = bw.saturating_sub(used + 1);
-    top.push(Span::styled(g.hline.repeat(fill_w), bs));
-    top.push(Span::styled(g.corner_tr.to_string(), bs));
-    out.push(Line::from(top));
-
-    for l in body {
-        let (content, w) = clip(l.spans, inner);
-        let mut row = vec![Span::styled(format!("{} ", g.vline), bs)];
-        row.extend(content);
-        if inner > w {
-            row.push(Span::raw(" ".repeat(inner - w)));
-        }
-        row.push(Span::styled(format!(" {}", g.vline), bs));
-        out.push(Line::from(row));
-    }
-
-    // Bottom edge, optionally carrying a footer.
-    let mut bot = vec![Span::styled(
-        format!("{}{}", g.corner_bl, g.hline.repeat(lead)),
-        bs,
-    )];
-    let foot_w = match &tail {
-        Some(spans) => {
-            let w: usize = spans.iter().map(|s| s.content.width()).sum();
-            if w > 0 {
-                bot.push(Span::styled(" ".to_string(), bs));
-                bot.extend(spans.clone());
-                bot.push(Span::styled(" ".to_string(), bs));
-                w + 2
-            } else {
-                0
-            }
-        }
-        None => 0,
-    };
-    let rest = bw.saturating_sub(1 + lead + foot_w + 1);
-    bot.push(Span::styled(g.hline.repeat(rest), bs));
-    bot.push(Span::styled(g.corner_br.to_string(), bs));
-    out.push(Line::from(bot));
     out
 }
 

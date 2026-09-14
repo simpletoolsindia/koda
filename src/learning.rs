@@ -294,11 +294,6 @@ impl Learning {
         l
     }
 
-    #[allow(dead_code)] // public API parity with Memory::is_empty
-    pub fn is_empty(&self) -> bool {
-        self.rules.is_empty()
-    }
-
     fn accepted(&self) -> impl Iterator<Item = &Rule> {
         self.rules.iter().filter(|r| r.accepted)
     }
