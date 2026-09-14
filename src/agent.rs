@@ -673,6 +673,39 @@ impl Agent {
         };
         Ok(agent)
     }
+    /// Hold the first turn until the MCP servers have said what they offer.
+    ///
+    /// Servers connect in the background so they cannot delay startup, and the
+    /// tool list is read when the request is built. In the TUI those two facts
+    /// never collide: the user spends seconds typing and the servers are long
+    /// since up. Headless, the request goes out immediately -- and a `koda -p`
+    /// against a configured server was sending a tool list without any of its
+    /// tools in it, so the model reached for `web_search` instead and the
+    /// feature silently did nothing.
+    ///
+    /// Bounded, and only when there is something to wait for. A server that
+    /// never answers costs this once and is then reported as failed, rather
+    /// than holding every turn.
+    async fn await_mcp_tools(&mut self, tx: &mpsc::UnboundedSender<Event>) {
+        if self.depth > 0 || !self.cfg.mcp || self.cfg.mcp_servers.is_empty() {
+            return;
+        }
+        if crate::mcp::settled() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        // Said out loud: an unexplained pause before the first answer is worse
+        // than a slow one that tells you what it is doing.
+        let _ = tx.send(Event::Notice("connecting to MCP servers…".into()));
+        crate::mcp::wait_settled(std::time::Duration::from_secs(15)).await;
+        crate::tel_info!(
+            "mcp",
+            "waited for servers before the first turn",
+            "ms" => started.elapsed().as_millis(),
+            "settled" => crate::mcp::settled()
+        );
+    }
+
     /// Whether an endpoint runs on this machine.
     ///
     /// The warm-up is a real request. Against a local server it costs a little
@@ -1035,7 +1068,10 @@ impl Agent {
     /// Handle one command; drives the whole turn including tool round trips.
     pub async fn handle(&mut self, cmd: Command, tx: &mpsc::UnboundedSender<Event>) {
         match cmd {
-            Command::User(input) => self.turn(input, tx).await,
+            Command::User(input) => {
+                self.await_mcp_tools(tx).await;
+                self.turn(input, tx).await
+            }
             Command::Clear => {
                 self.clear();
                 if let Some(s) = self.session.as_mut() {
