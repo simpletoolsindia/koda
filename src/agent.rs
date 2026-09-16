@@ -337,11 +337,41 @@ pub struct Agent {
     /// call has failed — small models tend to re-issue the exact same invalid
     /// call, so we detect that and escalate the corrective feedback.
     last_failure: Option<(String, u32)>,
+    /// How the last failure failed, ignoring its arguments, with a run length.
+    ///
+    /// `last_failure` catches a model repeating one call verbatim. It misses the
+    /// commoner shape: run 1 here fetched seven different URLs on one host, got
+    /// 404 every time, and spent roughly a third of its step budget doing it --
+    /// the same mistake, respelled each go, so the exact signature never
+    /// matched twice.
+    last_failure_kind: Option<(String, u32)>,
     /// How many times in a row the model has produced neither a tool call nor
     /// usable text this turn. Small models sometimes reply empty (or with only
     /// hidden reasoning); we nudge once with a concrete hint, then stop cleanly
     /// instead of looping. Reset at the start of each top-level turn.
     empty_replies: u32,
+    /// Whether this turn has written source, and whether it has run anything
+    /// that could have checked it.
+    ///
+    /// The system prompt already asks for a build or test before finishing, and
+    /// on small tasks the model does it. On long generation turns it does not:
+    /// across three porting runs here, one wrote 43 files and ran a single
+    /// command (`wc -l`), and every one of them ended by reporting work that
+    /// failed `cargo metadata` in under a second. An instruction that is
+    /// ignored precisely when it matters is not a safeguard, so this is the
+    /// mechanical half: a turn that wrote code and never checked it gets one
+    /// nudge before it is allowed to end. Reset per top-level turn.
+    wrote_source: bool,
+    ran_check: bool,
+    /// Outcome of the most recent verification command, if any ran.
+    ///
+    /// Running a check and ignoring what it said is the same failure as never
+    /// running one, one step further along: run 5 here ended by reporting a
+    /// finished port after four consecutive `cargo clippy` exits of 101. So the
+    /// turn-end gate asks two questions, not one — was anything checked, and
+    /// did the check pass.
+    last_check_ok: Option<bool>,
+    check_nudges: u32,
     /// The task list koda is tracking, as merged from every `todo` call. Held
     /// here rather than only in the transcript so a partial update from the
     /// model can be folded into the real plan before anyone sees it.
@@ -656,7 +686,12 @@ impl Agent {
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
+            last_failure_kind: None,
             empty_replies: 0,
+            wrote_source: false,
+            ran_check: false,
+            last_check_ok: None,
+            check_nudges: 0,
             plan: Vec::new(),
             steps_since_plan: 0,
             reads_this_turn: 0,
@@ -919,7 +954,12 @@ impl Agent {
             undo: Vec::new(),
             turn_seq: 0,
             last_failure: None,
+            last_failure_kind: None,
             empty_replies: 0,
+            wrote_source: false,
+            ran_check: false,
+            last_check_ok: None,
+            check_nudges: 0,
             plan: Vec::new(),
             steps_since_plan: 0,
             reads_this_turn: 0,
@@ -1367,6 +1407,10 @@ impl Agent {
             // Each top-level turn is its own undo group.
             self.turn_seq = self.turn_seq.wrapping_add(1);
             self.empty_replies = 0;
+            self.wrote_source = false;
+            self.ran_check = false;
+            self.last_check_ok = None;
+            self.check_nudges = 0;
             // A finished plan does not carry into the next request; an
             // unfinished one does, because the next message usually continues
             // it ("now do the last one", or a queued follow-up).
@@ -1523,6 +1567,53 @@ impl Agent {
                     break;
                 }
                 self.empty_replies = 0;
+                // The turn changed source and never ran anything that could
+                // have checked it. The prompt already asks for this; on long
+                // generation turns the model skips it anyway, so ask once here
+                // where skipping is not an option. One nudge, not a loop: if it
+                // comes back still unchecked, the turn ends and the reply
+                // stands — the user is told, rather than the agent being held
+                // hostage to a check it genuinely cannot run.
+                // Second gate: a check ran and failed, and the turn is ending
+                // anyway. The prompt already says "if a check still fails, say
+                // so plainly -- never call failing work done", and run 5 ended
+                // reporting a finished port after four clippy runs exited 101.
+                // Asking once costs a step; shipping a red build costs the user
+                // the whole task.
+                if self.depth == 0
+                    && self.last_check_ok == Some(false)
+                    && self.check_nudges < 2
+                    && !summarising
+                {
+                    self.check_nudges += 1;
+                    self.history.push(Message::assistant(result.text.clone()));
+                    self.history.push(Message::user(
+                        "[The last check you ran failed, and you are ending the turn. Fix what                          it reported and run it again. If the failure is environmental (a                          missing toolchain or SDK rather than a fault in the code), check                          whatever part you still can -- a single crate or package that does                          build -- and then state plainly, in your reply, which check failed                          and why. Do not describe the work as done, tested, passing or                          verified while a check is red.]",
+                    ));
+                    crate::tel_info!("agent", "check gate: last check failed");
+                    let _ = tx.send(Event::Notice(
+                        "the last check failed - asking for a fix or a plain report".into(),
+                    ));
+                    continue;
+                }
+                if self.depth == 0
+                    && self.wrote_source
+                    && !self.ran_check
+                    && self.check_nudges == 0
+                    && !summarising
+                {
+                    self.check_nudges += 1;
+                    self.history.push(Message::assistant(result.text.clone()));
+                    self.history.push(Message::user(
+                        "[You changed source in this turn but ran no build, test or linter.                          Run the check for this project now -- a `verify`/`check` tool if one                          is offered, otherwise the build or test command for this language --                          and fix what it reports. Do not edit the check to make it pass, and                          do not remove a feature or a call your own code still needs. If you                          cannot run a check, name the command you would have run and say why                          you could not: do not describe the work as done, tested or verified.]",
+                    ));
+                    crate::tel_info!("agent", "check gate: nothing was built or tested");
+                    let _ = tx.send(Event::Notice(
+                        "source changed but nothing was built or tested - asking for a check"
+                            .into(),
+                    ));
+                    continue;
+                }
                 reply = result.text.clone();
                 self.history.push(Message::assistant(result.text));
                 break;
@@ -1614,6 +1705,28 @@ impl Agent {
                         _ => 1,
                     };
                     self.last_failure = Some((sig, n));
+
+                    // Same kind of failure, different arguments: say so once,
+                    // with the way out, rather than letting it respell the
+                    // mistake until the budget is gone.
+                    let kind = failure_kind(&call.function.name, &content);
+                    let kn = match &self.last_failure_kind {
+                        Some((prev, k)) if *prev == kind => k + 1,
+                        _ => 0,
+                    };
+                    self.last_failure_kind = Some((kind, kn));
+                    if kn == 2 {
+                        content.push_str(if call.function.name == "web_fetch" {
+                            "\n\nNOTE: three fetches in a row have failed the same way. Stop \
+                             guessing at URLs. Use web_search, or fetch a page you know exists \
+                             (the site root, or the crate's docs.rs page) and follow a link \
+                             from it."
+                        } else {
+                            "\n\nNOTE: three calls in a row have failed the same way with \
+                             different arguments. The approach is wrong, not the spelling. \
+                             Change tool or tactic, or say what is blocking you."
+                        });
+                    }
                     if n == 2 {
                         content.push_str(
                             "\n\nNOTE: this is the SAME call that just failed. Do not repeat it. \
@@ -1642,6 +1755,7 @@ impl Agent {
                     }
                 } else {
                     self.last_failure = None;
+                    self.last_failure_kind = None;
                 }
 
                 if self.text_mode {
@@ -1777,7 +1891,29 @@ impl Agent {
                 crate::tel_warn!("agent", "step check gave no verdict", "steps" => steps);
                 "the step check gave no clear answer".to_string()
             }
-            Ok(Verdict::Stop(why)) => return stop(tx, &format!("step check: {why}")),
+            Ok(Verdict::Stop(why)) => {
+                // "Done" from the step check is still a claim about code that
+                // may never have been built. This is the ending a long task
+                // actually takes -- run 6 here stopped at 48 steps on a verdict
+                // of "completed the core Windows port" having run no build at
+                // all, and the tree was missing two modules it declared. So the
+                // same rule as the end-of-turn gate applies here: check first,
+                // then stop. One extra slice, once.
+                if self.wrote_source && !self.ran_check && self.check_nudges == 0 {
+                    self.check_nudges += 1;
+                    self.history.push(Message::user(
+                        "[Before this turn ends: you changed source and ran no build, test or                          linter. Run the check for this project now and fix what it reports.                          If a check cannot run here (a missing toolchain or SDK), check the                          part that can -- a single crate or package -- and say plainly in                          your reply which check could not run and why. Do not describe the                          work as done, tested or verified until you have.]",
+                    ));
+                    crate::tel_info!("agent", "check gate: step check said stop, nothing checked");
+                    let _ = tx.send(Event::Notice(
+                        "step check says done, but nothing was built or tested - checking first"
+                            .into(),
+                    ));
+                    let next = (budget + self.cfg.max_steps.max(1)).min(cap);
+                    return Some(next);
+                }
+                return stop(tx, &format!("step check: {why}"));
+            }
             Err(e) => {
                 crate::tel_warn!("agent", "step check failed", "detail" => format!("{e:#}"));
                 return stop(tx, "max_steps");
@@ -1950,7 +2086,43 @@ impl Agent {
     /// One tool-free model call asking whether this turn has more real work to
     /// do.
     async fn ask_should_continue(&self) -> anyhow::Result<Verdict> {
-        let messages = vec![
+        match self.step_check_call(14, STEP_CHECK_TOKENS, false).await? {
+            // A thinking model that spent the whole reply budget reasoning
+            // returns neither word, and "no verdict" is read as continue -- so
+            // on exactly the long turns this guard exists for, it degrades into
+            // a rubber stamp. Measured here: three large-context checks in a
+            // row, three times no verdict. Asking again, with less to read and
+            // room to answer, costs one cheap call and turns the stamp back
+            // into a decision.
+            Verdict::Unclear => {
+                crate::tel_info!("agent", "step check unclear, asking again tersely");
+                self.step_check_call(6, STEP_CHECK_TOKENS * 3, true).await
+            }
+            v => Ok(v),
+        }
+    }
+
+    /// One step-check request. `terse` trades the explanation for a single word,
+    /// which is what a model that already failed to reach a verdict can manage.
+    async fn step_check_call(
+        &self,
+        digest: usize,
+        max_tokens: u32,
+        terse: bool,
+    ) -> anyhow::Result<Verdict> {
+        let messages = if terse {
+            vec![
+                Message::system(
+                    "Reply with exactly one word and nothing else: CONTINUE or STOP.                      Do not explain. Do not think out loud. CONTINUE if the agent has                      concrete work left that it can do on its own; STOP if the request                      is satisfied, it is repeating itself, or it needs the user.",
+                ),
+                Message::user(format!(
+                    "The user asked for:\n{}\n\nThe agent just did:\n{}\n\nOne word:",
+                    self.recent_requests(2),
+                    self.recent_digest(digest),
+                )),
+            ]
+        } else {
+            vec![
             Message::system(
                 "You are supervising a coding agent that has just used up its step budget. \
                  Decide whether it still has necessary work left, or whether the task is \
@@ -1965,15 +2137,16 @@ impl Agent {
                  Recent activity (oldest first):\n{}\n\n\
                  Does the agent need more steps? Answer CONTINUE or STOP.",
                 self.recent_requests(3),
-                self.recent_digest(14),
+                self.recent_digest(digest),
             )),
-        ];
+            ]
+        };
         let req = ChatRequest {
             model: self.model.clone(),
             messages,
             temperature: 0.0,
             top_p: self.cfg.top_p,
-            max_tokens: STEP_CHECK_TOKENS,
+            max_tokens,
             tools: None,
             reasoning_effort: "off".into(),
         };
@@ -2974,6 +3147,37 @@ impl Agent {
             }
             if let Some(hint) = self.hint_for(&name, &args_for_memory) {
                 outcome.content.push_str(&hint);
+            }
+        }
+        // What this turn has done, for the pre-finish check below. Tracked for
+        // the whole turn (not just successful calls) because a write that
+        // failed still means the tree was touched and is worth a look.
+        if self.depth == 0 {
+            if matches!(name.as_str(), "write_file" | "edit_file") {
+                self.wrote_source = true;
+            }
+            if name == "run_command" {
+                if let Some(cmd) = args_for_memory.get("command").and_then(|c| c.as_str()) {
+                    if is_verification_command(cmd) {
+                        self.ran_check = true;
+                        self.last_check_ok = Some(outcome.ok);
+                    }
+                    // A shell `cp` is a write too. Run 6 here built most of its
+                    // tree with `cp` rather than `write_file`, so a turn that
+                    // copies its way to a result would otherwise look like a
+                    // turn that changed nothing and skip the check entirely.
+                    if writes_source_files(cmd) {
+                        self.wrote_source = true;
+                    }
+                }
+            }
+            // A project-supplied gate (a `[[tools]]` check in koda.toml) counts,
+            // and is usually the sharpest check available. No built-in tool name
+            // contains these, so only a custom tool can match.
+            let n = name.as_str();
+            if n.contains("verif") || n.contains("check") || n.contains("lint") || n.contains("typecheck") {
+                self.ran_check = true;
+                self.last_check_ok = Some(outcome.ok);
             }
         }
         // Command outcomes are the one thing worth learning without being asked:
@@ -5548,6 +5752,70 @@ const COMMIT_TYPES: &[&str] = &[
 ];
 
 /// Whether a line looks like a Conventional Commits subject: `type(scope)!: …`.
+/// Whether a shell command could have verified the code the turn just wrote.
+///
+/// Deliberately a allowlist of build/test/lint entry points rather than "ran
+/// any command": the runs this was written for called `wc -l`, `mkdir` and
+/// `cargo search` and would have sailed through a looser test. Each `&&`/`;`
+/// segment is matched at its start, so `cd x && cargo check` counts while a
+/// passing mention of a tool's name in an argument does not.
+/// A coarse fingerprint of *how* a call failed, ignoring its arguments.
+///
+/// HTTP status first, because that is the case this was written for and the one
+/// with a clean signal; otherwise the opening words of the message, which is
+/// enough to tell "no such file" from "permission denied" without treating two
+/// different paths as two different problems.
+fn failure_kind(tool: &str, content: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    for code in [
+        "400", "401", "403", "404", "405", "408", "410", "429", "500", "502", "503",
+    ] {
+        if lower.contains(&format!("replied {code}")) || lower.contains(&format!("status {code}")) {
+            return format!("{tool}::http{code}");
+        }
+    }
+    let head = lower
+        .split_whitespace()
+        .filter(|w| !w.chars().any(|c| c == '/' || c == '\\'))
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{tool}::{head}")
+}
+
+/// Whether a shell command puts source on disk.
+///
+/// Only the copy/move verbs, and only when a path in the command looks like
+/// source: the point is to catch a turn that assembled a tree with `cp`, not to
+/// treat every `mkdir` as a code change.
+fn writes_source_files(cmd: &str) -> bool {
+    const SRC: &[&str] = &[
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".c", ".h", ".cc", ".cpp",
+        ".swift", ".kt", ".rb", ".cs", ".toml", ".json",
+    ];
+    cmd.split(|c| c == '&' || c == ';' || c == '|' || c == '\n')
+        .map(|seg| seg.trim().trim_start_matches("sudo ").to_ascii_lowercase())
+        .any(|seg| {
+            (seg.starts_with("cp ") || seg.starts_with("mv ") || seg.starts_with("install "))
+                && SRC.iter().any(|e| seg.contains(e))
+        })
+}
+
+fn is_verification_command(cmd: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "cargo check", "cargo build", "cargo test", "cargo clippy", "cargo metadata",
+        "cargo fmt", "cargo run",
+        "npm test", "npm run", "npx tsc", "yarn test", "yarn build", "pnpm test", "pnpm build",
+        "go build", "go test", "go vet",
+        "pytest", "tox", "mypy", "ruff", "flake8",
+        "make", "just", "mvn", "gradle", "dotnet build", "dotnet test",
+        "eslint", "swift build", "xcodebuild", "cmake", "ctest", "bazel",
+    ];
+    cmd.split(|c| c == '&' || c == ';' || c == '|' || c == '\n')
+        .map(|seg| seg.trim().trim_start_matches("sudo ").to_ascii_lowercase())
+        .any(|seg| VERBS.iter().any(|v| seg.starts_with(v)))
+}
+
 fn is_commit_subject(line: &str) -> bool {
     let head = line.split(':').next().unwrap_or("");
     let ty = head
@@ -6301,6 +6569,85 @@ fn absorb(
 
 #[cfg(test)]
 mod tests {
+    /// The seven fetches run 1 made, respelling one mistake. The exact-signature
+    /// guard saw seven different calls; the coarse one sees one problem.
+    #[test]
+    fn one_mistake_respelled_has_one_fingerprint() {
+        let urls = [
+            "https://ort.pyke.io/execution-providers",
+            "https://ort.pyke.io/cargo-features",
+            "https://ort.pyke.io/performance/execution-providers",
+            "https://ort.pyke.io/setup/platform-support",
+            "https://ort.pyke.io/advanced/cuda",
+        ];
+        let kinds: Vec<String> = urls
+            .iter()
+            .map(|u| super::failure_kind("web_fetch", &format!("web fetch failed: {u} replied 404 Not Found")))
+            .collect();
+        assert!(
+            kinds.iter().all(|k| k == &kinds[0]),
+            "different URLs, same failure: {kinds:?}"
+        );
+        assert_eq!(kinds[0], "web_fetch::http404");
+        // A different failure must not fold into it.
+        assert_ne!(
+            super::failure_kind("web_fetch", "web fetch failed: https://x.dev replied 500"),
+            kinds[0]
+        );
+    }
+
+    /// Run 6 built most of its tree with `cp`, not `write_file`. If that does
+    /// not count as writing source, a turn can copy its way to a whole port and
+    /// still look like it changed nothing.
+    #[test]
+    fn copying_source_counts_as_writing_it() {
+        for c in [
+            "cp native/engine/src/lib.rs windows-platform/engine/src/lib.rs",
+            "cp /a/b/native/studio/src/session.rs /a/b/windows-platform/studio/src/session.rs",
+            "mkdir -p out/src && cp src/main.rs out/src/main.rs",
+            "cp native/engine/Cargo.toml windows-platform/engine/Cargo.toml",
+        ] {
+            assert!(super::writes_source_files(c), "should count: {c}");
+        }
+        for c in [
+            "cp report.png /tmp/report.png",
+            "mkdir -p windows-platform/engine/src",
+            "cargo check",
+            "wc -l src/main.rs",
+            "rm -rf target",
+        ] {
+            assert!(!super::writes_source_files(c), "should not count: {c}");
+        }
+    }
+
+    /// The commands these runs actually produced. The three that skipped
+    /// verification ran only the bottom group, so a looser "did it run
+    /// anything?" test would have passed all three.
+    #[test]
+    fn verification_commands_are_told_from_busywork() {
+        for c in [
+            "cargo check",
+            "cargo metadata --manifest-path windows-platform/Cargo.toml",
+            "cd /Users/x/proj && cargo test --workspace",
+            "npm run -s typecheck",
+            "sudo make install",
+            "just check",
+            "pytest -q",
+        ] {
+            assert!(super::is_verification_command(c), "should count: {c}");
+        }
+        for c in [
+            "wc -l native/diffusion/src/pipeline.rs",
+            "mkdir -p windows-platform/engine/src",
+            "cargo search ort",
+            "find . -name Cargo.toml",
+            "cp native/engine/src/lib.rs windows-platform/engine/src/lib.rs",
+            "echo make",
+        ] {
+            assert!(!super::is_verification_command(c), "should not count: {c}");
+        }
+    }
+
     use super::*;
 
     /// A pasted screenshot is a few hundred KB, and every one of them was
