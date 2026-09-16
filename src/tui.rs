@@ -3429,23 +3429,19 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let input_w = area.width.saturating_sub(3).max(4) as usize;
     let (rows, crow, ccol) = app.editor.visual(input_w);
-    // A roomier composer: it grows well before it starts scrolling. When empty
-    // it stays a two-line field so it reads as a real input box, and it can
-    // expand to a tall field as you type.
+    // The composer is sized to what it holds: one row when empty, and a row
+    // more each time the text wraps or a newline is added, up to `max_input`.
+    //
+    // It used to reserve `rows + 1` with a floor of two rows (empty) or three
+    // (mid-typing), which parked one or two permanently blank rows *inside* the
+    // border, directly above the status bar. The border already makes it read as
+    // a field, so the padding bought nothing and cost the transcript the rows.
     let max_input = if m.tiny { 6 } else { 14 };
-    let min_input = if app.editor.is_empty() {
-        if m.tiny {
-            1
-        } else {
-            2
-        }
-    } else {
-        3
-    };
     // Two rows go to the frame, except on a screen too short to spare them.
     let border_h: u16 = if m.tiny { 0 } else { 2 };
-    // The field itself, and the field plus its frame.
-    let text_h = rows.len().saturating_add(1).clamp(min_input, max_input) as u16;
+    // The field itself, and the field plus its frame. `visual` always yields at
+    // least one row, so the field never collapses to nothing.
+    let text_h = rows.len().clamp(1, max_input) as u16;
     let input_h = text_h + border_h;
 
     // A one-row gap between the transcript/hint area and the input keeps the
@@ -4320,6 +4316,14 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     } else {
         t.accent
     };
+    // A plan the model wrote once and never came back to reads as "0/7 done",
+    // which is indistinguishable from "nothing happened" — and once the turn
+    // has ended that is precisely the wrong impression when the work did in
+    // fact land. `complete_current_plan` deliberately will not flip an
+    // untracked plan to done (a checklist that lies is worse than one that is
+    // behind), so the honest move is neither of those: say it was never
+    // tracked, and let the transcript be the record.
+    let untracked = !app.busy && done == 0 && total > 0;
     let mut lines: Vec<Line<'static>> = Vec::new();
     // The bracket is drawn here rather than through `panel::railed`, which owns
     // it for transcript blocks. Deliberate, and the reasons are all about this
@@ -4332,7 +4336,14 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     lines.push(Line::from(vec![
         Span::styled(format!("{}{} ", g.corner_tl, g.hline), t.fg(edge)),
         Span::styled("Plan".to_string(), t.emphasis(t.heading)),
-        Span::styled(format!("  {done}/{total} done"), t.dim()),
+        Span::styled(
+            if untracked {
+                format!("  {total} steps · never tracked")
+            } else {
+                format!("  {done}/{total} done")
+            },
+            t.dim(),
+        ),
         Span::styled(
             format!(
                 "  {}",
