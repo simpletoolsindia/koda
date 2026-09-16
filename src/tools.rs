@@ -827,19 +827,26 @@ pub fn deferred_summary(enabled: impl Fn(&str) -> bool) -> String {
 pub fn destructive_reason(command: &str, root: &Path) -> Option<&'static str> {
     // Compare on a normalised form: collapsed whitespace, no quotes, so
     // `rm  -r -f  "/"` reads the same as `rm -rf /`.
-    let flat = command
+    // Two forms: one lowercased for keyword matching, one with its case intact
+    // for path comparison. Folding case before comparing a path to the project
+    // root silently breaks that comparison on any root with a capital in it --
+    // which on macOS is every root, since they all sit under `/Users`. That
+    // turned the "is it inside the project?" test below into a constant false
+    // alarm, holding routine `rm -rf <root>/target` for approval and teaching
+    // exactly the approve-unread habit the guard is meant to avoid.
+    let cased = command
         .replace(['"', '\''], "")
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
+        .join(" ");
+    let flat = cased.to_ascii_lowercase();
     let has = |needle: &str| flat.contains(needle);
 
     // A recursive force-delete of something that is not a path inside the
     // project: `rm -rf build` is routine, `rm -rf /` or `rm -rf ~` is not.
-    let recursive_rm = flat.split(" && ").chain(flat.split(" ; ")).any(|seg| {
+    let recursive_rm = cased.split(" && ").chain(cased.split(" ; ")).any(|seg| {
         let seg = seg.trim_start_matches("sudo ").trim();
-        if !seg.starts_with("rm ") {
+        if !seg.to_ascii_lowercase().starts_with("rm ") {
             return false;
         }
         let flags: String = seg
@@ -5286,6 +5293,37 @@ mod tests {
             assert!(
                 destructive_reason(cmd, root).is_none(),
                 "ordinary command should not prompt: {cmd}"
+            );
+        }
+    }
+
+    /// The same judgements against a root with capitals in it, which on macOS
+    /// is every root. The case-folding used for keyword matching used to be
+    /// applied to the paths too, so `starts_with(root)` never matched and every
+    /// in-project `rm -rf` was held as "outside the project" -- observed here
+    /// stalling a full-auto run for eight minutes on `rm -rf <root>/target`.
+    #[test]
+    fn project_paths_are_recognised_under_a_root_with_capitals() {
+        let root = Path::new("/Users/sridhar/Documents/facefusion-studio");
+        for cmd in [
+            "rm -rf /Users/sridhar/Documents/facefusion-studio/windows-platform/target",
+            "rm -rf /Users/sridhar/Documents/facefusion-studio/windows-platform/Cargo.lock              /Users/sridhar/Documents/facefusion-studio/windows-platform/target && cargo check",
+            "rm -rf /Users/sridhar/Documents/facefusion-studio/native/target",
+        ] {
+            assert!(
+                destructive_reason(cmd, root).is_none(),
+                "inside the project, should not prompt: {cmd}"
+            );
+        }
+        for cmd in [
+            "rm -rf /Users/sridhar/Documents/other-project",
+            "rm -rf /Users/sridhar",
+            "rm -rf /Users/sridhar/Documents/facefusion-studio",
+            "rm -rf /Users/sridhar/Documents/facefusion-studio/../elsewhere",
+        ] {
+            assert!(
+                destructive_reason(cmd, root).is_some(),
+                "outside the project (or the root itself), should prompt: {cmd}"
             );
         }
     }
