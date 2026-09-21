@@ -443,6 +443,10 @@ pub struct Config {
     /// sweep; koda's own writes are re-indexed either way. The sweep backs off
     /// on its own when a tree is big enough that the walk is slow.
     pub codegraph_refresh_ms: u64,
+    /// Tokens of task-ranked code map to attach to a request that names a
+    /// file or symbol of this project (`repomap`). 0 turns it off; the model
+    /// can still ask for one with `codegraph query=context`.
+    pub graph_context_tokens: usize,
 
     /// Prefill the model's prompt cache in the background at startup.
     ///
@@ -803,6 +807,7 @@ impl Default for Config {
             codegraph: true,
             codegraph_search: true,
             codegraph_refresh_ms: 15_000,
+            graph_context_tokens: 600,
             web_search: false,
             search_backend: default_backend(),
             searx_url: String::new(),
@@ -1339,6 +1344,10 @@ codegraph_search = true
 # this many ms. 0 turns the sweep off. Only changed files are read, and the
 # interval backs off automatically on a large tree.
 codegraph_refresh_ms = 15000
+# When a request names a file or symbol of this project, attach a short map of
+# the code that matters for it: signatures ranked from the code graph for that
+# request, cut to this many tokens. 0 turns it off.
+graph_context_tokens = 600
 
 # Consult a language server (rust-analyzer, pyright, gopls, ...) for questions
 # the regex code graph cannot answer precisely: real definitions, real

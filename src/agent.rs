@@ -325,6 +325,10 @@ pub struct Agent {
     skills: Vec<crate::skills::Skill>,
     /// Shared with the background scanner; None until the first scan finishes.
     graph: Arc<std::sync::RwLock<Option<crate::graph::Graph>>>,
+    /// The last code map attached to a request, keyed by the graph generation,
+    /// the request and the budget: resending a request, or a retry, does not
+    /// rank the graph again.
+    map_cache: std::sync::Mutex<Option<(MapKey, String)>>,
     memory: crate::memory::Memory,
     learning: crate::learning::Learning,
     /// Whether the project-idiom miner (Phase 3) has run this session. It reads
@@ -687,6 +691,7 @@ impl Agent {
             mode,
             skills,
             graph: graph.clone(),
+            map_cache: std::sync::Mutex::new(None),
             memory,
             learning,
             mined_idioms: false,
@@ -958,6 +963,7 @@ impl Agent {
             depth: self.depth + 1,
             skills: self.skills.clone(),
             graph: self.graph.clone(),
+            map_cache: std::sync::Mutex::new(None),
             memory: self.memory.clone(),
             learning: crate::learning::Learning::default(),
             mined_idioms: true,
@@ -3589,6 +3595,42 @@ impl Agent {
         }
     }
 
+    /// A short, task-ranked map of the code a request is about — attached only
+    /// when the request names a file or symbol of this project, so a question
+    /// about the weather does not pay for one. Off in fast mode, whose whole
+    /// point is a lean prompt, and when `graph_context_tokens = 0`.
+    fn code_map_for(&self, input: &str) -> Option<String> {
+        let budget = self.cfg.graph_context_tokens;
+        if budget == 0 || self.cfg.fast || !self.cfg.codegraph {
+            return None;
+        }
+        let guard = self.graph.read().ok()?;
+        let g = guard.as_ref()?;
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            input.hash(&mut h);
+            (g.generation, h.finish(), budget)
+        };
+        if let Some((k, map)) = self.map_cache.lock().ok()?.as_ref() {
+            if *k == key {
+                return Some(map.clone());
+            }
+        }
+        let a = crate::repomap::anchors(g, input);
+        if !a.strong() {
+            return None;
+        }
+        let map = crate::repomap::render(&self.ctx.root, g, &a, budget);
+        if map.is_empty() {
+            return None;
+        }
+        if let Ok(mut c) = self.map_cache.lock() {
+            *c = Some((key, map.clone()));
+        }
+        Some(map)
+    }
+
     async fn user_message(&self, input: &str, tx: &mpsc::UnboundedSender<Event>) -> Message {
         let mut images = Vec::new();
         // The raw `@token`s whose images made it onto the wire, so the text can
@@ -3742,6 +3784,9 @@ impl Agent {
         // read, and after the vision relay had been paid for) whenever a
         // document was mentioned alongside it.
         doc_blocks.append(&mut ocr_blocks);
+        if let Some(map) = self.code_map_for(input) {
+            doc_blocks.push(map);
+        }
         Self::compose_user_message(input, &attached, &doc_blocks, images)
     }
 
@@ -4472,6 +4517,29 @@ impl Agent {
                         )
                     } else {
                         (g.file(path), format!("codegraph file {path}"))
+                    }
+                }
+                "context" => {
+                    let text = args
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    let budget = args
+                        .get("budget")
+                        .and_then(|b| b.as_u64())
+                        .map(|b| b.clamp(64, 8192) as usize)
+                        .unwrap_or(1024);
+                    let a = crate::repomap::anchors(g, text);
+                    let map = crate::repomap::render(&self.ctx.root, g, &a, budget);
+                    if map.is_empty() {
+                        (
+                            "Nothing in the code graph ranks for that. Try query=search."
+                                .to_string(),
+                            "codegraph context: nothing".to_string(),
+                        )
+                    } else {
+                        (map, format!("codegraph context ({budget} tokens)"))
                     }
                 }
                 _ => (
@@ -6703,6 +6771,9 @@ pub fn label_for(name: &str, args: &Value) -> String {
         },
     }
 }
+
+/// (graph generation, request hash, budget): what a cached code map is for.
+type MapKey = (u64, u64, usize);
 
 /// Fold one stream event into the accumulator. A subagent runs `quiet`: its
 /// tokens build its own context but never reach the user's transcript.

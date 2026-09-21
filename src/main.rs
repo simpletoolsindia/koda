@@ -23,6 +23,7 @@ mod md;
 mod memory;
 mod panel;
 mod prompt;
+mod repomap;
 mod session;
 mod settings;
 mod setup;
