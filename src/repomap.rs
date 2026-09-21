@@ -88,6 +88,13 @@ pub fn anchors(g: &Graph, request: &str) -> Anchors {
             .trim_start_matches('@')
             .trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '/' | '.' | ':')))
             .trim_end_matches(['.', ':']);
+        // Graph keys use `/`; a Windows user may write `src\cart.py`.
+        let tok = if cfg!(windows) {
+            tok.replace('\\', "/")
+        } else {
+            tok.to_string()
+        };
+        let tok = tok.as_str();
         if tok.is_empty() {
             continue;
         }

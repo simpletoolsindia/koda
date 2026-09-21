@@ -1054,12 +1054,7 @@ pub fn scan(root: &Path) -> Graph {
             continue;
         }
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .unwrap_or(entry.path())
-            .to_string_lossy()
-            .to_string();
+        let rel = crate::tools::slash_path(entry.path().strip_prefix(root).unwrap_or(entry.path()));
         if let Some(stamp) = stamp {
             stamps.push((rel.clone(), stamp));
         }
@@ -1196,11 +1191,7 @@ impl Graph {
     /// the old entries and folds the freshly parsed ones back in. A deleted or
     /// unreadable file is just removed. Language must be recognised.
     pub fn update_file(&mut self, root: &Path, abs_path: &Path) {
-        let rel = abs_path
-            .strip_prefix(root)
-            .unwrap_or(abs_path)
-            .to_string_lossy()
-            .to_string();
+        let rel = crate::tools::slash_path(abs_path.strip_prefix(root).unwrap_or(abs_path));
         self.remove_file(&rel);
         let Some(lang) = language_of(abs_path) else {
             return;
@@ -1279,11 +1270,7 @@ impl Graph {
             if language_of(path).is_none() {
                 continue;
             }
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
+            let rel = crate::tools::slash_path(path.strip_prefix(root).unwrap_or(path));
             seen.insert(rel.clone());
             let Some(stamp) = entry.metadata().ok().as_ref().map(Stamp::of) else {
                 continue;
@@ -1458,6 +1445,12 @@ impl Graph {
 
     /// What a file defines, imports, and who depends on it.
     pub fn file(&self, path: &str) -> String {
+        // Keys use `/`; on Windows the model may well write `src\lib.rs`.
+        let path = if cfg!(windows) {
+            path.replace('\\', "/")
+        } else {
+            path.to_string()
+        };
         let path = path.trim().trim_start_matches("./");
         let key = self
             .by_file

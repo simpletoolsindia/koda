@@ -1361,10 +1361,20 @@ fn real_path(p: &Path) -> PathBuf {
 }
 
 pub fn rel(ctx: &ToolCtx, p: &Path) -> String {
-    p.strip_prefix(&ctx.root)
-        .unwrap_or(p)
-        .to_string_lossy()
-        .to_string()
+    slash_path(p.strip_prefix(&ctx.root).unwrap_or(p))
+}
+
+/// A path as koda shows it and keys it: with forward slashes. On Windows
+/// `to_string_lossy` gives `src\lib.rs`, which matches nothing keyed on
+/// `src/lib.rs`, whether the model wrote it or the code graph did. Elsewhere a
+/// backslash is an ordinary file-name character and is left alone.
+pub fn slash_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
 }
 
 fn arg_str(args: &Value, key: &str) -> Result<String> {
@@ -2172,12 +2182,7 @@ fn list_dir(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-        let name = e
-            .path()
-            .strip_prefix(&full)
-            .unwrap_or(e.path())
-            .to_string_lossy()
-            .to_string();
+        let name = slash_path(e.path().strip_prefix(&full).unwrap_or(e.path()));
         entries.push((is_dir, name, size));
         if entries.len() >= 2000 {
             break;
@@ -2435,7 +2440,8 @@ fn search_ripgrep(rg: &Path, pattern: &str, args: &Value, ctx: &ToolCtx) -> Resu
         };
         // rg prints paths relative to cwd (the workspace root); strip a leading
         // "./" so they read as repo-relative like the built-in output.
-        let rel_path = path.strip_prefix("./").unwrap_or(path).to_string();
+        let rel_path = slash_path(Path::new(path));
+        let rel_path = rel_path.strip_prefix("./").unwrap_or(&rel_path).to_string();
         let shown: String = text.trim_end().chars().take(240).collect();
         if groups.last().map(|g| g.file != rel_path).unwrap_or(true) {
             groups.push(MatchGroup {
@@ -3808,10 +3814,29 @@ fn forget_browser_session(session: &str) {
 /// that has been *reused* by some unrelated program would otherwise make koda
 /// leave an orphaned engine alone for ever, so the name is checked too.
 fn pid_is_live_koda(pid: u32) -> bool {
-    let Ok(out) = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
+    // Windows has no `ps`; tasklist answers `"koda.exe","1234",...` for a
+    // live pid and an INFO line for a gone one. Asked `ps -o comm=` there,
+    // every koda read as dead and the reaper closed live sessions' browsers.
+    #[cfg(windows)]
+    let probe = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
-    else {
+        .map(|mut out| {
+            let first = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix('"'))
+                .and_then(|l| l.split('"').next())
+                .unwrap_or_default()
+                .to_string();
+            out.stdout = first.into_bytes();
+            out
+        });
+    #[cfg(not(windows))]
+    let probe = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output();
+    let Ok(out) = probe else {
         // No `ps` to ask: assume it is alive rather than reap something that
         // might be in use. A leaked engine is a bad day; killing a running
         // session's browser is a bad bug.
@@ -4399,7 +4424,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             let err = String::from_utf8_lossy(&res.stderr);
             return Ok(Outcome::err(format!("screenshot failed: {}", err.trim())));
         }
-        let rel = p.strip_prefix(&ctx.root).unwrap_or(p).to_string_lossy();
+        let rel = slash_path(p.strip_prefix(&ctx.root).unwrap_or(p));
         return Ok(Outcome::ok(
             format!("saved screenshot to {rel}"),
             format!("screenshot → {rel}"),
@@ -4427,7 +4452,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
                 err.trim()
             )));
         }
-        let rel = p.strip_prefix(&ctx.root).unwrap_or(p).to_string_lossy();
+        let rel = slash_path(p.strip_prefix(&ctx.root).unwrap_or(p));
         return Ok(Outcome::ok(
             format!("saved element screenshot to {rel}"),
             format!("element screenshot → {rel}"),
@@ -4469,7 +4494,7 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             ));
         }
         let bytes = p.metadata().map(|m| m.len()).unwrap_or(0);
-        let rel = p.strip_prefix(&ctx.root).unwrap_or(p).to_string_lossy();
+        let rel = slash_path(p.strip_prefix(&ctx.root).unwrap_or(p));
         return Ok(Outcome::ok(
             format!("downloaded {bytes} bytes to {rel}"),
             format!("downloaded → {rel} ({bytes} bytes)"),
@@ -6864,15 +6889,21 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         assert!(bad.content.contains("exit code: 3"));
 
         // A timeout keeps what the command printed before it was stopped.
-        let slow = run_command(
-            &json!({"command": "echo downloading 3%; sleep 5", "timeout_ms": 500}),
-            &c,
-        )
-        .await;
+        // cmd.exe, Windows' default shell, has neither `;` nor `sleep`.
+        let sleeper = if cfg!(windows) {
+            "echo downloading 3%&& ping -n 6 127.0.0.1 > nul"
+        } else {
+            "echo downloading 3%; sleep 5"
+        };
+        let slow = run_command(&json!({"command": sleeper, "timeout_ms": 500}), &c).await;
         assert!(!slow.ok);
         assert!(slow.content.contains("timed out"), "{}", slow.content);
         assert!(slow.content.contains("downloading 3%"), "{}", slow.content);
 
+        if cfg!(windows) {
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
         // A failure early in a pipeline is not hidden by the last stage…
         let piped = run_command(
             &json!({"command": "sh -c 'echo ERROR: build failed; exit 1' 2>&1 | tail -1"}),

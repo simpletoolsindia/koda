@@ -489,9 +489,13 @@ mod tests {
         assert_eq!(placeholder.steps, vec!["npx --no-install tsc --noEmit"]);
 
         let py = plan("py", &[("cart.py", ""), ("test_cart.py", "")], &["cart.py"]).unwrap();
+        let python = python_program(&all);
         assert_eq!(
             py.steps,
-            vec!["python3 -m py_compile 'cart.py'", "python3 -m pytest -q"]
+            vec![
+                format!("{python} -m py_compile 'cart.py'"),
+                format!("{python} -m pytest -q")
+            ]
         );
     }
 
