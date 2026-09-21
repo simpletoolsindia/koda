@@ -76,7 +76,7 @@ pub struct Index {
     avgdl: f32,
     /// Files indexed, so a stale index can be told apart from an empty one.
     pub files: usize,
-    /// path -> (mtime seconds, size) as of indexing, the same identity
+    /// path -> (mtime nanoseconds, size) as of indexing, the same identity
     /// `graph::Stamp` keeps. What lets a cache validate itself and `refresh`
     /// find outside edits without reading anything.
     stamps: BTreeMap<String, (u64, u64)>,
@@ -1273,7 +1273,12 @@ pub fn cache_dir(root: &Path) -> std::path::PathBuf {
 /// change. A cache written by a different version is deleted, not migrated:
 /// migration code for a cache is a liability with no upside, and a rebuild is
 /// under a second.
-const CACHE_VERSION: u32 = 1;
+///
+/// 2: file stamps went from whole seconds to nanoseconds, so a same-size edit
+/// inside one second is no longer mistaken for no edit. A version-1 cache's
+/// stamps would never match again anyway; the bump makes it rebuild cleanly
+/// instead of re-reading every file on the first refresh.
+const CACHE_VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"KODAIDX\x00";
 
 /// What the manifest has to agree with before the binary half is even opened.
@@ -1295,15 +1300,10 @@ struct Meta {
     embed_dim: usize,
 }
 
-/// Take a file's (mtime, size) identity.
+/// Take a file's (mtime in nanoseconds, size) identity — the same one
+/// `graph::Stamp` uses.
 fn stamp_of(meta: &std::fs::Metadata) -> (u64, u64) {
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    (mtime, meta.len())
+    (crate::graph::mtime_ns(meta), meta.len())
 }
 
 /// A little-endian writer. Hand-rolled rather than reached for from a crate:

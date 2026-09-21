@@ -40,9 +40,13 @@ pub struct Graph {
     pub imports: BTreeMap<String, Vec<String>>,
     /// language -> file count
     pub languages: BTreeMap<String, usize>,
-    /// file -> (mtime seconds, size) as of indexing. What makes `refresh` able
-    /// to tell, without reading anything, which files actually changed.
+    /// file -> (mtime, size) as of indexing. What makes `refresh` able to
+    /// tell, without reading anything, which files actually changed.
     pub stamps: BTreeMap<String, Stamp>,
+    /// Every identifier each parsed file mentions, and the reverse. Kept so an
+    /// edit can re-join exactly the symbols it touched — including a new
+    /// definition that files which did not change already mention.
+    mentions: Mentions,
     pub files: usize,
     pub scanned_ms: u128,
     pub truncated: bool,
@@ -50,27 +54,129 @@ pub struct Graph {
 
 /// A file's identity for change detection: modification time and size. Cheap to
 /// take (one stat, which the directory walk already does) and enough to catch
-/// any edit that matters. Two writes within the same second that keep the size
-/// identical are the known blind spot; koda's own writes are re-indexed
-/// directly, so this only has to catch outside edits.
+/// any edit that matters.
+///
+/// The time is kept to the nanosecond. It used to be whole seconds, and two
+/// writes of the same size inside one second — a formatter run straight after
+/// a save, a quick fix-up — looked unchanged, so the graph silently kept the
+/// first version. On a filesystem that only records seconds the blind spot is
+/// the filesystem's; on APFS, ext4 and NTFS it is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stamp {
+    /// Nanoseconds since the Unix epoch.
     pub mtime: u64,
     pub len: u64,
 }
 
 impl Stamp {
     fn of(meta: &std::fs::Metadata) -> Self {
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         Self {
-            mtime,
+            mtime: mtime_ns(meta),
             len: meta.len(),
         }
+    }
+}
+
+/// A file's modification time in nanoseconds since the epoch, or 0 when the
+/// platform will not say. Shared with the search index, which needs the same
+/// identity for the same reason.
+pub fn mtime_ns(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Who mentions which identifier, file by file and the other way round.
+///
+/// Interned to small integers: a large project mentions on the order of a
+/// million (identifier, file) pairs, and as strings that would be a hundred
+/// megabytes to answer a question the graph only asks when something changes.
+#[derive(Debug, Default, Clone)]
+struct Mentions {
+    file_ix: HashMap<String, u32>,
+    file_names: Vec<String>,
+    id_ix: HashMap<String, u32>,
+    id_names: Vec<String>,
+    /// file -> the identifiers it mentions, sorted.
+    by_file: HashMap<u32, Vec<u32>>,
+    /// identifier -> the files that mention it, sorted.
+    by_id: HashMap<u32, Vec<u32>>,
+}
+
+impl Mentions {
+    fn intern(ix: &mut HashMap<String, u32>, names: &mut Vec<String>, s: &str) -> u32 {
+        if let Some(&i) = ix.get(s) {
+            return i;
+        }
+        let i = names.len() as u32;
+        names.push(s.to_string());
+        ix.insert(s.to_string(), i);
+        i
+    }
+
+    /// Whether this file has been parsed and is part of the graph.
+    fn has(&self, rel: &str) -> bool {
+        self.file_ix
+            .get(rel)
+            .is_some_and(|f| self.by_file.contains_key(f))
+    }
+
+    #[cfg(test)]
+    fn parsed(&self) -> usize {
+        self.by_file.len()
+    }
+
+    /// Forget one file's mentions, returning what it used to mention.
+    fn remove(&mut self, rel: &str) -> Vec<String> {
+        let Some(&f) = self.file_ix.get(rel) else {
+            return Vec::new();
+        };
+        let Some(ids) = self.by_file.remove(&f) else {
+            return Vec::new();
+        };
+        for id in &ids {
+            if let Some(files) = self.by_id.get_mut(id) {
+                if let Ok(at) = files.binary_search(&f) {
+                    files.remove(at);
+                }
+                if files.is_empty() {
+                    self.by_id.remove(id);
+                }
+            }
+        }
+        ids.iter()
+            .map(|&i| self.id_names[i as usize].clone())
+            .collect()
+    }
+
+    /// Record one file's mentions, replacing whatever it had.
+    fn set(&mut self, rel: &str, ids: &BTreeSet<String>) {
+        self.remove(rel);
+        let f = Self::intern(&mut self.file_ix, &mut self.file_names, rel);
+        let mut mine: Vec<u32> = ids
+            .iter()
+            .map(|id| Self::intern(&mut self.id_ix, &mut self.id_names, id))
+            .collect();
+        mine.sort_unstable();
+        for &id in &mine {
+            let files = self.by_id.entry(id).or_default();
+            if let Err(at) = files.binary_search(&f) {
+                files.insert(at, f);
+            }
+        }
+        self.by_file.insert(f, mine);
+    }
+
+    /// The files that mention `name`.
+    fn files_mentioning(&self, name: &str) -> impl Iterator<Item = &str> {
+        self.id_ix
+            .get(name)
+            .and_then(|id| self.by_id.get(id))
+            .into_iter()
+            .flatten()
+            .map(|&f| self.file_names[f as usize].as_str())
     }
 }
 
@@ -920,22 +1026,17 @@ pub fn scan(root: &Path) -> Graph {
         mentions.push((fp.rel, fp.ids));
     }
 
-    // Second pass: join mentions against known definitions.
-    let known: HashMap<&str, ()> = g.defs.keys().map(|k| (k.as_str(), ())).collect();
+    // Second pass: join mentions against known definitions — the same join
+    // an incremental update runs for the symbols it touches, so the two cannot
+    // drift apart.
     for (file, ids) in &mentions {
-        for id in ids {
-            if known.contains_key(id.as_str()) {
-                let defined_here = g
-                    .defs
-                    .get(id)
-                    .map(|ds| ds.iter().any(|d| &d.file == file))
-                    .unwrap_or(false);
-                if !defined_here {
-                    g.refs.entry(id.clone()).or_default().insert(file.clone());
-                }
-            }
-        }
+        g.mentions.set(file, ids);
     }
+    for defs in g.defs.values_mut() {
+        sort_defs(defs);
+    }
+    let names: Vec<String> = g.defs.keys().cloned().collect();
+    g.relink(names);
 
     g.scanned_ms = started.elapsed().as_millis();
     tel_info!(
@@ -948,13 +1049,44 @@ pub fn scan(root: &Path) -> Graph {
     g
 }
 
+/// One canonical order for a name's definitions, whatever order files were
+/// parsed or re-parsed in.
+fn sort_defs(defs: &mut [Def]) {
+    defs.sort_by(|a, b| (a.file.as_str(), a.line).cmp(&(b.file.as_str(), b.line)));
+}
+
 impl Graph {
+    /// Recompute who references each of `names`: the files that mention it,
+    /// less the files that define it. Exact for every name given, whatever
+    /// changed — which is what lets an edit touch only its own symbols.
+    fn relink(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            let Some(defs) = self.defs.get(&name) else {
+                self.refs.remove(&name);
+                continue;
+            };
+            let homes: BTreeSet<&str> = defs.iter().map(|d| d.file.as_str()).collect();
+            let users: BTreeSet<String> = self
+                .mentions
+                .files_mentioning(&name)
+                .filter(|f| !homes.contains(f))
+                .map(str::to_string)
+                .collect();
+            if users.is_empty() {
+                self.refs.remove(&name);
+            } else {
+                self.refs.insert(name, users);
+            }
+        }
+    }
+
     /// Drop everything the graph knows about one file — its definitions, its
-    /// by-file and imports entries, and its contribution to the reference sets.
-    /// The inverse of folding a `FileParse` in, used before re-adding an edited
-    /// file so the graph stays consistent without a full rescan.
+    /// by-file and imports entries, its counts, and its mentions — and re-join
+    /// every symbol that touched: what it defined (other files' references to
+    /// those now point nowhere, or at a remaining duplicate) and what it
+    /// mentioned.
     pub fn remove_file(&mut self, rel: &str) {
-        // Definitions defined in this file.
+        let mut touched: Vec<String> = Vec::new();
         if let Some(names) = self.by_file.remove(rel) {
             for name in names {
                 if let Some(defs) = self.defs.get_mut(&name) {
@@ -963,15 +1095,24 @@ impl Graph {
                         self.defs.remove(&name);
                     }
                 }
+                touched.push(name);
             }
         }
         self.imports.remove(rel);
         self.stamps.remove(rel);
-        // This file's mentions of other symbols.
-        for files in self.refs.values_mut() {
-            files.remove(rel);
+        if self.mentions.has(rel) {
+            self.files = self.files.saturating_sub(1);
+            if let Some(lang) = language_of(Path::new(rel)) {
+                if let Some(n) = self.languages.get_mut(lang) {
+                    *n = n.saturating_sub(1);
+                    if *n == 0 {
+                        self.languages.remove(lang);
+                    }
+                }
+            }
         }
-        self.refs.retain(|_, files| !files.is_empty());
+        touched.extend(self.mentions.remove(rel));
+        self.relink(touched);
     }
 
     /// Re-index a single file after it changed on disk (koda's own edit, say),
@@ -984,15 +1125,11 @@ impl Graph {
             .unwrap_or(abs_path)
             .to_string_lossy()
             .to_string();
-        let was_known = self.by_file.contains_key(&rel) || self.stamps.contains_key(&rel);
         self.remove_file(&rel);
         let Some(lang) = language_of(abs_path) else {
             return;
         };
         let Ok(bytes) = std::fs::read(abs_path) else {
-            if was_known {
-                self.files = self.files.saturating_sub(1);
-            }
             return; // deleted/unreadable: leave it removed
         };
         if bytes.len() > MAX_FILE_BYTES || bytes.iter().take(4000).any(|b| *b == 0) {
@@ -1000,22 +1137,27 @@ impl Graph {
         }
         let text = String::from_utf8_lossy(&bytes);
         let fp = parse_file(rel.clone(), lang, &text);
-        if !was_known {
-            self.files += 1;
-            *self.languages.entry(lang.to_string()).or_insert(0) += 1;
-        }
+        self.files += 1;
+        *self.languages.entry(lang.to_string()).or_insert(0) += 1;
         if let Ok(meta) = std::fs::metadata(abs_path) {
             self.stamps.insert(rel.clone(), Stamp::of(&meta));
         }
 
+        let mut touched: Vec<String> = Vec::new();
         for (name, kind, line) in fp.defs {
-            self.defs.entry(name.clone()).or_default().push(Def {
+            let defs = self.defs.entry(name.clone()).or_default();
+            defs.push(Def {
                 name: name.clone(),
                 kind,
                 file: rel.clone(),
                 line,
             });
-            self.by_file.entry(rel.clone()).or_default().push(name);
+            sort_defs(defs);
+            self.by_file
+                .entry(rel.clone())
+                .or_default()
+                .push(name.clone());
+            touched.push(name);
         }
         if !fp.imports.is_empty() {
             self.imports
@@ -1023,19 +1165,11 @@ impl Graph {
                 .or_default()
                 .extend(fp.imports);
         }
-        // Rebuild this file's references against the (updated) definition set.
-        for id in &fp.ids {
-            if self.defs.contains_key(id) {
-                let defined_here = self
-                    .defs
-                    .get(id)
-                    .map(|ds| ds.iter().any(|d| d.file == rel))
-                    .unwrap_or(false);
-                if !defined_here {
-                    self.refs.entry(id.clone()).or_default().insert(rel.clone());
-                }
-            }
-        }
+        self.mentions.set(&rel, &fp.ids);
+        // What it defines now (unchanged files may already mention a new name)
+        // and what it mentions now.
+        touched.extend(fp.ids.iter().cloned());
+        self.relink(touched);
     }
 
     /// Bring the graph back in line with the working tree.
@@ -1099,7 +1233,6 @@ impl Graph {
             .collect();
         for rel in gone {
             self.remove_file(&rel);
-            self.files = self.files.saturating_sub(1);
             out.removed += 1;
         }
 
@@ -1576,6 +1709,89 @@ fn is_distinctive_idiom_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a graph says, in a form two graphs can be compared by. Stamps and
+    /// timings are bookkeeping, not content, and are left out.
+    fn content(g: &Graph) -> String {
+        format!(
+            "files={}\nlangs={:?}\ndefs={:?}\nby_file={:?}\nrefs={:?}\nimports={:?}",
+            g.files, g.languages, g.defs, g.by_file, g.refs, g.imports
+        )
+    }
+
+    fn write(dir: &Path, rel: &str, text: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// After every kind of change, an incrementally maintained graph must be
+    /// exactly the graph a fresh scan of the same files builds.
+    ///
+    /// Each step here was a way the incremental path used to go wrong:
+    /// a definition added to one file that *unchanged* files already mention
+    /// (their references were never joined), a definition removed (references
+    /// to it lingered), a duplicate name losing one home, a rename, a
+    /// deletion (the language count never went down), and a same-size edit
+    /// inside the same second (invisible to a one-second stamp).
+    #[test]
+    fn incremental_updates_equal_a_fresh_scan() {
+        let dir = std::env::temp_dir().join(format!("koda-graph-equiv-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        write(&dir, "src/a.rs", "pub fn alpha() {}\n");
+        write(
+            &dir,
+            "src/b.rs",
+            "fn uses() { alpha(); beta(); gamma(); }\n",
+        );
+        write(&dir, "src/c.py", "def helper():\n    return gamma()\n");
+        let mut g = scan(&dir);
+
+        let check = |g: &mut Graph, step: &str| {
+            g.refresh(&dir);
+            let fresh = scan(&dir);
+            assert_eq!(content(g), content(&fresh), "after: {step}");
+            assert_eq!(g.files, g.mentions.parsed(), "after: {step}");
+        };
+
+        // A new definition that an unchanged file (b.rs) already mentions.
+        write(&dir, "src/new.rs", "pub fn beta() {}\n");
+        check(&mut g, "a new definition already mentioned elsewhere");
+        assert!(g.refs.get("beta").is_some_and(|f| f.contains("src/b.rs")));
+
+        // The same name defined twice, then one home goes.
+        write(&dir, "src/dup.rs", "pub fn gamma() {}\n");
+        write(&dir, "src/dup2.rs", "pub fn gamma() {}\n");
+        check(&mut g, "a duplicate definition");
+        std::fs::remove_file(dir.join("src/dup.rs")).unwrap();
+        check(&mut g, "one of two duplicates deleted");
+
+        // A definition removed while others still reference it.
+        write(&dir, "src/a.rs", "// alpha was here\n");
+        check(&mut g, "a referenced definition removed");
+        assert!(
+            !g.refs.contains_key("alpha"),
+            "no references to a symbol that is gone"
+        );
+
+        // A rename: the file moves, its definition with it.
+        std::fs::rename(dir.join("src/new.rs"), dir.join("src/renamed.rs")).unwrap();
+        check(&mut g, "a rename");
+
+        // A deletion of the only file in a language.
+        std::fs::remove_file(dir.join("src/c.py")).unwrap();
+        check(&mut g, "the last python file deleted");
+        assert!(!g.languages.contains_key("python"));
+
+        // A same-size rewrite inside the same second.
+        write(&dir, "src/dup2.rs", "pub fn delta() {}\n");
+        g.refresh(&dir);
+        write(&dir, "src/dup2.rs", "pub fn epsln() {}\n");
+        check(&mut g, "a same-size edit within a second");
+        assert!(g.defs.contains_key("epsln"), "the second edit was seen");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// The graph is only trustworthy if it tracks the working tree, including
     /// changes koda did not make: an editor save, a `git checkout`, a generated
