@@ -344,12 +344,17 @@ impl Metrics {
     }
 }
 
+/// The provider picker's last row: not a provider, the way to add one.
+const ADD_PROVIDER: &str = "\u{0}add";
+
 /// Which action a `choices` overlay selection performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChoiceKind {
     Mode,
     Model,
     Reason,
+    Provider,
+    Theme,
 }
 
 /// State for an in-flight `ask_user` question. When `options` is non-empty the
@@ -357,6 +362,8 @@ enum ChoiceKind {
 /// picking it sets `custom` so the next typed message is the answer.
 struct Asking {
     question: String,
+    /// Why it is being asked, when the model said: shown dim above it.
+    context: String,
     options: Vec<String>,
     sel: usize,
     /// True while the answer is being typed rather than picked. The field is
@@ -366,18 +373,147 @@ struct Asking {
     custom: bool,
     /// The answer being typed, with its own history and editing keys.
     editor: Editor,
-    reply: oneshot::Sender<String>,
+    /// Where the answer goes: the waiting `ask_user` call, or — for a
+    /// question koda found at the end of a reply — `None`, and the answer is
+    /// sent as the user's next message.
+    reply: Option<oneshot::Sender<String>>,
 }
 
 /// What a keypress did to the ask dialog.
 enum AskOutcome {
     /// The question is answered; the caller hands this to the waiting tool.
     Answer(String),
+    /// Not answering: the model is told to decide for itself.
+    Skip,
     /// Still open.
     Stay,
 }
 
+/// What a skipped question sends back, told apart from any typed answer.
+const SKIPPED: &str = "\u{0}skip";
+
+/// A yes-or-no question: `Should I…?`, `Do you want…?` — and not `A or B?`,
+/// which is a choice between two things rather than a yes.
+fn is_yes_no(q: &str) -> bool {
+    let q = q.trim().to_lowercase();
+    if !q.ends_with('?') || q.contains(" or ") {
+        return false;
+    }
+    let first = q.split_whitespace().next().unwrap_or("");
+    matches!(
+        first.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''),
+        "is" | "are"
+            | "do"
+            | "does"
+            | "did"
+            | "should"
+            | "shall"
+            | "can"
+            | "could"
+            | "would"
+            | "will"
+            | "may"
+            | "might"
+            | "have"
+            | "has"
+            | "want"
+            | "ok"
+            | "okay"
+            | "shouldn't"
+            | "isn't"
+            | "can't"
+            | "don't"
+    )
+}
+
+/// A reply that ends by asking the user to choose: its last line a question,
+/// with 2–9 numbered (or lettered) options above it. Returns the question and
+/// the options' titles — the bold lead or the part before a dash or colon,
+/// without the explanation after it.
+///
+/// Deliberately narrow. A reply that merely ends with a question ("want me to
+/// run the tests too?") stays a reply; only a list of choices is something the
+/// user would otherwise have to answer by retyping one.
+fn offered_choices(text: &str) -> Option<(String, Vec<String>)> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let last = *lines.last()?;
+    let question = last.trim_matches('*').trim();
+    if !question.ends_with('?') {
+        return None;
+    }
+    let mut options = Vec::new();
+    for l in &lines[..lines.len() - 1] {
+        let Some(rest) = list_item(l) else {
+            continue;
+        };
+        let rest = rest.trim();
+        // The title: a bold lead, or what comes before " — ", " - " or ": ".
+        let title = if let Some(bold) = rest.strip_prefix("**") {
+            bold.split("**").next().unwrap_or(bold)
+        } else {
+            [" — ", " – ", " - ", ": "]
+                .iter()
+                .find_map(|sep| rest.split_once(sep).map(|(a, _)| a))
+                .filter(|a| a.chars().count() <= 80)
+                .unwrap_or(rest)
+        };
+        let title = title.trim().trim_end_matches(['.', ':', '—', '-']).trim();
+        if !title.is_empty() {
+            options.push(title.chars().take(100).collect::<String>());
+        }
+    }
+    (2..=9)
+        .contains(&options.len())
+        .then(|| (question.to_string(), options))
+}
+
+/// `1. text`, `2) text`, `a. text`, `B) text` → `text`.
+fn list_item(l: &str) -> Option<&str> {
+    let mut chars = l.char_indices();
+    let (_, first) = chars.next()?;
+    let after = if first.is_ascii_digit() {
+        let end = l.find(|c: char| !c.is_ascii_digit())?;
+        &l[end..]
+    } else if first.is_ascii_alphabetic() && l[1..].starts_with(['.', ')']) {
+        &l[1..]
+    } else {
+        return None;
+    };
+    let rest = after
+        .strip_prefix('.')
+        .or_else(|| after.strip_prefix(')'))?;
+    rest.starts_with(' ').then_some(rest)
+}
+
 impl Asking {
+    /// A question as it arrives. One without options that is plainly a
+    /// yes-or-no gets Yes and No to pick, rather than an empty field that
+    /// leaves the reader guessing what shape of answer is wanted.
+    fn new(
+        question: String,
+        mut options: Vec<String>,
+        context: String,
+        reply: Option<oneshot::Sender<String>>,
+    ) -> Self {
+        if options.is_empty() && is_yes_no(&question) {
+            options = vec!["Yes".into(), "No".into()];
+        }
+        let custom = options.is_empty();
+        Self {
+            question,
+            context,
+            options,
+            sel: 0,
+            custom,
+            editor: Editor::default(),
+            reply,
+        }
+    }
+
     /// The dialog's whole state machine, so it can be exercised without an App.
     ///
     /// Two modes: picking from the options, and typing an answer. Typing is not
@@ -403,6 +539,8 @@ impl Asking {
                     self.editor.clear();
                     self.custom = false;
                 }
+                // Nothing to go back to: Esc is "I'd rather not say".
+                KeyCode::Esc => return AskOutcome::Skip,
                 KeyCode::Backspace => self.editor.backspace(),
                 KeyCode::Delete => self.editor.delete(),
                 KeyCode::Left => self.editor.left(),
@@ -440,11 +578,8 @@ impl Asking {
                     self.sel = self.options.len();
                 }
             }
-            // "None of these" — start typing.
-            KeyCode::Esc => {
-                self.custom = true;
-                self.sel = self.options.len();
-            }
+            // Skip the question; koda decides and says what it assumed.
+            KeyCode::Esc => return AskOutcome::Skip,
             KeyCode::Enter => {
                 if self.sel < self.options.len() {
                     return AskOutcome::Answer(self.options[self.sel].clone());
@@ -605,7 +740,16 @@ pub struct App {
     picker: Option<(Vec<Summary>, usize)>,
     /// A generic selectable list overlay (mode / model pickers): the choices,
     /// the selected index, and which kind so Enter applies the right action.
-    choices: Option<(Vec<String>, usize, ChoiceKind)>,
+    choices: Option<crate::picker::Picker<ChoiceKind>>,
+    /// The theme in force when the theme picker opened, so moving through the
+    /// list can preview each one and Esc can put it back.
+    theme_before: Option<Theme>,
+    /// The last model list the server reported, for `/model <tab>`.
+    known_models: Vec<String>,
+    /// Highlighted row in the `/command <arg>` completion list.
+    arg_sel: usize,
+    /// A model list was asked for to complete `/model <arg>`, not to show.
+    models_for_completion: bool,
     /// Set when the user ran `/model` with no argument: the next model list that
     /// arrives opens a picker rather than being printed.
     model_picker_pending: bool,
@@ -1133,6 +1277,7 @@ impl App {
             Event::AskUser {
                 question,
                 options,
+                context,
                 reply,
             } => {
                 // Show the question as a distinct prose block. With options, the
@@ -1141,15 +1286,7 @@ impl App {
                 self.transcript.finish_reveal();
                 self.transcript
                     .assistant_delta(&format!("\n**{question}**\n"));
-                let custom = options.is_empty();
-                self.asking = Some(Asking {
-                    question: question.clone(),
-                    options,
-                    sel: 0,
-                    custom,
-                    editor: Editor::default(),
-                    reply,
-                });
+                self.asking = Some(Asking::new(question.clone(), options, context, Some(reply)));
                 self.follow = true;
                 // Alert a user who has tabbed away: ring the terminal bell and
                 // post an OSC 9 desktop notification (honoured by iTerm2, Kitty,
@@ -1213,15 +1350,18 @@ impl App {
                         format!("{} model(s) — ctrl+n to cycle", list.len())
                     });
                     s.available = list;
+                } else if self.models_for_completion {
+                    self.models_for_completion = false;
+                    self.known_models = list;
                 } else if self.model_picker_pending {
                     self.model_picker_pending = false;
+                    self.known_models = list.clone();
                     if list.is_empty() {
                         self.note(
                             "no models reported — check the endpoint (/url) and key (/setup)",
                         );
                     } else {
-                        let cur = list.iter().position(|m| m == &self.model).unwrap_or(0);
-                        self.choices = Some((list, cur, ChoiceKind::Model));
+                        self.open_model_picker();
                     }
                 } else {
                     self.show_models(list);
@@ -1250,6 +1390,23 @@ impl App {
                 self.maybe_send_visitor(completed && worked);
                 self.set_tokens(history_tokens);
                 self.toast = Some(turn_receipt(turn_took, self.received, wrote, completed));
+                // A reply that ends by asking the user to pick from a list gets
+                // the dialog the model should have opened with `ask_user`.
+                if completed && self.asking.is_none() && self.queued.is_empty() {
+                    if let Some((q, opts)) = self
+                        .transcript
+                        .last_reply()
+                        .and_then(|r| offered_choices(&r))
+                    {
+                        self.asking = Some(Asking::new(
+                            q,
+                            opts,
+                            "koda asked this in its reply — pick an answer, or type your own"
+                                .into(),
+                            None,
+                        ));
+                    }
+                }
                 // Prompts the user queued while koda was working are picked up
                 // here, once the current task's tool calls have all finished.
                 // Frame them so the agent folds them into its plan rather than
@@ -1663,6 +1820,50 @@ impl App {
             }
         }
 
+        // `/theme tok…`: the argument's values, completed like the command was.
+        if !ctrl && !alt {
+            if let Some((cmd, typed, hits)) = self.arg_hits() {
+                let n = hits.len();
+                let sel = self.arg_sel.min(n.saturating_sub(1));
+                let exact = hits.iter().any(|i| i.value == typed);
+                let take = |app: &mut Self, value: &str| {
+                    app.editor.clear();
+                    app.editor.insert(&format!("{cmd} {value}"));
+                    app.arg_sel = 0;
+                };
+                match key.code {
+                    KeyCode::Up if n > 0 => {
+                        self.arg_sel = sel.saturating_sub(1);
+                        return;
+                    }
+                    KeyCode::Down if n > 0 => {
+                        self.arg_sel = (sel + 1).min(n - 1);
+                        return;
+                    }
+                    KeyCode::Tab if n > 0 => {
+                        take(self, &hits[sel].value);
+                        return;
+                    }
+                    KeyCode::Right if n > 0 && self.editor.at_end() && !exact => {
+                        take(self, &hits[sel].value);
+                        return;
+                    }
+                    // Enter on a half-typed value runs the one highlighted.
+                    KeyCode::Enter if n > 0 && !exact => take(self, &hits[sel].value),
+                    KeyCode::Char(_) | KeyCode::Backspace => self.arg_sel = 0,
+                    _ => {}
+                }
+            }
+        }
+
+        // A typed command's ghost completion, accepted with → at the end.
+        if !ctrl && !alt && key.code == KeyCode::Right && self.editor.at_end() {
+            if let Some(rest) = self.ghost().filter(|_| !self.editor.buf.contains(' ')) {
+                self.editor.insert(&rest);
+                return;
+            }
+        }
+
         let cmds = self.command_matches();
         // One match counts too: the palette is showing a single command, so
         // Enter has to take it rather than send the half-typed `/reas` off as
@@ -1804,6 +2005,114 @@ impl App {
 
     /// Slash-command names matching the current buffer, for interactive
     /// autocomplete. Empty unless the buffer is a bare `/word` with no space.
+    /// No dialog or overlay has the keyboard, so the composer's own helpers
+    /// (completion, ghost text) may show.
+    fn overlay_free(&self) -> bool {
+        self.choices.is_none()
+            && self.picker.is_none()
+            && self.setup.is_none()
+            && self.settings.is_none()
+            && self.pending.is_none()
+            && self.asking.is_none()
+            && self.logs.is_none()
+    }
+
+    /// Values for a command's argument, when the composer holds `/cmd arg`
+    /// with the command known and the argument still one word: the command,
+    /// what has been typed of the argument, and the matching values, best
+    /// first. Filtered the way the dropdowns are.
+    fn arg_hits(&mut self) -> Option<(&'static str, String, Vec<crate::picker::Item>)> {
+        let buf = self.editor.buf.clone();
+        let (cmd, typed) = buf.split_once(' ')?;
+        if !cmd.starts_with('/') || typed.contains(char::is_whitespace) || buf.contains('\n') {
+            return None;
+        }
+        let (cmd, items): (&'static str, Vec<crate::picker::Item>) = match cmd {
+            "/theme" => (
+                "/theme",
+                theme::THEMES
+                    .iter()
+                    .map(|t| crate::picker::Item::new(t.name).current(t.name == self.theme.name))
+                    .collect(),
+            ),
+            "/mode" => (
+                "/mode",
+                ["plan", "execute", "vibe"]
+                    .iter()
+                    .map(|m| crate::picker::Item::new(*m).current(*m == self.mode.to_string()))
+                    .collect(),
+            ),
+            "/reason" | "/reasoning" => (
+                "/reason",
+                REASON_LEVELS
+                    .iter()
+                    .map(|l| crate::picker::Item::new(*l).current(*l == self.cfg.reasoning_effort))
+                    .collect(),
+            ),
+            "/provider" | "/providers" => {
+                let mut v: Vec<crate::picker::Item> = self
+                    .cfg
+                    .providers
+                    .iter()
+                    .map(|p| {
+                        crate::picker::Item::new(p.name.clone())
+                            .detail(host_of(&p.base_url))
+                            .current(p.name == self.cfg.active_provider)
+                    })
+                    .collect();
+                v.push(crate::picker::Item::new("add").detail("add a provider"));
+                ("/provider", v)
+            }
+            "/model" => {
+                // Asked for once, quietly, the first time it is needed.
+                if self.known_models.is_empty() && !self.models_for_completion {
+                    self.models_for_completion = true;
+                    self.send(Command::ListModels);
+                }
+                (
+                    "/model",
+                    self.known_models
+                        .iter()
+                        .map(|m| crate::picker::Item::new(m.clone()).current(*m == self.model))
+                        .collect(),
+                )
+            }
+            _ => return None,
+        };
+        let mut p = crate::picker::Picker::new((), "", items);
+        p.filter = typed.to_string();
+        let hits: Vec<crate::picker::Item> = p
+            .visible()
+            .into_iter()
+            .map(|i| p.items[i].clone())
+            .take(50)
+            .collect();
+        Some((cmd, typed.to_string(), hits))
+    }
+
+    /// The rest of what is being typed, shown dim after the caret: the
+    /// command a `/` prefix is heading for, or the highlighted value of its
+    /// argument. `→` or Tab takes it.
+    fn ghost(&mut self) -> Option<String> {
+        let buf = self.editor.buf.clone();
+        if !buf.starts_with('/') || buf.contains('\n') || !self.editor.at_end() {
+            return None;
+        }
+        if !buf.contains(' ') {
+            let first = command_hits(&buf)
+                .into_iter()
+                .find(|(c, _)| c.starts_with(buf.as_str()))?;
+            return Some(first.0[buf.len()..].to_string()).filter(|s| !s.is_empty());
+        }
+        let (_, typed, hits) = self.arg_hits()?;
+        let pick = hits.get(self.arg_sel.min(hits.len().saturating_sub(1)))?;
+        pick.value
+            .to_lowercase()
+            .starts_with(&typed.to_lowercase())
+            .then(|| pick.value[typed.len()..].to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     fn command_matches(&self) -> Vec<&'static str> {
         let buf = &self.editor.buf;
         if !buf.starts_with('/') || buf.contains(' ') {
@@ -1853,45 +2162,142 @@ impl App {
         let Some(a) = self.asking.as_mut() else {
             return;
         };
-        if let AskOutcome::Answer(answer) = a.on_key(key) {
-            let asking = self.asking.take().expect("checked");
-            self.transcript.user(answer.clone());
-            let _ = asking.reply.send(answer);
-            self.follow = true;
+        match a.on_key(key) {
+            AskOutcome::Answer(answer) => {
+                let asking = self.asking.take().expect("checked");
+                self.answer_asking(asking, answer);
+            }
+            AskOutcome::Skip => {
+                let asking = self.asking.take().expect("checked");
+                match asking.reply {
+                    Some(tx) => {
+                        self.flash(
+                            "skipped — koda will decide and say what it assumed",
+                            fx::Tone::Info,
+                        );
+                        let _ = tx.send(SKIPPED.to_string());
+                    }
+                    // A question found in a reply: closing it is just closing it.
+                    None => self.flash("dismissed — type a reply any time", fx::Tone::Info),
+                }
+                self.follow = true;
+            }
+            AskOutcome::Stay => {}
         }
     }
 
-    /// Key handling for the generic mode/model picker overlay.
+    /// Key handling for the dropdown picker (model, provider, theme, mode,
+    /// thinking level).
     fn choices_key(&mut self, key: KeyEvent) {
-        let Some((list, sel, kind)) = &mut self.choices else {
+        let Some(p) = self.choices.as_mut() else {
             return;
         };
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.choices = None,
-            KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                *sel = (*sel + 1).min(list.len().saturating_sub(1));
-            }
-            KeyCode::Enter => {
-                let kind = *kind;
-                let chosen = list.get(*sel).cloned();
-                self.choices = None;
-                if let Some(val) = chosen {
-                    match kind {
-                        ChoiceKind::Mode => {
-                            if let Ok(m) = val.parse::<Mode>() {
-                                self.set_mode(m);
-                            }
-                        }
-                        ChoiceKind::Model => {
-                            self.model = val.clone();
-                            self.send(Command::SetModel(val));
-                        }
-                        ChoiceKind::Reason => self.set_reasoning(val),
+        let kind = p.kind;
+        match p.key(key) {
+            crate::picker::Outcome::Idle => {}
+            crate::picker::Outcome::Moved => {
+                // The theme picker previews as you move; nothing is saved
+                // until Enter.
+                if kind == ChoiceKind::Theme {
+                    let pick = p.selected().map(|i| i.value.clone());
+                    if let Some(t) = pick.as_deref().and_then(theme::by_name) {
+                        self.set_theme(t);
                     }
                 }
             }
-            _ => {}
+            crate::picker::Outcome::Cancelled => {
+                self.choices = None;
+                if let Some(t) = self.theme_before.take() {
+                    self.set_theme(t);
+                }
+            }
+            crate::picker::Outcome::Chosen(val) => {
+                self.choices = None;
+                match kind {
+                    ChoiceKind::Mode => {
+                        if let Ok(m) = val.parse::<Mode>() {
+                            self.set_mode(m);
+                        }
+                    }
+                    ChoiceKind::Model => {
+                        self.model = val.clone();
+                        self.send(Command::SetModel(val));
+                    }
+                    ChoiceKind::Reason => self.set_reasoning(val),
+                    ChoiceKind::Provider => {
+                        if val == ADD_PROVIDER {
+                            self.setup = Some(setup::Setup::new_provider(&self.cfg));
+                            self.note("give it a name — that is what saves it as a new provider");
+                        } else {
+                            self.switch_provider(&val);
+                        }
+                    }
+                    ChoiceKind::Theme => {
+                        self.theme_before = None;
+                        self.theme_cmd(&val);
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_model_picker(&mut self) {
+        let items = self
+            .known_models
+            .iter()
+            .map(|m| crate::picker::Item::new(m.clone()).current(*m == self.model))
+            .collect();
+        let title = format!("select model — {} available", self.known_models.len());
+        self.choices = Some(crate::picker::Picker::new(ChoiceKind::Model, title, items));
+    }
+
+    fn open_provider_picker(&mut self) {
+        let mut items: Vec<crate::picker::Item> = self
+            .cfg
+            .providers
+            .iter()
+            .map(|p| {
+                crate::picker::Item::new(p.name.clone())
+                    .detail(format!("{} · {}", host_of(&p.base_url), p.model))
+                    .current(p.name == self.cfg.active_provider)
+            })
+            .collect();
+        items.push(crate::picker::Item::new(ADD_PROVIDER).label("+ add a provider…"));
+        self.choices = Some(crate::picker::Picker::new(
+            ChoiceKind::Provider,
+            "select provider",
+            items,
+        ));
+    }
+
+    fn open_theme_picker(&mut self) {
+        let items = theme::THEMES
+            .iter()
+            .map(|t| crate::picker::Item::new(t.name).current(t.name == self.theme.name))
+            .collect();
+        self.theme_before = Some(self.theme);
+        self.choices = Some(crate::picker::Picker::new(
+            ChoiceKind::Theme,
+            "select theme — previews as you move",
+            items,
+        ));
+    }
+
+    /// Make `name` the active provider and save it.
+    fn switch_provider(&mut self, name: &str) {
+        // Resolve through the same path the loader uses, then carry the list
+        // and the choice across, so switching cannot flatten the providers away.
+        let mut cfg = self.cfg.clone();
+        cfg.active_provider = name.to_string();
+        let mut next = cfg.resolved();
+        next.providers = cfg.providers.clone();
+        next.active_provider = cfg.active_provider.clone();
+        self.adopt_config(next);
+        match crate::config::save(&self.cfg) {
+            Ok(_) => self.flash(format!("provider → {name}"), fx::Tone::Info),
+            Err(e) => self
+                .transcript
+                .error(format!("switched, but could not save: {e}")),
         }
     }
 
@@ -2383,6 +2789,20 @@ impl App {
         }
     }
 
+    /// Deliver an answer: to the tool call waiting on it, or as the next
+    /// message when the question came from the end of a reply.
+    fn answer_asking(&mut self, asking: Asking, answer: String) {
+        self.transcript.user(answer.clone());
+        self.follow = true;
+        match asking.reply {
+            Some(tx) => {
+                let _ = tx.send(answer);
+            }
+            None if self.busy || self.compacting.is_some() => self.queued.push_back(answer),
+            None => self.send(Command::User(answer)),
+        }
+    }
+
     fn submit(&mut self) {
         let line = self.editor.take();
         let mut trimmed = line.trim().to_string();
@@ -2447,9 +2867,7 @@ impl App {
         // question is open. If anything ever does, it is still an answer to the
         // question rather than the start of a new turn.
         if let Some(asking) = self.asking.take() {
-            self.transcript.user(trimmed.clone());
-            self.follow = true;
-            let _ = asking.reply.send(trimmed);
+            self.answer_asking(asking, trimmed);
             return;
         }
         self.transcript.user(trimmed.clone());
@@ -2544,16 +2962,20 @@ impl App {
                 "" => {
                     // No argument: open a selectable list of the three modes,
                     // pre-selecting the current one.
-                    let modes = vec![
-                        "plan".to_string(),
-                        "execute".to_string(),
-                        "vibe".to_string(),
-                    ];
-                    let cur = modes
-                        .iter()
-                        .position(|m| m == &self.mode.to_string())
-                        .unwrap_or(0);
-                    self.choices = Some((modes, cur, ChoiceKind::Mode));
+                    let cur = self.mode.to_string();
+                    let items = [
+                        ("plan", "reads and thinks, changes nothing"),
+                        ("execute", "edits and commands, with approval"),
+                        ("vibe", "spec-driven: plans, delegates, verifies"),
+                    ]
+                    .into_iter()
+                    .map(|(m, d)| crate::picker::Item::new(m).detail(d).current(m == cur))
+                    .collect();
+                    self.choices = Some(crate::picker::Picker::new(
+                        ChoiceKind::Mode,
+                        "select mode",
+                        items,
+                    ));
                 }
                 other => match other.parse::<Mode>() {
                     Ok(m) => self.set_mode(m),
@@ -2756,12 +3178,17 @@ impl App {
                 // between — for a setting whose wrong value makes a model look
                 // like it has hung, that is the wrong shape.
                 "" => {
-                    let levels = REASON_LEVELS.iter().map(|l| l.to_string()).collect();
-                    let cur = REASON_LEVELS
+                    let items = REASON_LEVELS
                         .iter()
-                        .position(|l| *l == self.cfg.reasoning_effort)
-                        .unwrap_or(0);
-                    self.choices = Some((levels, cur, ChoiceKind::Reason));
+                        .map(|l| {
+                            crate::picker::Item::new(*l).current(*l == self.cfg.reasoning_effort)
+                        })
+                        .collect();
+                    self.choices = Some(crate::picker::Picker::new(
+                        ChoiceKind::Reason,
+                        "how hard should it think?",
+                        items,
+                    ));
                 }
                 other if REASON_LEVELS.contains(&other) => self.set_reasoning(other.to_string()),
                 _ => self.note("usage: /reason [off|low|medium|high]"),
@@ -2917,45 +3344,9 @@ impl App {
                 } else if self.cfg.providers.is_empty() {
                     self.note("no saved providers — /provider add, then give it a name");
                 } else if arg.is_empty() {
-                    let width = self.panel_width();
-                    let mut p = Panel::new("Providers", width)
-                        .footer("/provider <name> to switch · /provider add to add one");
-                    for prov in self.cfg.providers.clone() {
-                        let here = prov.name == self.cfg.active_provider;
-                        p.row(vec![
-                            Span::styled(
-                                if here { "● " } else { "  " }.to_string(),
-                                self.theme.fg(self.theme.success),
-                            ),
-                            Span::styled(
-                                format!("{:<14}", prov.name),
-                                self.theme.fg(self.theme.accent),
-                            ),
-                            Span::styled(
-                                format!("{}  {}", host_of(&prov.base_url), prov.model),
-                                self.theme.dim(),
-                            ),
-                        ]);
-                    }
-                    let lines = p.render(&self.theme, &self.glyphs);
-                    self.transcript.raw(lines);
-                    self.follow = true;
+                    self.open_provider_picker();
                 } else if self.cfg.providers.iter().any(|p| p.name == arg) {
-                    // Resolve through the same path the loader uses, then carry
-                    // the list and the choice across, so switching cannot
-                    // flatten the providers away.
-                    let mut cfg = self.cfg.clone();
-                    cfg.active_provider = arg.clone();
-                    let mut next = cfg.resolved();
-                    next.providers = cfg.providers.clone();
-                    next.active_provider = cfg.active_provider.clone();
-                    self.adopt_config(next);
-                    match crate::config::save(&self.cfg) {
-                        Ok(_) => self.note(format!("provider → {arg}")),
-                        Err(e) => self
-                            .transcript
-                            .error(format!("switched, but could not save: {e}")),
-                    }
+                    self.switch_provider(&arg);
                 } else {
                     self.note(format!("no provider called {arg} — /provider to list them"));
                 }
@@ -3048,6 +3439,10 @@ impl App {
     }
 
     fn theme_cmd(&mut self, arg: &str) {
+        if arg.is_empty() && self.choices.is_none() {
+            self.open_theme_picker();
+            return;
+        }
         if arg.is_empty() {
             let current = self.theme.name;
             let width = self.panel_width();
@@ -3574,6 +3969,15 @@ fn draw(f: &mut Frame, app: &mut App) {
     app.last_size = (area.width, area.height);
     let m = Metrics::of(area.width);
     crate::view::MOTION.store(app.motion.animates(), std::sync::atomic::Ordering::Relaxed);
+    // Slash-command completion, worked out once for this frame: the dim
+    // remainder after the caret, and the argument values on offer.
+    let slash = app.editor.buf.starts_with('/') && app.overlay_free();
+    let ghost = if slash && !app.busy {
+        app.ghost()
+    } else {
+        None
+    };
+    let arg_hits = if slash { app.arg_hits() } else { None };
     // Spent transitions go before anything reads them, so a finished one never
     // draws a last stale frame. `wants_frames` stops asking for frames the
     // moment each ends; this only tidies the state it left behind.
@@ -3804,9 +4208,20 @@ fn draw(f: &mut Frame, app: &mut App) {
             })
             .collect()
     };
+    let mut input_lines = input_lines;
+    if let (Some(rest), Some(last)) = (ghost.as_ref(), input_lines.last_mut()) {
+        let used: usize = last.spans.iter().map(|s| s.content.width()).sum();
+        let room = input_w.saturating_sub(used);
+        let shown: String = rest.chars().take(room).collect();
+        if !shown.is_empty() {
+            last.spans.push(Span::styled(
+                shown,
+                t.fg(t.muted).add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
     // Pad up to the full box height so the whole taller field is one solid
     // tinted surface, not a single lit line with dead space beneath it.
-    let mut input_lines = input_lines;
     while input_lines.len() < text_h as usize {
         input_lines.push(Line::from(vec![Span::raw("  ".to_string())]));
     }
@@ -3874,6 +4289,8 @@ fn draw(f: &mut Frame, app: &mut App) {
         mention_popup(f, app, input, &mention);
     } else if app.editor.buf.starts_with('/') && !app.editor.buf.contains(' ') {
         command_popup(f, app, input);
+    } else if let Some((cmd, typed, hits)) = &arg_hits {
+        arg_popup(f, app, input, cmd, typed, hits);
     }
     if app.picker.is_some() {
         session_picker(f, app, area);
@@ -4838,6 +5255,99 @@ fn highlighted(text: &str, pattern: &str, base: Style, hit: Style) -> Vec<Span<'
     out
 }
 
+/// The values of a command's argument, above the input: `/theme tok` lists
+/// the themes matching `tok`, the highlighted one first in line for Tab, →
+/// or Enter.
+fn arg_popup(
+    f: &mut Frame,
+    app: &App,
+    input: Rect,
+    cmd: &str,
+    typed: &str,
+    hits: &[crate::picker::Item],
+) {
+    let t = &app.theme;
+    let g = &app.glyphs;
+    if input.y == 0 {
+        return;
+    }
+    if hits.is_empty() {
+        let msg = if cmd == "/model" && app.known_models.is_empty() {
+            "  fetching models…"
+        } else {
+            "  no match"
+        };
+        let rect = Rect {
+            x: input.x,
+            y: input.y - 1,
+            width: input.width,
+            height: 1,
+        };
+        f.render_widget(Clear, rect);
+        f.render_widget(Paragraph::new(Line::from(Span::styled(msg, t.dim()))), rect);
+        return;
+    }
+    // An exact, single match needs no list.
+    if hits.len() == 1 && hits[0].value == typed {
+        return;
+    }
+    let max_rows = 8usize;
+    let sel = app.arg_sel.min(hits.len() - 1);
+    let start = sel.saturating_sub(max_rows - 1);
+    let inner_w = input.width as usize;
+    let hit = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, it) in hits.iter().enumerate().skip(start).take(max_rows) {
+        let selected = i == sel;
+        let bar = match (selected, t.bg_selected) {
+            (true, Some(bg)) => Style::default().bg(bg),
+            (true, None) => Style::default().add_modifier(Modifier::REVERSED),
+            _ => Style::default(),
+        };
+        let mut spans = vec![Span::styled(
+            format!(" {} ", if selected { g.pick } else { " " }),
+            bar.fg(t.accent),
+        )];
+        spans.extend(highlighted(
+            &it.label,
+            typed,
+            bar.fg(t.text),
+            hit.patch(bar),
+        ));
+        if it.current {
+            spans.push(Span::styled(format!(" {}", g.ready), bar.fg(t.success)));
+        }
+        if !it.detail.is_empty() {
+            spans.push(Span::styled(format!("  {}", it.detail), bar.fg(t.muted)));
+        }
+        if i == start {
+            let count = format!("{cmd} · {} ", hits.len());
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
+            spans.push(Span::styled(
+                " ".repeat(inner_w.saturating_sub(used + count.width())),
+                bar,
+            ));
+            spans.push(Span::styled(count, t.dim()));
+        } else {
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
+            spans.push(Span::styled(" ".repeat(inner_w.saturating_sub(used)), bar));
+        }
+        lines.push(truncate_line(spans, input.width));
+    }
+    let h = lines.len() as u16;
+    if input.y < h {
+        return;
+    }
+    let rect = Rect {
+        x: input.x,
+        y: input.y - h,
+        width: input.width,
+        height: h,
+    };
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines), rect);
+}
+
 fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     let t = &app.theme;
     let prefix = app.editor.buf.clone();
@@ -5313,60 +5823,125 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
 
 /// A generic centered picker for the /mode and /model overlays.
 fn choices_popup(f: &mut Frame, app: &App, area: Rect) {
-    let Some((list, sel, kind)) = &app.choices else {
+    let Some(p) = &app.choices else {
         return;
     };
     let t = &app.theme;
     let g = &app.glyphs;
-    let title = match kind {
-        ChoiceKind::Mode => "select mode",
-        ChoiceKind::Model => "select model",
-        ChoiceKind::Reason => "how hard should it think?",
-    };
-    let w = area.width.saturating_sub(6).clamp(30, 80).min(area.width);
-    let rows = (list.len() as u16).clamp(1, 14);
-    let h = (rows + 2).min(area.height.saturating_sub(2));
+    let visible = p.visible();
+    let w = area.width.saturating_sub(6).clamp(30, 84).min(area.width);
+    let list_rows = (p.items.len() as u16).clamp(1, 14);
+    // Frame (2) + the filter row + a rule under it.
+    let h = (list_rows + 4).min(area.height.saturating_sub(2));
     let rect = Rect {
         x: (area.width.saturating_sub(w)) / 2,
         y: (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
     };
-    let inner_w = rect.width.saturating_sub(4) as usize;
-    let visible = h.saturating_sub(2) as usize;
-    let first = sel.saturating_sub(visible.saturating_sub(1));
-    let lines: Vec<Line> = list
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(visible)
-        .map(|(i, s)| {
-            let selected = i == *sel;
-            let marker = if selected { g.pick } else { " " };
-            let shown: String = s.chars().take(inner_w).collect();
-            let style = if selected {
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-            } else {
-                t.body()
-            };
-            Line::from(vec![
-                Span::styled(format!(" {marker} "), t.fg(t.accent)),
-                Span::styled(shown, style),
-            ])
-        })
-        .collect();
+    let inner_w = rect.width.saturating_sub(2) as usize;
+    let rows = h.saturating_sub(4) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    // The filter row: what has been typed, with a caret, and how many match.
+    let count = format!("{}/{} ", visible.len(), p.items.len());
+    let typed = if p.filter.is_empty() {
+        Span::styled("type to filter".to_string(), t.dim())
+    } else {
+        Span::styled(p.filter.clone(), t.body().add_modifier(Modifier::BOLD))
+    };
+    let lead = format!(" {} ", g.magnify);
+    let used = lead.width() + typed.content.width() + 1 + count.width();
+    lines.push(Line::from(vec![
+        Span::styled(lead, t.fg(t.accent)),
+        typed,
+        Span::styled(g.caret.to_string(), t.fg(t.accent)),
+        Span::raw(" ".repeat(inner_w.saturating_sub(used))),
+        Span::styled(count, t.dim()),
+    ]));
+    lines.push(Line::from(Span::styled(
+        g.hline.repeat(inner_w),
+        t.fg(t.border),
+    )));
+
+    let first = p.sel.saturating_sub(rows.saturating_sub(1));
+    let hit = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+    for (row, &ix) in visible.iter().enumerate().skip(first).take(rows) {
+        let it = &p.items[ix];
+        let selected = row == p.sel;
+        let bar = match (selected, t.bg_selected) {
+            (true, Some(bg)) => Style::default().bg(bg),
+            (true, None) => Style::default().add_modifier(Modifier::REVERSED),
+            _ => Style::default(),
+        };
+        let base = if selected {
+            bar.fg(t.text).add_modifier(Modifier::BOLD)
+        } else {
+            bar.fg(t.text)
+        };
+        let mut spans = vec![Span::styled(
+            format!(" {} ", if selected { g.pick } else { " " }),
+            bar.fg(t.accent),
+        )];
+        spans.extend(
+            highlighted(&it.label, &p.filter, base, hit.patch(bar))
+                .into_iter()
+                .map(|s| Span::styled(s.content, s.style)),
+        );
+        if it.current {
+            spans.push(Span::styled(format!(" {}", g.ready), bar.fg(t.success)));
+        }
+        // A theme shows its colours; anything else its detail.
+        if p.kind == ChoiceKind::Theme {
+            if let Some(th) = theme::by_name(&it.value) {
+                // Swatches in one column, whatever the name's length.
+                let widest = p.items.iter().map(|i| i.label.width()).max().unwrap_or(0) + 2;
+                let used = it.label.width() + if it.current { 2 } else { 0 };
+                spans.push(Span::styled(
+                    " ".repeat(widest.saturating_sub(used) + 1),
+                    bar,
+                ));
+                for c in [
+                    th.accent,
+                    th.accent_alt,
+                    th.success,
+                    th.warning,
+                    th.error,
+                    th.info,
+                ] {
+                    spans.push(Span::styled("██".to_string(), bar.fg(c)));
+                }
+            }
+        } else if !it.detail.is_empty() {
+            spans.push(Span::styled(format!("  {}", it.detail), bar.fg(t.muted)));
+        }
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
+        if used < inner_w {
+            spans.push(Span::styled(" ".repeat(inner_w - used), bar));
+        }
+        lines.push(truncate_line(spans, inner_w as u16));
+    }
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "   nothing matches — backspace to widen".to_string(),
+            t.dim(),
+        )));
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
         .border_style(t.fg(t.border_focus))
         .title(Span::styled(
-            format!(" {title} "),
+            format!(" {} ", p.title),
             Style::default()
                 .fg(t.border_focus)
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Line::from(vec![
-            Span::styled(" ↑↓", t.fg(t.accent)),
+            Span::styled(" type", t.fg(t.accent)),
+            Span::styled(" filter  ", t.dim()),
+            Span::styled("↑↓", t.fg(t.accent)),
             Span::styled(" choose  ", t.dim()),
             Span::styled("enter", t.fg(t.accent)),
             Span::styled(" select  ", t.dim()),
@@ -5502,7 +6077,28 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // Where the terminal caret goes: (line index within the dialog, column).
     let mut caret: Option<(usize, usize)> = None;
 
-    // Question header — wrapped, emphasized, like oh-my-pi's dialog header.
+    // A label that says what this is before a word of it is read, then the
+    // model's reason for asking (dim), then the question itself.
+    let label_style = match t.bg_panel {
+        Some(bg) if g.fine_blocks => Style::default()
+            .fg(t.info)
+            .bg(theme::mix(bg, t.info, 0.2))
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(t.info).add_modifier(Modifier::BOLD),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" ? QUESTION ".to_string(), label_style),
+        Span::styled("  koda needs your input".to_string(), t.dim()),
+    ]));
+    lines.push(Line::default());
+    if !a.context.is_empty() {
+        for l in md::hard_wrap(&a.context, body_w) {
+            lines.push(Line::from(Span::styled(
+                l,
+                t.fg(t.muted).add_modifier(Modifier::ITALIC),
+            )));
+        }
+    }
     for l in md::hard_wrap(&a.question, body_w) {
         lines.push(Line::from(Span::styled(l, t.emphasis(t.text))));
     }
@@ -5526,22 +6122,31 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let color = if focused { t.accent } else { t.text };
             let num = t.dim();
             let shown: String = opt.chars().take(body_w.saturating_sub(6)).collect();
-            lines.push(Line::from(vec![
-                Span::styled(cursor, t.fg(t.accent)),
+            let bar = match (focused, t.bg_selected) {
+                (true, Some(bg)) => Style::default().bg(bg),
+                _ => Style::default(),
+            };
+            let mut row = vec![
+                Span::styled(cursor, bar.fg(t.accent)),
                 Span::styled(
                     format!("{marker} "),
-                    t.fg(if focused { t.accent } else { t.muted }),
+                    bar.fg(if focused { t.accent } else { t.muted }),
                 ),
-                Span::styled(format!("{}. ", i + 1), num),
+                Span::styled(format!("{}. ", i + 1), num.patch(bar)),
                 Span::styled(
                     shown,
                     if focused {
-                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                        bar.fg(color).add_modifier(Modifier::BOLD)
                     } else {
                         t.fg(color)
                     },
                 ),
-            ]));
+            ];
+            if focused {
+                let used: usize = row.iter().map(|s| s.content.width()).sum();
+                row.push(Span::styled(" ".repeat(body_w.saturating_sub(used)), bar));
+            }
+            lines.push(Line::from(row));
         }
         // The "type your own" row, always last (oh-my-pi's "Other").
         let focused = a.sel == custom_idx;
@@ -5622,22 +6227,19 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
     };
 
     let footer = if picking {
-        " ↑↓ move · 1-9 pick · enter select · type for your own answer "
+        " ↑↓ move · 1-9 pick · enter select · type to answer · esc skip "
     } else if a.options.is_empty() {
-        " type your answer · enter to send "
+        " type your answer · enter send · esc skip "
     } else {
-        " enter to send · esc back to the options "
+        " enter send · esc back to the options "
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
         .border_style(Style::default().fg(t.info).add_modifier(Modifier::BOLD))
-        .title(Span::styled(
-            format!(" {} Ask ", g.pending),
-            Style::default()
-                .fg(t.info)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ))
+        // The `? QUESTION` label inside says what this is; a title on the
+        // frame said it a second time.
+        .padding(ratatui::widgets::Padding::horizontal(1))
         .title_bottom(Span::styled(footer.to_string(), t.dim()));
 
     f.render_widget(Clear, rect);
@@ -5645,7 +6247,7 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
     // The caret goes last so it lands on top of the dialog, and only when the
     // dialog is the thing being typed into.
     if let Some((line, col)) = caret {
-        let x = rect.x + 1 + 2 + col as u16;
+        let x = rect.x + 1 + 1 + 2 + col as u16;
         let y = rect.y + 1 + line as u16;
         if x < rect.x + rect.width && y < rect.y + rect.height {
             f.set_cursor_position(Position::new(x, y));
@@ -5877,6 +6479,10 @@ pub async fn run(
         watch_add: Vec::new(),
         watch_clear: false,
         choices: None,
+        theme_before: None,
+        known_models: Vec::new(),
+        arg_sel: 0,
+        models_for_completion: false,
         model_picker_pending: false,
         pastes: Vec::new(),
         quit: false,
@@ -6307,18 +6913,16 @@ mod tests {
         };
         let ask = |options: &[&str]| {
             let (tx, _rx) = oneshot::channel();
-            Asking {
-                question: "Which database?".into(),
-                options: options.iter().map(|s| s.to_string()).collect(),
-                sel: 0,
-                custom: options.is_empty(),
-                editor: Editor::default(),
-                reply: tx,
-            }
+            Asking::new(
+                "Which database?".into(),
+                options.iter().map(|s| s.to_string()).collect(),
+                String::new(),
+                Some(tx),
+            )
         };
         let answered = |o: AskOutcome| match o {
             AskOutcome::Answer(a) => Some(a),
-            AskOutcome::Stay => None,
+            AskOutcome::Stay | AskOutcome::Skip => None,
         };
 
         // No options: the dialog opens straight into its own field.
@@ -6364,9 +6968,64 @@ mod tests {
         assert!(!back.custom, "esc returns to the list");
         back.on_key(key(KeyCode::Enter));
         assert!(back.editor.is_empty(), "the abandoned draft is cleared");
-        let mut empty = ask(&["Postgres"]);
-        empty.on_key(key(KeyCode::Esc));
-        assert!(answered(empty.on_key(key(KeyCode::Enter))).is_none());
+        // Esc on the list, or on a question with nothing to go back to,
+        // skips it: nobody is trapped in a question they cannot answer.
+        let mut skip = ask(&["Postgres"]);
+        assert!(matches!(skip.on_key(key(KeyCode::Esc)), AskOutcome::Skip));
+        let mut free = ask(&[]);
+        assert!(matches!(free.on_key(key(KeyCode::Esc)), AskOutcome::Skip));
+    }
+
+    /// From a real session: the model asked which of three things was meant
+    /// as plain text, so there was nothing to click. The end of that reply is
+    /// now read as the choice it is.
+    #[test]
+    fn a_reply_ending_in_a_choice_becomes_one() {
+        let reply = "Could you clarify what you're asking? A few possibilities:\n\n\
+1. **How is simpletools doing as a business?** — I can't gauge their revenue.\n\n\
+2. How do I (koda) browse websites? — I use the web_fetch tool.\n\n\
+3. How does simpletools build their products? — The site says two people.\n\n\
+Which did you mean?";
+        let (q, opts) = offered_choices(reply).expect("a choice");
+        assert_eq!(q, "Which did you mean?");
+        assert_eq!(
+            opts,
+            vec![
+                "How is simpletools doing as a business?",
+                "How do I (koda) browse websites?",
+                "How does simpletools build their products?",
+            ]
+        );
+        let lettered = "Pick a database:\na) Postgres: robust\nb) SQLite: simple\nWhich one?";
+        assert_eq!(
+            offered_choices(lettered).unwrap().1,
+            vec!["Postgres", "SQLite"]
+        );
+
+        // Not a choice: a closing question with no list, a list that is not
+        // followed by a question, a single option.
+        assert!(offered_choices("Done. Want me to run the tests too?").is_none());
+        assert!(offered_choices("Steps:\n1. read\n2. fix\n3. test\nAll done.").is_none());
+        assert!(offered_choices("1. only this\nOk?").is_none());
+    }
+
+    /// A yes-or-no question gets Yes and No to pick; a choice between two
+    /// things does not, and neither does an open question.
+    #[test]
+    fn a_yes_no_question_gets_yes_and_no() {
+        let open = |q: &str| {
+            let (tx, _rx) = oneshot::channel();
+            Asking::new(q.into(), Vec::new(), String::new(), Some(tx))
+        };
+        let yn = open("Should I also update the README?");
+        assert_eq!(yn.options, vec!["Yes", "No"]);
+        assert!(!yn.custom, "it opens on the choices");
+        assert!(open("Do you want Postgres or SQLite?").options.is_empty());
+        assert!(open("Which port should it listen on?").options.is_empty());
+        assert!(
+            open("Is this ok").options.is_empty(),
+            "no question mark, no guess"
+        );
     }
 
     /// The first thing koda draws has to be drawable. The unicode wordmark is

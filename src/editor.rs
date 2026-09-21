@@ -21,6 +21,11 @@ pub struct Editor {
 const UNDO_DEPTH: usize = 32;
 
 impl Editor {
+    /// The caret is after the last character.
+    pub fn at_end(&self) -> bool {
+        self.cursor == self.buf.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }

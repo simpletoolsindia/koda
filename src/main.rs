@@ -22,6 +22,7 @@ mod mcp;
 mod md;
 mod memory;
 mod panel;
+mod picker;
 mod prompt;
 mod repomap;
 mod session;
@@ -588,6 +589,7 @@ async fn headless(
             Event::AskUser {
                 question,
                 options: _,
+                context: _,
                 reply,
             } => {
                 // Headless has nobody to ask; dropping the sender makes the tool

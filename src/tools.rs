@@ -308,8 +308,11 @@ fn build_specs() -> Vec<Spec> {
             desc: "Ask the user a question and wait for their answer. Use this when a \
                    decision genuinely needs the user — an ambiguous requirement, a choice \
                    between real alternatives, a missing detail you cannot infer. Do not use \
-                   it for things you can determine yourself by reading the code. Keep the \
-                   question short and specific. When there are a few clear alternatives, pass \
+                   it for things you can determine yourself by reading the code. Ask ONE \
+                   concrete question per call — never an announcement like \"I'm going to \
+                   ask you some questions\": ask the first question itself. Keep it short \
+                   and specific; put any background in `context`. A yes/no question gets \
+                   Yes/No buttons by itself. When there are a few clear alternatives, pass \
                    them as `options` — the user picks one from a dropdown (a 'custom answer' \
                    entry is always added so they can type something else). The user's reply \
                    comes back as the result.",
@@ -317,6 +320,7 @@ fn build_specs() -> Vec<Spec> {
                 "type": "object",
                 "properties": {
                     "question": str_prop("The question to put to the user, one or two sentences."),
+                    "context": str_prop("Optional: one short line of why you are asking, shown above the question."),
                     "options": {
                         "type": "array",
                         "description": "Optional list of concise choices to offer as a \

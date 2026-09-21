@@ -48,6 +48,8 @@ pub enum Event {
     AskUser {
         question: String,
         options: Vec<String>,
+        /// Why it is asked, when the model said. Shown above the question.
+        context: String,
         reply: oneshot::Sender<String>,
     },
     ToolStart {
@@ -4021,6 +4023,21 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
+        if announces_questions(&question) {
+            // "I'm going to ask you some questions about the project?" asks
+            // nothing, and the person facing it has nothing to answer. Send
+            // the model back for the real question instead of showing it.
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: that announces questions instead of asking one, so there is \
+                          nothing for the user to answer. Call ask_user with the first \
+                          actual question — one question per call, with `options` when there \
+                          are a few clear choices."
+                    .into(),
+                summary: "ask_user: not a question".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
         if self.quiet || self.depth > 0 {
             return tools::Outcome {
                 ok: false,
@@ -4043,12 +4060,27 @@ impl Agent {
                     .collect()
             })
             .unwrap_or_default();
+        let context = args
+            .get("context")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let _ = tx.send(Event::AskUser {
             question: question.clone(),
             options,
+            context,
             reply,
         });
         match rx.await {
+            Ok(answer) if answer == "\u{0}skip" => tools::Outcome {
+                ok: true,
+                content: "The user skipped this question. Decide with your best judgement, \
+                          and say briefly what you assumed."
+                    .into(),
+                summary: "skipped".into(),
+                view: tools::ToolView::Plain,
+            },
             Ok(answer) if !answer.trim().is_empty() => {
                 crate::tel_info!("agent", "user answered", "q" => question);
                 tools::Outcome {
@@ -6024,6 +6056,45 @@ fn writes_source_files(cmd: &str) -> bool {
         })
 }
 
+/// An `ask_user` "question" that only announces questions to come, or asks
+/// for permission to ask: there is no answer to give it.
+fn announces_questions(q: &str) -> bool {
+    let q = q.trim().to_lowercase().replace('’', "'");
+    const OPENERS: &[&str] = &[
+        "i'm going to ask",
+        "i am going to ask",
+        "i will ask",
+        "i'll ask",
+        "i'll be asking",
+        "let me ask you",
+        "i have a few questions",
+        "i have some questions",
+        "i have a couple of questions",
+        "i need to ask you",
+        "i'd like to ask",
+        "i would like to ask",
+        "i want to ask",
+        "can i ask you",
+        "may i ask you",
+        "let's go through",
+        "before we start",
+        "a few questions",
+        "some questions",
+    ];
+    if !OPENERS.iter().any(|o| q.starts_with(o)) {
+        return false;
+    }
+    // "I have a few questions: which database?" does ask one — after the
+    // colon or in a second sentence. Only the bare announcement is refused.
+    let tail = q
+        .split_once(':')
+        .map(|(_, t)| t)
+        .or_else(|| q.split_once(". ").map(|(_, t)| t))
+        .or_else(|| q.split_once("? ").map(|(_, t)| t))
+        .unwrap_or("");
+    !tail.contains('?')
+}
+
 fn is_verification_command(cmd: &str) -> bool {
     const VERBS: &[&str] = &[
         "cargo check",
@@ -7098,6 +7169,26 @@ mod tests {
     /// The commands these runs actually produced. The three that skipped
     /// verification ran only the bottom group, so a looser "did it run
     /// anything?" test would have passed all three.
+    #[test]
+    fn an_announcement_is_not_a_question() {
+        for q in [
+            "I'm going to ask questions to you about the project?",
+            "I have a few questions about your setup.",
+            "Can I ask you some questions?",
+            "Let me ask you a few things about the deployment.",
+        ] {
+            assert!(super::announces_questions(q), "{q}");
+        }
+        for q in [
+            "Which database should the service use?",
+            "I have a few questions: which database do you use?",
+            "Should I also update the README?",
+            "I'm going to ask about tests. Do you want unit or integration tests?",
+        ] {
+            assert!(!super::announces_questions(q), "{q}");
+        }
+    }
+
     #[test]
     fn verification_commands_are_told_from_busywork() {
         for c in [

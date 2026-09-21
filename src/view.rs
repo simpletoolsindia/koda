@@ -921,6 +921,18 @@ impl Transcript {
     /// Offsets are sorted, so the first visible block is a binary search rather
     /// than a walk from the top — the difference between O(blocks) and
     /// O(log blocks) on every single frame.
+    /// The text of the latest reply, if nothing the user wrote came after it.
+    pub fn last_reply(&self) -> Option<String> {
+        for b in self.blocks.iter().rev() {
+            match &b.item {
+                Item::Assistant(s) => return Some(s.clone()),
+                Item::User(_) => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Whether a recent tool card is still moving: running, or settling out
     /// of its finish flash. The frame clock has to keep ticking for the second
     /// case after the turn itself has ended.
