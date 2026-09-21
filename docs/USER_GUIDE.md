@@ -516,6 +516,7 @@ These are the exact command names koda recognizes. Type `/` to see them all;
 | `/motion` | Turn animation on or off. |
 | `/mouse` (`/select`) | Toggle mouse capture. On, the wheel scrolls and dragging selects. Saved to config. |
 | `/reveal` | Toggle progressive text reveal. |
+| `/intro` | Play the opening titles again. |
 | `/copy` | Copy the last reply to the clipboard. |
 | `/cwd` (`/pwd`) | Show the workspace root. |
 | `/quit` (`/exit`, `/q`) | Exit koda. |
@@ -993,6 +994,10 @@ Other appearance controls:
 
 - `icons` (`auto`/`unicode`/`ascii`) picks the glyph set; `ascii` replaces box
   drawing and braille for terminals that cannot render them.
+- koda opens with a short title sequence (about 2 s): the mark assembles
+  from particles, the name types in, and it dissolves into the welcome card.
+  Any key skips it, and the key still counts. `intro = false` turns it off;
+  it never plays with motion off. `/intro` replays it.
 - `/motion` toggles all animation; `/reveal` toggles just the progressive text
   reveal. `NO_MOTION`/`REDUCED_MOTION` env vars and a non-tty stdout disable
   animation regardless of config.

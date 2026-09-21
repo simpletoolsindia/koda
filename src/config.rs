@@ -273,6 +273,9 @@ pub struct Config {
     /// want spinners and gauges but find the text reveal distracting. Requires
     /// `motion` to have any effect.
     pub reveal: bool,
+    /// Play the short opening titles when koda starts. Needs `motion`; any key
+    /// skips them, and `/intro` replays them.
+    pub intro: bool,
     /// Capture the mouse so the wheel scrolls the transcript — what most people
     /// expect from a scrollable pane. On by default. Turn it off (`/mouse`, or
     /// here) to hand click-drag back to the terminal for native text selection
@@ -785,6 +788,7 @@ impl Default for Config {
             sync_output: true,
             motion: true,
             reveal: true,
+            intro: true,
             mouse_capture: true,
             vision: "auto".into(),
             providers: Vec::new(),
@@ -1311,6 +1315,10 @@ motion = true
 # Reveal streaming replies progressively (typed in) rather than all at once.
 # Needs motion = true. Toggle live with /reveal.
 reveal = true
+
+# The opening titles when koda starts (about 2 s; any key skips them).
+# Needs motion = true. Replay them with /intro.
+intro = true
 
 # Palette: auto (neon), dark, neon, ansi (your terminal's 16 colours),
 # catppuccin-mocha, tokyo-night, gruvbox-dark, nord, dracula, rose-pine,

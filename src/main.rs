@@ -14,6 +14,7 @@ mod fuzzy;
 mod fx;
 mod graph;
 mod index;
+mod intro;
 mod learning;
 mod llm;
 mod log;

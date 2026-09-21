@@ -298,6 +298,7 @@ const COMMANDS: &[(&str, &str)] = &[
         "toggle mouse capture (on = wheel scrolls + drag selects)",
     ),
     ("/reveal", "toggle progressive text reveal"),
+    ("/intro", "play the opening titles again"),
     ("/copy", "copy last reply to the clipboard"),
     ("/cwd", "show the workspace root"),
     ("/quit", "exit koda"),
@@ -733,6 +734,9 @@ pub struct App {
     /// When the welcome banner was shown, for its brief entrance shimmer. None
     /// once the animation has finished (or when motion is off).
     welcome_at: Option<Instant>,
+    /// When the opening titles started. None once they have played, been
+    /// skipped, or were never wanted.
+    intro_at: Option<Instant>,
     /// Emit DEC 2026 markers around each frame.
     sync_output: bool,
     /// Whether the mouse is currently captured (wheel scroll vs native select).
@@ -1558,6 +1562,12 @@ impl App {
             || self
                 .welcome_at
                 .is_some_and(|t| t.elapsed() < WELCOME_ANIM)
+            // The opening titles, bounded like everything else here. Asked
+            // for until the draw that finds them over has cleared them: stop
+            // at the deadline instead and the last, half-dissolved frame
+            // stays on screen, since nothing else wakes an idle koda to
+            // repaint it.
+            || self.intro_at.is_some()
             // …and the curtain call, which is the only other thing that moves
             // on its own. Both are bounded, so an idle koda still does nothing.
             || self.dance_at.is_some_and(|t| t.elapsed() < crate::curtain::DURATION)
@@ -1846,6 +1856,7 @@ impl App {
         self.dance_at = None;
         self.welcome_at = None;
         self.visitor_at = None;
+        self.intro_at = None;
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -3579,6 +3590,16 @@ impl App {
                     fx::Tone::Info,
                 );
             }
+            "intro" => {
+                if self.motion.animates() {
+                    self.intro_at = Some(Instant::now());
+                } else {
+                    self.flash(
+                        "the intro needs motion on (/motion)".to_string(),
+                        fx::Tone::Info,
+                    );
+                }
+            }
             "reveal" => {
                 // The streaming text reveal is a distinct preference from
                 // overall motion: keep spinners and gauges, drop the typing-in.
@@ -4505,6 +4526,30 @@ fn draw(f: &mut Frame, app: &mut App) {
             draw_visitor(f, app, spacer_area, elapsed);
         } else if elapsed >= VISITOR_WALK {
             app.visitor_at = None;
+        }
+    }
+
+    // The opening titles cover the screen until they dissolve into it. When
+    // they end, the welcome card's own shimmer picks up the hand-off.
+    if let Some(started) = app.intro_at {
+        let drawn = crate::intro::draw(
+            f.buffer_mut(),
+            area,
+            &app.theme,
+            &app.glyphs,
+            mark_art(&app.glyphs),
+            &crate::intro::subtitle(
+                env!("CARGO_PKG_VERSION"),
+                tagline(app.tip_seed),
+                &app.glyphs,
+            ),
+            started.elapsed(),
+        );
+        if !drawn {
+            app.intro_at = None;
+            if app.motion.animates() && app.scroll == 0 {
+                app.welcome_at = Some(Instant::now());
+            }
         }
     }
 
@@ -6648,6 +6693,7 @@ pub async fn run(
         logs: None,
         log_version: 0,
         welcome_at: None,
+        intro_at: None,
         // Emission is decoupled from config alone: a terminal that mishandles
         // DEC 2026 (Apple Terminal, screen) must get neither the faster cadence
         // nor the markers, or it tears *worse*. Both the draw wrapper below and
@@ -6699,6 +6745,11 @@ pub async fn run(
         app.last_size = (size.width, size.height);
     }
     app.show_welcome(&cfg);
+    // The opening titles, in front of the welcome card. Only when things move
+    // at all: under reduced or no motion the card is simply there.
+    if cfg.intro && app.motion.animates() {
+        app.intro_at = Some(Instant::now());
+    }
     // A custom system prompt is sent whole on every single request, so an
     // oversized one is a standing bill nothing else reports. One config here
     // held 80 KB of repeated filler -- a stray test write -- which cost about

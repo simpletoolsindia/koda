@@ -207,6 +207,7 @@ contents.
 | `/settings` | interactive settings page for everything below |
 | `/think` | show or hide model reasoning |
 | `/motion` `/reveal` | animation on/off · progressive text reveal on/off |
+| `/intro` | replay the opening titles |
 | `/mouse` | toggle mouse capture — on, the wheel scrolls and dragging selects & copies (remembered) |
 | `/undo` | put back the files the agent changed in the last turn |
 | `/keys` `/tools` `/copy` `/clear` `/cwd` `/help` `/quit` | |
@@ -983,6 +984,7 @@ theme = "auto"             # auto resolves to the neon palette
 icons = "auto"
 motion = true              # animation; toggle with /motion
 reveal = true              # progressive text reveal; toggle with /reveal
+intro = true               # opening titles at launch (any key skips); replay with /intro
 mouse_capture = true       # on: wheel scrolls, drag selects; off: the terminal does both
 sync_output = true         # atomic frames (DEC 2026)
 shell = "/bin/sh"
