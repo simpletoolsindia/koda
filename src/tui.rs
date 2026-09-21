@@ -215,6 +215,27 @@ const BANNER_ASCII: [&str; 5] = [
 ];
 
 /// The wordmark this terminal can actually draw.
+/// The welcome card's mark: a `>_` prompt in blocks — what koda is, drawn in
+/// the space the old block-letter wordmark filled at three times the size.
+const MARK_ART: [&str; 4] = ["██▄     ", " ▀██▄   ", " ▄██▀   ", "██▀ ▄▄▄▄"];
+const MARK_ASCII: [&str; 4] = ["\\\\      ", " \\\\     ", " //     ", "//  ____"];
+
+fn mark_art(g: &Glyphs) -> &'static [&'static str] {
+    if g.fine_blocks {
+        &MARK_ART
+    } else {
+        &MARK_ASCII
+    }
+}
+
+/// Where the mark sits in the transcript when the card is at the top: one
+/// blank line, the top edge, a padding line — then the mark, indented past
+/// the margin, the edge and the padding.
+const MARK_Y: u16 = 3;
+const MARK_X: u16 = 6;
+/// Below this, the card has no frame and no mark.
+const CARD_MIN_WIDTH: usize = 60;
+
 fn banner_art(g: &Glyphs) -> &'static [&'static str] {
     if g.fine_blocks {
         &BANNER_ART
@@ -1590,95 +1611,192 @@ impl App {
             return;
         }
 
-        // KODA in a condensed half-block face with a horizontal 3-stop colour
-        // gradient (accent → accent-alt → info) so it reads as one lit object.
-        // Falls back to a flat accent on non-truecolor palettes (ANSI/mono).
-        let art = banner_art(&g);
-        let cols = art.iter().map(|r| r.chars().count()).max().unwrap_or(1);
-        let grad = |col: usize| -> ratatui::style::Color {
+        // A welcome card, the shape current coding CLIs open with: a small
+        // mark, the name and version, and what this session is running
+        // against, at a glance — then the few things a new user needs.
+        let grad = |x: f32| -> ratatui::style::Color {
             match (as_rgb(t.accent), as_rgb(t.accent_alt), as_rgb(t.info)) {
                 (Some(a), Some(b), Some(c)) => {
-                    // 0..1 across the width; first half a→b, second half b→c.
-                    let x = col as f32 / cols.max(1) as f32;
-                    let (r, g, bl) = if x < 0.5 {
+                    let (r, gg, bl) = if x < 0.5 {
                         anim::lerp_rgb(a, b, x * 2.0)
                     } else {
                         anim::lerp_rgb(b, c, (x - 0.5) * 2.0)
                     };
-                    ratatui::style::Color::Rgb(r, g, bl)
+                    ratatui::style::Color::Rgb(r, gg, bl)
                 }
                 _ => t.accent,
             }
         };
+        let dir = self
+            .root
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.root.display().to_string());
+        let provider = if cfg.active().is_some() {
+            format!(
+                "{} {} {}",
+                cfg.provider_label(),
+                g.sep,
+                host_of(&self.endpoint)
+            )
+        } else {
+            host_of(&self.endpoint)
+        };
+        let branch_mark = if g.fine_blocks { "⎇" } else { "on" };
+        let mut where_ = dir;
+        if let Some(b) = &self.branch {
+            where_.push_str(&format!("  {branch_mark} {b}"));
+        }
+        let mode = format!("{} {} {}", self.mode.label(), g.sep, self.auto_tier.label());
+        // The name in the gradient, letter by letter.
+        let name_spans = |spans: &mut Vec<Span<'static>>| {
+            for (i, ch) in "koda".chars().enumerate() {
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default()
+                        .fg(grad(i as f32 / 3.0))
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        };
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let beside: [Vec<Span<'static>>; 4] = [
+            {
+                let mut v = Vec::new();
+                name_spans(&mut v);
+                v.push(Span::styled(format!("  {version}"), t.dim()));
+                v
+            },
+            vec![Span::styled(
+                tagline(self.tip_seed).to_string(),
+                t.fg(t.accent_alt).add_modifier(Modifier::ITALIC),
+            )],
+            vec![
+                Span::styled(cfg.model.clone(), t.emphasis(t.text)),
+                Span::styled(format!("  {}  {provider}", g.sep), t.dim()),
+            ],
+            vec![
+                Span::styled(where_, t.fg(t.info)),
+                Span::styled(format!("  {}  ", g.sep), t.dim()),
+                Span::styled(mode, t.fg(t.muted)),
+            ],
+        ];
 
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::default());
-        for row in art.iter() {
-            let mut spans = vec![Span::raw("  ".to_string())];
-            for (j, ch) in row.chars().enumerate() {
-                if ch == ' ' {
-                    spans.push(Span::raw(" ".to_string()));
-                } else {
-                    spans.push(Span::styled(
+        let mut lines: Vec<Line<'static>> = vec![Line::default()];
+        if width >= CARD_MIN_WIDTH {
+            let inner = width.min(80).saturating_sub(4);
+            let edge = t.fg(t.border);
+            let row = |content: Vec<Span<'static>>| -> Line<'static> {
+                // Always a space before the right edge, however long the text.
+                let content = truncate_line(content, inner.saturating_sub(2) as u16).spans;
+                let used: usize = content.iter().map(|s| s.content.width()).sum();
+                let mut spans = vec![Span::styled(format!("  {} ", g.vline), edge)];
+                spans.extend(content);
+                spans.push(Span::raw(" ".repeat(inner.saturating_sub(used + 1))));
+                spans.push(Span::styled(g.vline.to_string(), edge));
+                truncate_line(spans, (inner + 4) as u16)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}{}{}", g.corner_tl, g.hline.repeat(inner), g.corner_tr),
+                edge,
+            )));
+            lines.push(row(Vec::new()));
+            let art = mark_art(&g);
+            let cols = art.iter().map(|r| r.width()).max().unwrap_or(1);
+            for (i, text) in beside.into_iter().enumerate() {
+                let mut content = vec![Span::raw("  ".to_string())];
+                for (j, ch) in art[i].chars().enumerate() {
+                    content.push(Span::styled(
                         ch.to_string(),
-                        Style::default().fg(grad(j)).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(grad(j as f32 / cols as f32))
+                            .add_modifier(Modifier::BOLD),
                     ));
                 }
+                content.push(Span::raw("   ".to_string()));
+                content.extend(text);
+                lines.push(row(content));
             }
-            lines.push(Line::from(spans));
+            lines.push(row(Vec::new()));
+            lines.push(Line::from(Span::styled(
+                format!("  {}{}{}", g.corner_bl, g.hline.repeat(inner), g.corner_br),
+                edge,
+            )));
+        } else {
+            // Too narrow for a frame: the same facts, one per line.
+            for text in beside {
+                let mut v = vec![Span::raw("  ".to_string())];
+                v.extend(text);
+                lines.push(truncate_line(v, width as u16));
+            }
         }
         lines.push(Line::default());
 
-        // A tagline + a compact quick-start, so the empty state guides a new user
-        // instead of leaving a banner floating over dead space. Centered under the
-        // banner, styled entirely from the theme (no hard-coded colours) so it
-        // adapts to every palette and the ASCII glyph set.
-        let indent = "  ".to_string();
-        let model_short: String = cfg.model.chars().take(28).collect();
-        lines.push(Line::from(vec![
-            Span::raw(indent.clone()),
-            Span::styled(tagline(self.tip_seed).to_string(), t.emphasis(t.accent_alt)),
-            Span::styled(format!("  {}  {}", g.sep, model_short), t.dim()),
-        ]));
-        lines.push(Line::default());
-        // Quick-start tips: the few things a new user most needs, one per line,
-        // key highlighted in the accent, description dimmed.
-        // The web UI binds before the TUI takes the screen, so the address it
-        // printed to stderr is gone by the time anyone could read it. Show it
-        // as one more row, and only when a socket actually came up — the port
-        // it settled on is not always the configured one.
+        // What to do next, in two short rows.
+        let key = |k: &str| {
+            Span::styled(
+                k.to_string(),
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            )
+        };
+        let dim = |d: &str| Span::styled(d.to_string(), t.dim());
         let web = crate::webui::address().map(|addr| format!("http://{addr}"));
-        let mut tips: Vec<(&str, &str)> = vec![
+        // Each row is a label and whole hints; a narrow screen drops the
+        // hints that do not fit rather than cutting one in half.
+        let up = if g.fine_blocks { "↑" } else { "up" };
+        let hint = |k: &str, d: &str| vec![key(k), dim(d)];
+        let mut rows: Vec<(&str, Vec<Vec<Span<'static>>>)> = vec![
             (
-                "type a task",
-                "and press enter — e.g. \"fix the failing test\"",
+                "  try   ",
+                vec![
+                    vec![Span::styled(
+                        "\"fix the failing test\"".to_string(),
+                        t.body(),
+                    )],
+                    vec![
+                        dim(&format!("  {}  ", g.sep)),
+                        key("@"),
+                        dim(" attach a file"),
+                    ],
+                ],
             ),
-            ("@", "attach a file to your message"),
-            ("/help", "see all commands"),
-            ("ctrl+p", "switch mode (plan · execute · vibe)"),
+            (
+                "  keys  ",
+                vec![
+                    hint("/", " commands  "),
+                    hint("ctrl+p", " mode  "),
+                    hint(up, " history  "),
+                    hint("esc", " interrupt"),
+                ],
+            ),
         ];
         if let Some(web) = &web {
-            tips.push(("web ui", web));
+            rows.push((
+                "  web   ",
+                vec![vec![Span::styled(web.clone(), t.fg(t.info))]],
+            ));
         }
-        for (key, desc) in tips {
-            lines.push(Line::from(vec![
-                Span::raw(indent.clone()),
-                Span::styled(format!("{} ", g.bullet), t.dim()),
-                Span::styled(
-                    format!("{key:<12}"),
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" {desc}"), t.dim()),
-            ]));
+        for (label, items) in rows {
+            let mut row = vec![dim(label)];
+            let mut used = label.width();
+            for item in items {
+                let w: usize = item.iter().map(|s| s.content.width()).sum();
+                if used + w > width.saturating_sub(1) && row.len() > 1 {
+                    break;
+                }
+                used += w;
+                row.extend(item);
+            }
+            lines.push(Line::from(row));
         }
         lines.push(Line::default());
 
         self.transcript.raw(lines);
         self.follow = true;
-        // Arm a brief entrance shimmer over the banner, but only when motion is
-        // on and the terminal is a real TTY — never delay or animate for a pipe
-        // or a reduced-motion preference (the research is unanimous on this).
-        if self.motion.animates() {
+        // Arm a brief entrance over the mark, but only when motion is on and
+        // the terminal is a real TTY — never delay or animate for a pipe or a
+        // reduced-motion preference — and only when there is a mark to draw.
+        if self.motion.animates() && width >= CARD_MIN_WIDTH {
             self.welcome_at = Some(Instant::now());
         }
     }
@@ -5647,7 +5765,7 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
     else {
         return; // No gradient on non-truecolor palettes; nothing to shimmer.
     };
-    let art = banner_art(&app.glyphs);
+    let art = mark_art(&app.glyphs);
     // Display width, not `chars().count()`: the two agree for this face only by
     // accident, and the next glyph added would break the wavefront silently.
     let cols = art
@@ -5678,12 +5796,12 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
         WELCOME_ANIM.mul_f32(1.0 - REVEAL_FRACTION),
     );
     for (i, row) in art.iter().enumerate() {
-        // Row 0 of the banner sits one line below the top (a leading blank).
-        let y = text_area.y + 1 + i as u16;
+        // The mark sits inside the welcome card (see MARK_X / MARK_Y).
+        let y = text_area.y + MARK_Y + i as u16;
         if y >= text_area.y + text_area.height {
             break;
         }
-        let mut spans = vec![Span::raw("  ".to_string())];
+        let mut spans: Vec<Span<'static>> = Vec::new();
         for (j, ch) in row.chars().enumerate() {
             if ch == ' ' {
                 spans.push(Span::raw(" ".to_string()));
@@ -5743,10 +5861,12 @@ fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration)
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        // Only the mark's own cells: the card's edge and the text beside it
+        // are never touched.
         let rect = Rect {
-            x: text_area.x,
+            x: text_area.x + MARK_X,
             y,
-            width: text_area.width,
+            width: (cols as u16).min(text_area.width.saturating_sub(MARK_X)),
             height: 1,
         };
         f.render_widget(Paragraph::new(Line::from(spans)), rect);
@@ -7107,6 +7227,20 @@ Which did you mean?";
     /// only correct if every glyph is one column wide, and there has to be a
     /// face for terminals that cannot render it at all — which is exactly the
     /// case `theme::glyphs` picks ASCII for.
+    /// The welcome mark is animated cell by cell at fixed columns, so every
+    /// row must be the same width, one column per character, in both faces.
+    #[test]
+    fn the_welcome_mark_is_rectangular() {
+        for art in [&MARK_ART[..], &MARK_ASCII[..]] {
+            let w: Vec<usize> = art.iter().map(|r| UnicodeWidthStr::width(*r)).collect();
+            assert!(w.windows(2).all(|p| p[0] == p[1]), "{w:?}");
+            assert!(art
+                .iter()
+                .all(|r| r.chars().count() == UnicodeWidthStr::width(*r)));
+        }
+        assert!(MARK_ASCII.iter().all(|r| r.is_ascii()));
+    }
+
     #[test]
     fn both_wordmarks_are_rectangular_and_one_column_per_cell() {
         for (name, art) in [("unicode", &BANNER_ART[..]), ("ascii", &BANNER_ASCII[..])] {

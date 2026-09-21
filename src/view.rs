@@ -1083,29 +1083,61 @@ pub static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// glyph set is not ASCII). Set by `tui::draw` like `MOTION`.
 pub static EMOJI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Each tool's emoji, as frames: cycled while the tool runs, the first one
-/// once it is done. Every one is a default-emoji-presentation character — two
-/// columns wide on every terminal, no variation selector to be measured one
-/// way and drawn another.
-pub fn tool_emoji(name: &str) -> &'static [&'static str] {
+/// A tool's emoji, as a tiny story: the frames it plays while it runs, how
+/// many 80 ms ticks each is held, and the frame it lands on when done. Each
+/// acts out the work — a page being written, a book opening, an hourglass
+/// turning, a folder opening — rather than one icon blinking. Every glyph is a
+/// default-emoji-presentation character: two columns on every terminal, with
+/// no variation selector to be measured one way and drawn another.
+pub struct EmojiAnim {
+    pub frames: &'static [&'static str],
+    pub hold: usize,
+    pub done: &'static str,
+}
+
+pub fn tool_emoji(name: &str) -> EmojiAnim {
+    let a = |frames: &'static [&'static str], hold: usize, done: &'static str| EmojiAnim {
+        frames,
+        hold,
+        done,
+    };
     match name {
-        "web_fetch" | "web_search" => &["🌍", "🌎", "🌏"],
-        "browse" => &["🧭", "🌐"],
-        "search" | "find_files" | "codegraph" => &["🔍", "🔎"],
-        "read_file" | "view_image" => &["📖", "📗", "📘", "📙"],
-        "write_file" | "edit_file" => &["📝"],
-        "list_dir" => &["📁", "📂"],
-        "run_command" => &["⏳", "⌛"],
-        "verify" => &["🧪", "🔬"],
-        "delegate" => &["🤖"],
-        "lsp" => &["🧠"],
-        "debug" => &["🐞", "🐛"],
-        "todo" => &["📋"],
-        "ask_user" => &["💬"],
-        "remember" | "skill" | "manage_skill" => &["📌"],
-        "about_creator" => &["👋"],
-        other if crate::mcp::is_mcp_tool(other) || other == "mcp" => &["🔌"],
-        _ => &["🔧"],
+        // A blank page, the pencil at work, the written page.
+        "write_file" => a(&["📄", "📝", "📃"], 4, "📃"),
+        // The page and the pencil, back and forth.
+        "edit_file" => a(&["📃", "📝"], 4, "📝"),
+        // A closed book opening.
+        "read_file" => a(&["📕", "📖"], 5, "📖"),
+        "view_image" => a(&["📷", "📸"], 4, "📷"),
+        // A folder opening.
+        "list_dir" => a(&["📁", "📂"], 5, "📂"),
+        // A folder, and the glass going through it.
+        "find_files" => a(&["📂", "🔎"], 4, "📂"),
+        // The glass tilting back and forth.
+        "search" => a(&["🔍", "🔎"], 3, "🔎"),
+        "codegraph" => a(&["🧩", "🔎"], 4, "🧩"),
+        // The hourglass turning.
+        "run_command" => a(&["⏳", "⌛"], 6, "⌛"),
+        // Test tube, microscope, dish: an experiment in progress.
+        "verify" => a(&["🧪", "🔬", "🧫"], 4, "🧪"),
+        // The globe turning.
+        "web_fetch" => a(&["🌍", "🌎", "🌏"], 3, "🌐"),
+        "web_search" => a(&["🔎", "🌐"], 4, "🌐"),
+        "browse" => a(&["🧭", "🌐"], 4, "🧭"),
+        // Handing work off.
+        "delegate" => a(&["🤖", "📨"], 5, "🤖"),
+        "lsp" => a(&["🧠", "💭"], 5, "🧠"),
+        // The bug crawling.
+        "debug" => a(&["🐛", "🐞"], 4, "🐞"),
+        // Ticking a box.
+        "todo" => a(&["📋", "✅"], 5, "📋"),
+        "ask_user" => a(&["💬", "💭"], 5, "💬"),
+        // Thinking it over, then saving it.
+        "remember" => a(&["🧠", "💾"], 5, "💾"),
+        "skill" | "manage_skill" => a(&["📚", "📖"], 5, "📚"),
+        "about_creator" => a(&["👋"], 5, "👋"),
+        other if crate::mcp::is_mcp_tool(other) || other == "mcp" => a(&["🔌", "⚡"], 4, "🔌"),
+        _ => a(&["🔧", "🔩"], 4, "🔧"),
     }
 }
 
@@ -1654,7 +1686,12 @@ fn render_draft(
         meta.push(human_ms(started.elapsed()));
     }
     let spinner = if emoji_on() {
-        (tool_emoji(name)[0].to_string(), t.warning)
+        // The file being written: the story plays while the body streams.
+        let e = tool_emoji(name);
+        (
+            e.frames[(tick / e.hold) % e.frames.len()].to_string(),
+            t.warning,
+        )
     } else {
         (g.spinner[tick % g.spinner.len()].to_string(), t.warning)
     };
@@ -1832,10 +1869,13 @@ fn render_tool(
     let icon = if emoji_on() {
         // A running tool's emoji steps every third tick (~240 ms): lively,
         // not frantic. It settles on its first frame, or ❌.
-        let frames = tool_emoji(name);
+        let e = tool_emoji(name);
         match ok {
-            None => (frames[(tick / 3) % frames.len()].to_string(), t.warning),
-            Some(true) => (frames[0].to_string(), t.success),
+            None => (
+                e.frames[(tick / e.hold) % e.frames.len()].to_string(),
+                t.warning,
+            ),
+            Some(true) => (e.done.to_string(), t.success),
             Some(false) => ("❌".to_string(), t.error),
         }
     } else {
@@ -2937,7 +2977,9 @@ mod tests {
             "mcp__gh__x",
             "anything",
         ] {
-            for f in super::tool_emoji(name) {
+            let e = super::tool_emoji(name);
+            assert!(e.hold > 0, "{name}");
+            for f in e.frames.iter().chain(std::iter::once(&e.done)) {
                 assert_eq!(f.width(), 2, "{name}: {f:?}");
                 assert_eq!(f.chars().count(), 1, "{name}: no selector in {f:?}");
             }
