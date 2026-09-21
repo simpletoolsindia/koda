@@ -2041,7 +2041,9 @@ impl Agent {
             ));
             return;
         }
-        let short = self.git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+        let short = self
+            .git(&["rev-parse", "--short", "HEAD"])
+            .unwrap_or_default();
         let subject = message.lines().next().unwrap_or("").to_string();
         notice(format!(
             "committed {short} — {subject}\n(undo with: git reset --soft HEAD~1)"
@@ -2129,22 +2131,22 @@ impl Agent {
             ]
         } else {
             vec![
-            Message::system(
-                "You are supervising a coding agent that has just used up its step budget. \
+                Message::system(
+                    "You are supervising a coding agent that has just used up its step budget. \
                  Decide whether it still has necessary work left, or whether the task is \
                  essentially done (or so stuck that more steps will not help). Answer with \
                  ONE word on the first line: CONTINUE or STOP. Then one short sentence \
                  saying why. Choose STOP if the request is satisfied, if the agent is \
                  repeating itself, or if it needs the user to answer something. Choose \
                  CONTINUE only when concrete steps remain that the agent can do on its own.",
-            ),
-            Message::user(format!(
-                "What the user asked for (their recent messages, oldest first):\n{}\n\n\
+                ),
+                Message::user(format!(
+                    "What the user asked for (their recent messages, oldest first):\n{}\n\n\
                  Recent activity (oldest first):\n{}\n\n\
                  Does the agent need more steps? Answer CONTINUE or STOP.",
-                self.recent_requests(3),
-                self.recent_digest(digest),
-            )),
+                    self.recent_requests(3),
+                    self.recent_digest(digest),
+                )),
             ]
         };
         let req = ChatRequest {
@@ -2263,7 +2265,10 @@ impl Agent {
         // stay if the user turned them on, since fast is about size not policy.
         if self.cfg.fast {
             list.retain(|t| {
-                let name = t.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("");
+                let name = t
+                    .pointer("/function/name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
                 // codegraph is in the core set but only usable when enabled;
                 // advertising it while off would spend a turn on a refusal.
                 if name == "codegraph" {
@@ -3182,7 +3187,11 @@ impl Agent {
             // and is usually the sharpest check available. No built-in tool name
             // contains these, so only a custom tool can match.
             let n = name.as_str();
-            if n.contains("verif") || n.contains("check") || n.contains("lint") || n.contains("typecheck") {
+            if n.contains("verif")
+                || n.contains("check")
+                || n.contains("lint")
+                || n.contains("typecheck")
+            {
                 self.ran_check = true;
                 self.last_check_ok = Some(outcome.ok);
             }
@@ -5808,7 +5817,7 @@ fn writes_source_files(cmd: &str) -> bool {
         ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".c", ".h", ".cc", ".cpp",
         ".swift", ".kt", ".rb", ".cs", ".toml", ".json",
     ];
-    cmd.split(|c| c == '&' || c == ';' || c == '|' || c == '\n')
+    cmd.split(['&', ';', '|', '\n'])
         .map(|seg| seg.trim().trim_start_matches("sudo ").to_ascii_lowercase())
         .any(|seg| {
             (seg.starts_with("cp ") || seg.starts_with("mv ") || seg.starts_with("install "))
@@ -5818,15 +5827,42 @@ fn writes_source_files(cmd: &str) -> bool {
 
 fn is_verification_command(cmd: &str) -> bool {
     const VERBS: &[&str] = &[
-        "cargo check", "cargo build", "cargo test", "cargo clippy", "cargo metadata",
-        "cargo fmt", "cargo run",
-        "npm test", "npm run", "npx tsc", "yarn test", "yarn build", "pnpm test", "pnpm build",
-        "go build", "go test", "go vet",
-        "pytest", "tox", "mypy", "ruff", "flake8",
-        "make", "just", "mvn", "gradle", "dotnet build", "dotnet test",
-        "eslint", "swift build", "xcodebuild", "cmake", "ctest", "bazel",
+        "cargo check",
+        "cargo build",
+        "cargo test",
+        "cargo clippy",
+        "cargo metadata",
+        "cargo fmt",
+        "cargo run",
+        "npm test",
+        "npm run",
+        "npx tsc",
+        "yarn test",
+        "yarn build",
+        "pnpm test",
+        "pnpm build",
+        "go build",
+        "go test",
+        "go vet",
+        "pytest",
+        "tox",
+        "mypy",
+        "ruff",
+        "flake8",
+        "make",
+        "just",
+        "mvn",
+        "gradle",
+        "dotnet build",
+        "dotnet test",
+        "eslint",
+        "swift build",
+        "xcodebuild",
+        "cmake",
+        "ctest",
+        "bazel",
     ];
-    cmd.split(|c| c == '&' || c == ';' || c == '|' || c == '\n')
+    cmd.split(['&', ';', '|', '\n'])
         .map(|seg| seg.trim().trim_start_matches("sudo ").to_ascii_lowercase())
         .any(|seg| VERBS.iter().any(|v| seg.starts_with(v)))
 }
@@ -5848,7 +5884,7 @@ fn clean_commit_message(raw: &str) -> String {
     let mut s = raw.trim();
     // Unwrap a single fenced block that spans the whole reply.
     if let Some(rest) = s.strip_prefix("```") {
-        let body = rest.splitn(2, '\n').nth(1).unwrap_or("");
+        let body = rest.split_once('\n').map_or("", |(_, b)| b);
         let end = body.rfind("```").unwrap_or(body.len());
         s = body[..end].trim();
     }
@@ -5940,7 +5976,8 @@ fn strip_function_markup(text: &str) -> String {
     }
     out.push_str(rest);
     // A dangling close tag with no opener, left by a mismatched block.
-    out.replace("</tool_call>", "").replace("</function>", "")
+    out.replace("</tool_call>", "")
+        .replace("</function>", "")
         .trim()
         .to_string()
 }
@@ -6597,7 +6634,12 @@ mod tests {
         ];
         let kinds: Vec<String> = urls
             .iter()
-            .map(|u| super::failure_kind("web_fetch", &format!("web fetch failed: {u} replied 404 Not Found")))
+            .map(|u| {
+                super::failure_kind(
+                    "web_fetch",
+                    &format!("web fetch failed: {u} replied 404 Not Found"),
+                )
+            })
             .collect();
         assert!(
             kinds.iter().all(|k| k == &kinds[0]),
@@ -6830,8 +6872,7 @@ mod tests {
         ]);
         let asked = agent.recent_requests(3);
         assert_eq!(
-            asked,
-            "- install facefusion and test it with images\n- done ?",
+            asked, "- install facefusion and test it with images\n- done ?",
             "{asked}"
         );
         assert_eq!(
@@ -6844,7 +6885,8 @@ mod tests {
     /// fence or a "Here's the message:" preamble would end up in the commit.
     #[test]
     fn commit_message_is_cleaned_of_wrappers_and_preamble() {
-        let fenced = "Here is the commit message:\n\n```\nfeat(auth): add SSO login\n\n- wires OIDC\n```";
+        let fenced =
+            "Here is the commit message:\n\n```\nfeat(auth): add SSO login\n\n- wires OIDC\n```";
         assert_eq!(
             clean_commit_message(fenced),
             "feat(auth): add SSO login\n\n- wires OIDC"
@@ -6853,7 +6895,10 @@ mod tests {
         let plain = "fix(db): close the pool on shutdown\n\n- was leaking connections";
         assert_eq!(clean_commit_message(plain), plain);
         // No recognizable subject: keep from the first real line, don't drop all.
-        assert_eq!(clean_commit_message("\n\nupdated the parser\n"), "updated the parser");
+        assert_eq!(
+            clean_commit_message("\n\nupdated the parser\n"),
+            "updated the parser"
+        );
         assert!(is_commit_subject("refactor(view)!: split the renderer"));
         assert!(!is_commit_subject("this is just prose"));
     }
@@ -7603,7 +7648,10 @@ mod tests {
 
         // Ordinary prose with no markup yields nothing and is left untouched.
         assert!(Agent::parse_function_markup_calls("just a normal answer").is_empty());
-        assert_eq!(strip_function_markup("just a normal answer"), "just a normal answer");
+        assert_eq!(
+            strip_function_markup("just a normal answer"),
+            "just a normal answer"
+        );
     }
 
     /// Balanced-object extraction ignores braces inside strings and returns
@@ -7724,7 +7772,10 @@ mod tests {
         }
         // The situational ones are gone from the schema…
         for heavy in ["delegate", "manage_skill", "view_image", "about_creator"] {
-            assert!(!fast.contains(&heavy.to_string()), "{heavy} still advertised");
+            assert!(
+                !fast.contains(&heavy.to_string()),
+                "{heavy} still advertised"
+            );
         }
         // …but still dispatch by name, so nothing is unreachable.
         assert!(tools::spec("delegate").is_some());

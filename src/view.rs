@@ -1512,7 +1512,8 @@ fn render_tool(
             if *code != 0 {
                 meta.push(format!("exit {code}"));
             }
-            let head = panel::status_line_badged(Some(icon), title, None, badge.clone(), &meta, t, g);
+            let head =
+                panel::status_line_badged(Some(icon), title, None, badge.clone(), &meta, t, g);
             let mut body = vec![Line::from(vec![
                 Span::styled("$ ".to_string(), t.dim()),
                 Span::styled(command.clone(), t.emphasis(t.text)),
@@ -1572,8 +1573,15 @@ fn render_tool(
             if *truncated {
                 meta.push("truncated".into());
             }
-            let head =
-                panel::status_line_badged(Some(icon), title, Some((path.clone(), t.info)), badge.clone(), &meta, t, g);
+            let head = panel::status_line_badged(
+                Some(icon),
+                title,
+                Some((path.clone(), t.info)),
+                badge.clone(),
+                &meta,
+                t,
+                g,
+            );
             let gw = (start + src.len()).to_string().len().max(2);
             let (src, skipped) = visible_slice(src, expanded, 14);
             let mut body: Vec<Line<'static>> = src
@@ -2495,7 +2503,10 @@ mod tests {
             },
             72,
         );
-        assert!(done.contains("[done]"), "success card needs a badge: {done}");
+        assert!(
+            done.contains("[done]"),
+            "success card needs a badge: {done}"
+        );
         // The heavier oh-my-pi status glyphs are in force.
         assert_eq!(crate::theme::UNICODE.ok, "✔");
         assert_eq!(crate::theme::UNICODE.fail, "✘");
@@ -2517,8 +2528,14 @@ mod tests {
         );
         t.relayout(72);
         let failed = flat(&t.window(0, 40));
-        assert!(failed.contains("[failed]"), "failure card needs a badge: {failed}");
-        assert!(failed.contains('✘'), "failure uses the heavy cross: {failed}");
+        assert!(
+            failed.contains("[failed]"),
+            "failure card needs a badge: {failed}"
+        );
+        assert!(
+            failed.contains('✘'),
+            "failure uses the heavy cross: {failed}"
+        );
     }
 
     #[test]
@@ -3077,4 +3094,3 @@ mod perf {
         );
     }
 }
-

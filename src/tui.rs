@@ -224,7 +224,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/fork", "branch this conversation into a copy"),
     ("/name", "name this conversation so the picker shows it"),
     ("/undo", "put back the last file the agent changed"),
-    ("/commit", "generate a conventional-commit message and commit"),
+    (
+        "/commit",
+        "generate a conventional-commit message and commit",
+    ),
     ("/theme", "switch palette"),
     ("/url", "change the API base URL"),
     ("/clear", "drop the conversation context"),

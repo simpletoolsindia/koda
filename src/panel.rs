@@ -222,19 +222,9 @@ pub fn railed(
 ///
 /// Keeping one grammar for every tool is what makes a transcript of mixed tools
 /// scan as a list rather than as noise.
-pub fn status_line(
-    icon: Option<(String, Color)>,
-    title: &str,
-    desc: Option<(String, Color)>,
-    meta: &[String],
-    t: &Theme,
-    g: &Glyphs,
-) -> Vec<Span<'static>> {
-    status_line_badged(icon, title, desc, None, meta, t, g)
-}
-
-/// `status_line` plus an optional coloured `[badge]` after the title/description
-/// and before the meta — the shape oh-my-pi uses to mark `[done]`/`[failed]`.
+///
+/// An optional coloured `[badge]` goes after the title/description and before
+/// the meta — the shape oh-my-pi uses to mark `[done]`/`[failed]`.
 #[allow(clippy::too_many_arguments)]
 pub fn status_line_badged(
     icon: Option<(String, Color)>,

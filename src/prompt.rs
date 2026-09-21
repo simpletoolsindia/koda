@@ -510,7 +510,10 @@ fn python_toolchain() -> Option<String> {
     CACHE
         .get_or_init(|| {
             let out = std::process::Command::new("python3")
-                .args(["-c", "import sys; print(sys.version.split()[0]); print(sys.executable)"])
+                .args([
+                    "-c",
+                    "import sys; print(sys.version.split()[0]); print(sys.executable)",
+                ])
                 .stdin(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .output()
@@ -554,7 +557,11 @@ fn pip_interpreter() -> Option<String> {
         .lines()
         .next()?
         .to_string();
-    let interp = first.strip_prefix("#!")?.split_whitespace().next()?.to_string();
+    let interp = first
+        .strip_prefix("#!")?
+        .split_whitespace()
+        .next()?
+        .to_string();
     (!interp.ends_with("/env")).then_some(interp)
 }
 
@@ -804,7 +811,10 @@ mod tests {
         assert!(!fast.contains("CODE ANALYSIS"), "{fast}");
         assert!(!fast.contains("DELEGATION"), "{fast}");
         assert!(!fast.contains("in ONE step"), "{fast}");
-        assert!(fast.contains("codegraph"), "fast keeps a codegraph hint: {fast}");
+        assert!(
+            fast.contains("codegraph"),
+            "fast keeps a codegraph hint: {fast}"
+        );
         // But the model is still told the hidden tools exist and how to reach them.
         assert!(fast.contains("load_tools"), "{fast}");
         // And the terseness rule that stops the double-summary is stern.

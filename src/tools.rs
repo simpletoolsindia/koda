@@ -3736,7 +3736,10 @@ fn tune_browser_launch(cmd: &mut std::process::Command, cfg: &Config) {
     // Cap the page dump at the source, so a huge DOM never crosses into koda's
     // memory or the model's context. koda would truncate it anyway.
     if std::env::var_os("AGENT_BROWSER_MAX_OUTPUT").is_none() {
-        cmd.env("AGENT_BROWSER_MAX_OUTPUT", cfg.max_tool_output_bytes.to_string());
+        cmd.env(
+            "AGENT_BROWSER_MAX_OUTPUT",
+            cfg.max_tool_output_bytes.to_string(),
+        );
     }
     let idle = cfg.browser_idle_timeout.trim();
     if !idle.is_empty() {

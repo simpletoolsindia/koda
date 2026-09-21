@@ -451,16 +451,31 @@ pub async fn fetch_url(url: &str, timeout_secs: u64) -> Result<String> {
 /// The raw README of a bare `github.com/<owner>/<repo>` URL, with the repo name.
 /// Deeper paths (files, issues, trees) are left alone: they are what was asked.
 fn github_readme_url(url: &str) -> Option<(String, String)> {
-    let rest = ["https://github.com/", "http://github.com/", "https://www.github.com/"]
-        .iter()
-        .find_map(|p| url.strip_prefix(p))?;
+    let rest = [
+        "https://github.com/",
+        "http://github.com/",
+        "https://www.github.com/",
+    ]
+    .iter()
+    .find_map(|p| url.strip_prefix(p))?;
     let rest = rest.split(['?', '#']).next()?.trim_end_matches('/');
     let mut parts = rest.split('/');
     let owner = parts.next()?;
     let repo = parts.next()?.trim_end_matches(".git");
     const NOT_OWNERS: &[&str] = &[
-        "orgs", "topics", "search", "settings", "marketplace", "features", "sponsors",
-        "collections", "trending", "login", "notifications", "explore", "pricing",
+        "orgs",
+        "topics",
+        "search",
+        "settings",
+        "marketplace",
+        "features",
+        "sponsors",
+        "collections",
+        "trending",
+        "login",
+        "notifications",
+        "explore",
+        "pricing",
     ];
     if parts.next().is_some() || owner.is_empty() || repo.is_empty() || NOT_OWNERS.contains(&owner)
     {
@@ -478,7 +493,10 @@ fn github_readme_url(url: &str) -> Option<(String, String)> {
 /// 503 and a `cf-ray` header, usually plus `cf-mitigated: challenge` or a
 /// `__cf_bm`/`cf_clearance` cookie. The signal is "served by Cloudflare AND
 /// refused", which a genuine origin 403 (no `cf-ray`) is not.
-fn is_challenge_response(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+fn is_challenge_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> bool {
     let code = status.as_u16();
     if code != 403 && code != 503 && code != 429 {
         return false;
@@ -699,7 +717,10 @@ mod tests {
         assert!(is_challenge_response(StatusCode::FORBIDDEN, &cf));
         assert!(is_challenge_response(StatusCode::SERVICE_UNAVAILABLE, &cf));
         // …but a plain origin 403 with no CF fingerprint is a real refusal.
-        assert!(!is_challenge_response(StatusCode::FORBIDDEN, &HeaderMap::new()));
+        assert!(!is_challenge_response(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new()
+        ));
         // A 200 is never a "challenge response" by status.
         assert!(!is_challenge_response(StatusCode::OK, &cf));
 
@@ -713,7 +734,9 @@ mod tests {
             "content ".repeat(30_000)
         );
         assert!(!looks_like_challenge_page(&real));
-        assert!(!looks_like_challenge_page("<html><body>an ordinary article</body></html>"));
+        assert!(!looks_like_challenge_page(
+            "<html><body>an ordinary article</body></html>"
+        ));
     }
 
     /// A bare repo URL fetches its README; anything deeper is what was asked.
@@ -723,8 +746,7 @@ mod tests {
             github_readme_url("https://github.com/neeryks/facefusion_colab"),
             Some((
                 "neeryks/facefusion_colab".into(),
-                "https://raw.githubusercontent.com/neeryks/facefusion_colab/HEAD/README.md"
-                    .into()
+                "https://raw.githubusercontent.com/neeryks/facefusion_colab/HEAD/README.md".into()
             ))
         );
         for same in [
