@@ -719,11 +719,75 @@ pub struct FileParse {
     pub defs: Vec<(String, &'static str, usize)>,
     imports: Vec<String>,
     ids: BTreeSet<String>,
+    /// Where each definition really starts and ends, when a parser read the
+    /// file (`syntactic`). Empty for the lexical extractor, which only knows
+    /// where things begin.
+    pub extents: Vec<Extent>,
+    /// Read by a real parser (Tree-sitter) rather than by line patterns.
+    pub syntactic: bool,
+}
+
+/// A definition's real extent, from a syntax parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extent {
+    pub name: String,
+    /// 1-based: attached docs/attributes, the definition, its last line.
+    pub doc: usize,
+    pub line: usize,
+    pub end: usize,
+    /// Inside another definition (a method in a class, a nested function).
+    pub nested: bool,
 }
 
 /// Parse one file's bytes into definitions, imports and mentioned identifiers.
 /// Pure and self-contained, so it is safe to run on a worker thread.
 pub fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
+    #[cfg(feature = "treesitter")]
+    if let Some(p) = crate::syntax::parse(lang, &rel, text, keywords(lang)) {
+        return FileParse {
+            defs: p
+                .defs
+                .iter()
+                .map(|d| (d.name.clone(), d.kind, d.line))
+                .collect(),
+            extents: p
+                .defs
+                .into_iter()
+                .map(|d| Extent {
+                    name: d.name,
+                    doc: d.doc,
+                    line: d.line,
+                    end: d.end,
+                    nested: d.nested,
+                })
+                .collect(),
+            rel,
+            lang,
+            imports: p.imports,
+            ids: p.ids,
+            syntactic: true,
+        };
+    }
+    parse_lexical(rel, lang, text)
+}
+
+/// Whether files in `lang` are read by a real parser in this build.
+pub fn syntax_parsed(lang: &str) -> bool {
+    #[cfg(feature = "treesitter")]
+    {
+        crate::syntax::covers(lang)
+    }
+    #[cfg(not(feature = "treesitter"))]
+    {
+        let _ = lang;
+        false
+    }
+}
+
+/// The line-pattern extractor: every language koda knows, no parser, and the
+/// fallback for the ones Tree-sitter does not cover. Its answers are labelled
+/// lexical wherever the graph reports them.
+fn parse_lexical(rel: String, lang: &'static str, text: &str) -> FileParse {
     let mut defs = Vec::new();
     let mut imports = Vec::new();
     let mut ids = BTreeSet::new();
@@ -835,6 +899,8 @@ pub fn parse_file(rel: String, lang: &'static str, text: &str) -> FileParse {
         defs,
         imports,
         ids,
+        extents: Vec::new(),
+        syntactic: false,
     }
 }
 
@@ -1260,8 +1326,19 @@ impl Graph {
         let mut langs: Vec<(&String, &usize)> = self.languages.iter().collect();
         langs.sort_by(|a, b| b.1.cmp(a.1));
         for (lang, n) in langs {
-            let _ = writeln!(out, "- {lang}: {n} files");
+            let how = if syntax_parsed(lang) {
+                "syntax-parsed"
+            } else {
+                "lexical"
+            };
+            let _ = writeln!(out, "- {lang}: {n} files ({how})");
         }
+        out.push_str(
+            "\nDefinitions come from a real parser for syntax-parsed languages and \
+             from line patterns for lexical ones. References are by name either \
+             way: a mention of `foo` is not proof it is *this* `foo` — the `lsp` \
+             tool resolves that where a language server is available.\n",
+        );
 
         // Most-referenced symbols are the load-bearing ones.
         let mut hot: Vec<(&String, usize)> = self.refs.iter().map(|(k, v)| (k, v.len())).collect();

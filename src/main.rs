@@ -27,6 +27,8 @@ mod session;
 mod settings;
 mod setup;
 mod skills;
+#[cfg(feature = "treesitter")]
+mod syntax;
 mod theme;
 mod tools;
 mod trace;

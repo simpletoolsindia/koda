@@ -633,16 +633,15 @@ pub fn chunk_file(path: &str, lang: &'static str, text: &str) -> Vec<Chunk> {
         return Vec::new();
     }
     let parsed = graph::parse_file(path.to_string(), lang, text);
-    let mut starts: Vec<(usize, String)> = parsed
-        .defs
-        .iter()
-        .map(|(name, _, line)| (extend_back(&lines, *line), name.clone()))
-        .collect();
-    starts.sort_by_key(|(l, _)| *l);
+    let segments = if parsed.syntactic {
+        syntactic_segments(&lines, &parsed.extents)
+    } else {
+        lexical_segments(&lines, &parsed.defs)
+    };
 
     let mut out = Vec::new();
     // The preamble: imports and the module doc, if any definition follows them.
-    let first = starts.first().map(|(l, _)| *l).unwrap_or(lines.len() + 1);
+    let first = segments.first().map(|s| s.0).unwrap_or(lines.len() + 1);
     if first > 1 {
         out.push(Chunk {
             path: path.to_string(),
@@ -653,18 +652,17 @@ pub fn chunk_file(path: &str, lang: &'static str, text: &str) -> Vec<Chunk> {
     }
 
     let mut i = 0;
-    while i < starts.len() {
-        let start = starts[i].0;
-        let mut names = vec![starts[i].1.clone()];
+    while i < segments.len() {
+        let (start, mut end, ref first_names) = segments[i];
+        let mut names = first_names.clone();
         // Merge forward while the span is too small to stand alone.
         let mut j = i + 1;
-        let mut end = starts.get(j).map(|(l, _)| l - 1).unwrap_or(lines.len());
-        while end.saturating_sub(start) < MIN_CHUNK_LINES && j < starts.len() {
-            let next_end = starts.get(j + 1).map(|(l, _)| l - 1).unwrap_or(lines.len());
+        while end.saturating_sub(start) < MIN_CHUNK_LINES && j < segments.len() {
+            let next_end = segments[j].1;
             if next_end.saturating_sub(start) > MAX_CHUNK_LINES {
                 break;
             }
-            names.push(starts[j].1.clone());
+            names.extend(segments[j].2.iter().cloned());
             end = next_end;
             j += 1;
         }
@@ -684,6 +682,75 @@ pub fn chunk_file(path: &str, lang: &'static str, text: &str) -> Vec<Chunk> {
             window = stop.saturating_sub(WINDOW_OVERLAP) + 1;
         }
         i = j.max(i + 1);
+    }
+    out
+}
+
+/// (start, end, names), contiguous from the first definition to the end of
+/// the file.
+type Segment = (usize, usize, Vec<String>);
+
+/// Line patterns know where a definition starts and nothing about where it
+/// ends, so each runs until the next begins.
+fn lexical_segments(lines: &[&str], defs: &[(String, &'static str, usize)]) -> Vec<Segment> {
+    let mut starts: Vec<(usize, String)> = defs
+        .iter()
+        .map(|(name, _, line)| (extend_back(lines, *line), name.clone()))
+        .collect();
+    starts.sort_by_key(|(l, _)| *l);
+    let mut out: Vec<Segment> = Vec::new();
+    for (k, (start, name)) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).map(|(l, _)| l - 1).unwrap_or(lines.len());
+        out.push((*start, end, vec![name.clone()]));
+    }
+    out
+}
+
+/// A parser knows where each definition really ends. A segment still runs to
+/// the next definition — that is what measured best for one-line gaps, a
+/// closing brace, a blank — but when real code sits between a definition's
+/// end and the next one (a script's body, statements at module or class
+/// level), that code becomes a segment of its own instead of being passed off
+/// as the tail of the function above it.
+fn syntactic_segments(lines: &[&str], extents: &[graph::Extent]) -> Vec<Segment> {
+    // Definitions sharing a start (`m` and `Type::m`) are one unit.
+    let mut units: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut sorted: Vec<&graph::Extent> = extents.iter().collect();
+    sorted.sort_by_key(|e| (e.doc, e.line));
+    for e in sorted {
+        match units.last_mut() {
+            Some(u) if u.0 == e.doc => {
+                u.1 = u.1.max(e.end);
+                u.2.push(e.name.clone());
+            }
+            _ => units.push((e.doc, e.end, vec![e.name.clone()])),
+        }
+    }
+    let mut out: Vec<Segment> = Vec::new();
+    for (k, (start, real_end, names)) in units.iter().enumerate() {
+        let next = units.get(k + 1).map(|u| u.0).unwrap_or(lines.len() + 1);
+        let natural = next - 1;
+        if *real_end >= natural {
+            // The next definition starts inside this one (a class and its
+            // methods), or right after it.
+            out.push((*start, natural, names.clone()));
+            continue;
+        }
+        let gap = &lines[*real_end..natural];
+        let code = gap.iter().filter(|l| !l.trim().is_empty()).count();
+        if code >= 3 {
+            out.push((*start, *real_end, names.clone()));
+            // Named after whatever still encloses it, or the module.
+            let owner = extents
+                .iter()
+                .filter(|e| e.line <= *real_end && e.end >= natural && e.doc < *start)
+                .max_by_key(|e| e.line)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "(top level)".to_string());
+            out.push((real_end + 1, natural, vec![owner]));
+        } else {
+            out.push((*start, natural, names.clone()));
+        }
     }
     out
 }
@@ -2282,6 +2349,43 @@ mod tests {
     ///
     /// Floors sit just under the measured values, so noise does not fail the
     /// build but a real regression does.
+    /// A parser knows where a function ends, so the script body after it is
+    /// its own chunk rather than the tail of the last function — and a search
+    /// for what the script does finds the body, not an unrelated helper.
+    #[cfg(feature = "treesitter")]
+    #[test]
+    fn a_script_body_is_not_the_tail_of_the_last_function() {
+        let mut py = String::from("def helper(values):\n");
+        for i in 0..10 {
+            py.push_str(&format!("    step_{i} = values[{i}]\n"));
+        }
+        py.push_str("    return values\n\n\n");
+        for line in [
+            "config = load()",
+            "server = start(config)",
+            "server.warm()",
+            "server.listen(8080)",
+            "server.wait()",
+            "print('done')",
+            "cleanup(server)",
+            "exit(0)",
+        ] {
+            py.push_str(line);
+            py.push('\n');
+        }
+        let py = py.as_str();
+        let chunks = chunk_file("run.py", "python", py);
+        let body = chunks
+            .iter()
+            .find(|c| c.start <= 16 && c.end >= 16)
+            .expect("the body is indexed");
+        assert!(body.start > 12, "the body stands alone: {chunks:?}");
+        assert_eq!(body.names, vec!["(top level)".to_string()], "{chunks:?}");
+        // Every line is still covered exactly once.
+        let covered: usize = chunks.iter().map(|c| c.end + 1 - c.start).sum();
+        assert_eq!(covered, py.lines().count(), "{chunks:?}");
+    }
+
     #[test]
     fn sweep_structural_weight() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
