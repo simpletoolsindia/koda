@@ -369,6 +369,14 @@ impl Transcript {
             self.dirty_from = self.dirty_from.min(last);
             return;
         }
+        // A reply starts at its first word. Models stream bare newlines
+        // before a tool call and at the top of an answer; opened as a block,
+        // they became a stack of blank rows above every search and browse card.
+        // Whole blank lines only: the first real line keeps its indentation.
+        let Some(first) = chunk.find(|c: char| !c.is_whitespace()) else {
+            return;
+        };
+        let chunk = &chunk[chunk[..first].rfind('\n').map_or(0, |i| i + 1)..];
         self.push(Item::Assistant(chunk.to_string()));
         self.reveal = 0;
         self.reveal_at = None;
@@ -2397,6 +2405,60 @@ mod tests {
             "reply stranded:\n{screen}"
         );
         assert!(!t.revealing(), "nothing is left mid-reveal");
+    }
+
+    /// Models often stream a few bare newlines before a tool call (the reply
+    /// that follows starts with them too). They are not a reply: rendered as
+    /// one, they left a stack of blank rows above every web search and browse
+    /// card.
+    #[test]
+    fn whitespace_before_a_tool_call_leaves_no_gap() {
+        let mut t = tr();
+        t.user("q".into());
+        t.relayout(80);
+        let before = t.total_lines();
+        t.assistant_delta("\n\n");
+        t.assistant_delta("\n");
+        t.tool_start("1".into(), "web_search".into(), "ratatui".into(), 0);
+        t.relayout(80);
+        let mut clean = tr();
+        clean.user("q".into());
+        clean.tool_start("1".into(), "web_search".into(), "ratatui".into(), 0);
+        clean.relayout(80);
+        assert_eq!(
+            t.total_lines(),
+            clean.total_lines(),
+            "blank rows added (was {before})"
+        );
+    }
+
+    /// Leading newlines on a real reply are dropped; the text is kept.
+    #[test]
+    fn a_reply_starts_at_its_first_word() {
+        let mut t = tr();
+        t.user("q".into());
+        t.assistant_delta("\n\n");
+        t.assistant_delta("The answer.");
+        t.relayout(80);
+        let mut clean = tr();
+        clean.user("q".into());
+        clean.assistant_delta("The answer.");
+        clean.relayout(80);
+        assert_eq!(text(&mut t), text(&mut clean));
+    }
+
+    #[test]
+    fn a_reply_keeps_the_indent_of_its_first_line() {
+        let mut t = tr();
+        t.user("q".into());
+        t.assistant_delta("\n\n    indented");
+        t.relayout(80);
+        assert!(text(&mut t).contains("indented"));
+        let mut raw = tr();
+        raw.user("q".into());
+        raw.assistant_delta("    indented");
+        raw.relayout(80);
+        assert_eq!(text(&mut t), text(&mut raw));
     }
 
     /// A width change throws away every wrap, including the kept prefix.

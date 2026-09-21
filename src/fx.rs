@@ -202,26 +202,13 @@ pub fn step_flash(success: Color, t: f32) -> Color {
 }
 
 /// Which characters of `candidate` a fuzzy `pattern` lands on, as char
-/// indices, following the same left-to-right subsequence walk as
-/// `fuzzy::score`. Empty when it does not match. Used to highlight why a row is
-/// in a list — the fzf convention, and the fastest way to trust a filter.
+/// indices — the alignment `fuzzy::score` actually ranked, so the letters lit
+/// in a list are the ones that earned its place. Empty when it does not match.
+/// The fzf convention, and the fastest way to trust a filter.
 pub fn match_positions(candidate: &str, pattern: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut want = pattern.chars().map(|c| c.to_ascii_lowercase()).peekable();
-    for (i, c) in candidate.chars().enumerate() {
-        match want.peek() {
-            Some(p) if c.to_ascii_lowercase() == *p => {
-                out.push(i);
-                want.next();
-            }
-            Some(_) => {}
-            None => break,
-        }
-    }
-    if want.peek().is_some() {
-        out.clear();
-    }
-    out
+    crate::fuzzy::positions(candidate, pattern)
+        .map(|(_, p)| p)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

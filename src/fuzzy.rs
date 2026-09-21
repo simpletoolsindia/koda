@@ -9,70 +9,215 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+// The scorer finds the *best* alignment of the pattern in the candidate, not
+// the first one. The first-occurrence walk this replaces had no gap penalty and
+// took whatever letter came first, so `tst` matched `demos/casts/ask.cast`
+// letter by letter as happily as `tests/`, and `config` scored the same after
+// the dot in `playwright.config.js` as at the start of `src/config.rs`. This is
+// fzf's shape — a small dynamic programme over (pattern × candidate) that
+// rewards word starts and runs and charges for gaps — cut down to what a list
+// of project paths needs.
+
+/// Every matched character.
+const MATCH: i32 = 16;
+/// Opening a gap between two matched characters, then each further character
+/// skipped. Leading and trailing text is free: only scatter costs.
+const GAP_OPEN: i32 = 3;
+const GAP_EXTEND: i32 = 1;
+/// A match that continues the one before it.
+const CONSECUTIVE: i32 = 12;
+/// Where a match lands. The start of the file name is where people aim, so it
+/// outranks every other boundary; after a dot is an extension, and weakest.
+const AT_BASENAME: i32 = 18;
+const AT_SEGMENT: i32 = 10;
+const AT_WORD: i32 = 8;
+const AT_CAMEL: i32 = 7;
+const AT_EXTENSION: i32 = 3;
+const IN_BASENAME: i32 = 2;
+/// The pattern *is* the file name, or its name without the extension.
+const EXACT_NAME: i32 = 40;
+
 /// Higher is better. `None` when the pattern is not a subsequence at all.
 pub fn score(candidate: &str, pattern: &str) -> Option<i32> {
+    align(candidate, pattern, false).map(|(s, _)| s)
+}
+
+/// The score and the character indices of the best alignment — what a list
+/// should highlight, so the lit letters are the ones that earned the rank.
+pub fn positions(candidate: &str, pattern: &str) -> Option<(i32, Vec<usize>)> {
+    align(candidate, pattern, true)
+}
+
+fn align(candidate: &str, pattern: &str, want_positions: bool) -> Option<(i32, Vec<usize>)> {
     if pattern.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
     let cand: Vec<char> = candidate.chars().collect();
     let pat: Vec<char> = pattern.chars().collect();
-    if pat.len() > cand.len() {
+    let (n, m) = (cand.len(), pat.len());
+    if m > n {
+        return None;
+    }
+    let lower = |c: char| c.to_ascii_lowercase();
+    // Cheap rejection before the O(n·m) work: most of a project is not a
+    // subsequence of what was typed.
+    let mut pi = 0;
+    for &c in &cand {
+        if pi < m && lower(c) == lower(pat[pi]) {
+            pi += 1;
+        }
+    }
+    if pi < m {
         return None;
     }
 
-    // Where the basename starts, so matches in the filename outrank matches in
-    // a directory that happens to share letters.
     let base_start = candidate
         .rfind('/')
         .map(|i| candidate[..i].chars().count() + 1)
         .unwrap_or(0);
+    let bonus: Vec<i32> = (0..n)
+        .map(|i| {
+            let here = if i == base_start {
+                AT_BASENAME
+            } else if i == 0 || cand[i - 1] == '/' {
+                AT_SEGMENT
+            } else if matches!(cand[i - 1], '_' | '-' | ' ') {
+                AT_WORD
+            } else if cand[i - 1] == '.' {
+                AT_EXTENSION
+            } else if cand[i].is_uppercase() && cand[i - 1].is_lowercase() {
+                AT_CAMEL
+            } else {
+                0
+            };
+            here + if i >= base_start { IN_BASENAME } else { 0 }
+        })
+        .collect();
 
-    let mut total = 0i32;
-    let mut ci = 0usize;
-    let mut streak = 0i32;
+    // h[j][i]: best score with pat[j] matched at cand[i]; from[j][i]: whether
+    // that came straight from pat[j-1] at i-1 (a run), for the walk back.
+    const NONE: i32 = i32::MIN / 2;
+    // One flat table, reused across calls: `rank` runs this for every file in
+    // the project on every keystroke, and a fresh `Vec` per row per file was
+    // most of the cost (47 ms → a few for a long query over 20k paths).
+    thread_local! {
+        static TABLE: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    TABLE.with(|cell| {
+        let mut table = cell.borrow_mut();
+        table.clear();
+        table.resize(n * m, NONE);
+        fill(
+            &mut table,
+            &cand,
+            &pat,
+            &bonus,
+            want_positions,
+            base_start,
+            pattern,
+        )
+    })
+}
 
-    for (pi, p) in pat.iter().enumerate() {
-        let lower = p.to_ascii_lowercase();
-        let mut found = None;
-        while ci < cand.len() {
-            let c = cand[ci];
-            if c.to_ascii_lowercase() == lower {
-                found = Some(ci);
-                break;
+#[allow(clippy::too_many_arguments)]
+fn fill(
+    h: &mut [i32],
+    cand: &[char],
+    pat: &[char],
+    bonus: &[i32],
+    want_positions: bool,
+    base_start: usize,
+    pattern: &str,
+) -> Option<(i32, Vec<usize>)> {
+    const NONE: i32 = i32::MIN / 2;
+    let (n, m) = (cand.len(), pat.len());
+    let lower = |c: char| c.to_ascii_lowercase();
+    let ix = |j: usize, i: usize| j * n + i;
+    let mut run = vec![false; if want_positions { n * m } else { 0 }];
+    for j in 0..m {
+        // Best of h[j-1][k] for k < i-1, already charged for the gap to i.
+        let mut gapped = NONE;
+        for i in j..n {
+            if i >= 1 && j >= 1 && i >= 2 {
+                let opened = h[ix(j - 1, i - 2)] - GAP_OPEN;
+                gapped = (gapped - GAP_EXTEND).max(opened);
             }
-            ci += 1;
+            if lower(cand[i]) != lower(pat[j]) {
+                continue;
+            }
+            let mut at = MATCH + bonus[i] + i32::from(cand[i] == pat[j]);
+            if j == 0 {
+                h[ix(j, i)] = at;
+                continue;
+            }
+            let straight = if i >= 1 { h[ix(j - 1, i - 1)] } else { NONE };
+            let (prev, is_run) = if straight > NONE {
+                let s = straight + CONSECUTIVE;
+                if s >= gapped {
+                    (s, true)
+                } else {
+                    (gapped, false)
+                }
+            } else {
+                (gapped, false)
+            };
+            if prev <= NONE / 2 {
+                continue;
+            }
+            at += prev;
+            h[ix(j, i)] = at;
+            if want_positions {
+                run[ix(j, i)] = is_run;
+            }
         }
-        let at = found?;
-
-        let mut points = 1;
-        // Exact case match is a weak signal, but a real one.
-        if cand[at] == *p {
-            points += 1;
-        }
-        // A run of consecutive matches is the strongest signal there is.
-        streak = if pi > 0 && at > 0 && cand[at - 1].eq_ignore_ascii_case(&pat[pi - 1]) {
-            streak + 1
-        } else {
-            0
-        };
-        points += streak * 4;
-        // Start of a path segment or a word.
-        let boundary = at == 0
-            || matches!(cand[at - 1], '/' | '_' | '-' | '.' | ' ')
-            || (cand[at].is_uppercase() && !cand[at - 1].is_uppercase());
-        if boundary {
-            points += 6;
-        }
-        if at >= base_start {
-            points += 3;
-        }
-        total += points;
-        ci = at + 1;
+    }
+    let (end, mut best) = (0..n)
+        .map(|i| (i, h[ix(m - 1, i)]))
+        .max_by_key(|&(i, s)| (s, std::cmp::Reverse(i)))?;
+    if best <= NONE / 2 {
+        return None;
     }
 
-    // Prefer shorter candidates when scores are otherwise close.
-    total -= (cand.len() as i32) / 12;
-    Some(total)
+    // The name is the thing: `md` means `md.rs` before any `*.md`.
+    let base: String = cand[base_start..]
+        .iter()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let stem = base.split('.').next().unwrap_or("");
+    let want = pattern.to_ascii_lowercase();
+    if base == want || stem == want {
+        best += EXACT_NAME;
+    }
+    // Every path pays a little for its length, so an exact tie goes to the
+    // shallower file — `src/webui.rs` before `demos/casts/webui.cast`.
+    best -= (n as i32) / 6;
+
+    let mut out = Vec::new();
+    if want_positions {
+        out.resize(m, 0);
+        let mut i = end;
+        for j in (0..m).rev() {
+            out[j] = i;
+            if j == 0 {
+                break;
+            }
+            if run[ix(j, i)] {
+                i -= 1;
+            } else {
+                // Re-find the gapped predecessor that produced this score.
+                let need = h[ix(j, i)] - (MATCH + bonus[i] + i32::from(cand[i] == pat[j]));
+                let k = (0..i.saturating_sub(1))
+                    .rev()
+                    .find(|&k| {
+                        h[ix(j - 1, k)] > NONE
+                            && h[ix(j - 1, k)] - GAP_OPEN - (i - k - 2) as i32 * GAP_EXTEND == need
+                    })
+                    .unwrap_or_else(|| (0..i).rev().find(|&k| h[ix(j - 1, k)] > NONE).unwrap_or(0));
+                i = k;
+            }
+        }
+    }
+    Some((best, out))
 }
 
 /// Best `limit` matches, best first.
@@ -82,7 +227,7 @@ pub fn rank<'a>(candidates: &'a [String], pattern: &str, limit: usize) -> Vec<&'
         .filter_map(|c| score(c, pattern).map(|s| (s, c)))
         .collect();
     // Stable tie-break on the path so the list does not jitter between frames.
-    scored.sort_by_key(|(s, c)| (std::cmp::Reverse(*s), (*c).clone()));
+    scored.sort_by(|(sa, a), (sb, b)| sb.cmp(sa).then(a.len().cmp(&b.len())).then(a.cmp(b)));
     scored.into_iter().take(limit).map(|(_, c)| c).collect()
 }
 
@@ -177,6 +322,34 @@ impl FileIndex {
     }
 }
 
+/// Directories nobody means when they type `@`: version control, build output
+/// and dependency caches. A project usually gitignores them, but a scratch
+/// directory or a fresh checkout often does not, and then `@cart` offered
+/// `__pycache__/cart.cpython-314.pyc` beside `cart.py`.
+fn is_build_output(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git"
+                | "target"
+                | "node_modules"
+                | "__pycache__"
+                | ".venv"
+                | ".tox"
+                | ".mypy_cache"
+                | ".pytest_cache"
+        )
+    )
+}
+
+/// Compiled artefacts that sit beside their sources.
+fn is_compiled(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("pyc" | "pyo" | "class" | "o" | "obj")
+    )
+}
+
 fn scan(root: &Path) -> Vec<String> {
     const CAP: usize = 20_000;
     let mut out = Vec::new();
@@ -185,10 +358,13 @@ fn scan(root: &Path) -> Vec<String> {
         .git_ignore(true)
         .require_git(false)
         .git_global(false)
-        .filter_entry(|e| e.file_name() != ".git" && e.file_name() != "target")
+        .filter_entry(|e| !is_build_output(e.file_name()))
         .build();
     for e in walk.flatten() {
         if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if is_compiled(e.path()) {
             continue;
         }
         if let Ok(rel) = e.path().strip_prefix(root) {
@@ -308,6 +484,71 @@ mod tests {
         let first = rank(&f, "rs", 2);
         let second = rank(&f, "rs", 2);
         assert_eq!(first, second);
+    }
+
+    /// The cases the first-occurrence scorer got wrong, from a real repo. Each
+    /// was a file someone plainly meant, ranked below one they did not.
+    #[test]
+    fn the_file_you_meant_comes_first() {
+        let f: Vec<String> = [
+            "docs/lsp.md",
+            "docs/mcp.md",
+            "src/md.rs",
+            "tests/visual/playwright.config.js",
+            "docs-site/tsconfig.json",
+            "src/config.rs",
+            "docs/plan-trace-ui.md",
+            "src/trace.rs",
+            "demos/casts/webui.cast",
+            "src/webui.rs",
+            "demos/casts/ask.cast",
+            "tests/tui_test.py",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for (q, want) in [
+            ("md", "src/md.rs"),
+            ("config", "src/config.rs"),
+            ("cfg", "src/config.rs"),
+            ("trace", "src/trace.rs"),
+            ("webui", "src/webui.rs"),
+            ("tst", "tests/tui_test.py"),
+        ] {
+            assert_eq!(rank(&f, q, 3)[0], want, "@{q}: {:?}", rank(&f, q, 3));
+        }
+    }
+
+    /// Scattered letters pay for their gaps, so a tight match wins even when
+    /// the scattered one starts earlier in the path.
+    #[test]
+    fn gaps_cost() {
+        let tight = score("tests/tui_test.py", "tst").unwrap();
+        let scattered = score("demos/casts/ask.cast", "tst").unwrap();
+        assert!(tight > scattered, "{tight} vs {scattered}");
+    }
+
+    /// The highlight is the alignment that scored, not the first letters found.
+    #[test]
+    fn positions_are_the_scored_alignment() {
+        assert_eq!(positions("src/md.rs", "md").unwrap().1, vec![4, 5]);
+        assert_eq!(positions("src/config.rs", "cfg").unwrap().1, vec![4, 7, 9]);
+        assert!(positions("src/md.rs", "zz").is_none());
+    }
+
+    #[test]
+    fn build_output_is_not_offered() {
+        let dir = std::env::temp_dir().join(format!("koda-fuzzy-junk-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("__pycache__")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/x")).unwrap();
+        std::fs::write(dir.join("cart.py"), "").unwrap();
+        std::fs::write(dir.join("__pycache__/cart.cpython-314.pyc"), "").unwrap();
+        std::fs::write(dir.join("node_modules/x/index.js"), "").unwrap();
+        std::fs::write(dir.join("stray.pyc"), "").unwrap();
+        let files = scan(&dir);
+        assert_eq!(files, vec!["cart.py".to_string()], "{files:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
