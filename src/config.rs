@@ -866,7 +866,22 @@ pub fn default_shell() -> String {
     if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd".into())
     } else {
-        "/bin/sh".into()
+        posix_shell("/bin/sh")
+    }
+}
+
+/// The shell to run `configured` as. `/bin/sh` was the default written into
+/// every config, and on Debian/Ubuntu it is dash, which has no `pipefail` —
+/// so `make | tail` reported a failed build as exit 0 there while the same
+/// command failed correctly on macOS, whose /bin/sh is bash. Treat it as the
+/// default it was and use bash where there is one. A shell the user chose
+/// by name is left alone.
+pub fn posix_shell(configured: &str) -> String {
+    const BASH: &str = "/bin/bash";
+    if configured == "/bin/sh" && std::path::Path::new(BASH).exists() {
+        BASH.into()
+    } else {
+        configured.into()
     }
 }
 
@@ -1828,6 +1843,16 @@ Authorization = "Bearer ${DOCS_KEY}"
     #[test]
     fn default_shell_is_nonempty() {
         assert!(!default_shell().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_old_sh_default_runs_as_bash_but_a_chosen_shell_is_kept() {
+        if std::path::Path::new("/bin/bash").exists() {
+            assert_eq!(posix_shell("/bin/sh"), "/bin/bash");
+        }
+        assert_eq!(posix_shell("/bin/dash"), "/bin/dash");
+        assert_eq!(posix_shell("/usr/bin/zsh"), "/usr/bin/zsh");
     }
 
     /// A config file written before `codegraph_search` existed must keep

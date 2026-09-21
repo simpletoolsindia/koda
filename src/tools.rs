@@ -2960,13 +2960,14 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
     // exit 0 — and the transcript, the UI and learned memory all recorded it as
     // a success. With pipefail a pipeline fails when any stage does. Probed in
     // a subshell first: in a shell without it, `set -o` is a fatal error.
-    let flag = crate::config::shell_flag(&ctx.cfg.shell);
+    let shell = crate::config::posix_shell(&ctx.cfg.shell);
+    let flag = crate::config::shell_flag(&shell);
     let script = if flag == "-c" {
         format!("(set -o pipefail) 2>/dev/null && set -o pipefail\n{cmd}")
     } else {
         cmd.clone()
     };
-    let mut cmd_builder = tokio::process::Command::new(&ctx.cfg.shell);
+    let mut cmd_builder = tokio::process::Command::new(&shell);
     cmd_builder
         .arg(flag)
         .arg(&script)
@@ -2986,7 +2987,7 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
 
     let mut child = match cmd_builder.spawn() {
         Ok(c) => c,
-        Err(e) => return Outcome::err(format!("spawning `{}`: {e}", ctx.cfg.shell)),
+        Err(e) => return Outcome::err(format!("spawning `{shell}`: {e}")),
     };
 
     // Collect output as it arrives rather than at exit. A command that times
