@@ -447,6 +447,9 @@ pub struct Config {
     /// file or symbol of this project (`repomap`). 0 turns it off; the model
     /// can still ask for one with `codegraph query=context`.
     pub graph_context_tokens: usize,
+    /// Tool cards wear an emoji per tool, animated while it runs. Off, or on
+    /// an ASCII terminal, they keep the plain glyphs.
+    pub tool_emoji: bool,
 
     /// Prefill the model's prompt cache in the background at startup.
     ///
@@ -808,6 +811,7 @@ impl Default for Config {
             codegraph_search: true,
             codegraph_refresh_ms: 15_000,
             graph_context_tokens: 600,
+            tool_emoji: true,
             web_search: false,
             search_backend: default_backend(),
             searx_url: String::new(),
@@ -1348,6 +1352,9 @@ codegraph_refresh_ms = 15000
 # the code that matters for it: signatures ranked from the code graph for that
 # request, cut to this many tokens. 0 turns it off.
 graph_context_tokens = 600
+# An emoji per tool on its card, animated while it runs (🌍 fetching, 🔍
+# searching, ⏳ running…). false keeps the plain glyphs. Toggle with /emoji.
+tool_emoji = true
 
 # Consult a language server (rust-analyzer, pyright, gopls, ...) for questions
 # the regex code graph cannot answer precisely: real definitions, real

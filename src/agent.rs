@@ -747,7 +747,13 @@ impl Agent {
     /// never answers costs this once and is then reported as failed, rather
     /// than holding every turn.
     async fn await_mcp_tools(&mut self, tx: &mpsc::UnboundedSender<Event>) {
-        if self.depth > 0 || !self.cfg.mcp || self.cfg.mcp_servers.is_empty() {
+        // MCP tools are deferred: until the model loads them there is nothing
+        // to wait for, and the first answer is not held behind a slow server.
+        if self.depth > 0
+            || !self.cfg.mcp
+            || self.cfg.mcp_servers.is_empty()
+            || !self.loaded_groups.contains("mcp")
+        {
             return;
         }
         if crate::mcp::settled() {
@@ -848,7 +854,11 @@ impl Agent {
         // not use -- and the user would pay the prefill twice. Wait for the
         // list to stop moving first; with no servers configured this returns
         // immediately.
-        let wait_for_mcp = self.cfg.mcp && !self.cfg.mcp_servers.is_empty();
+        // Only when MCP tools are in the schema at all: they are deferred
+        // until the `mcp` group loads, and before that the servers settling
+        // changes nothing the warm-up would cache.
+        let wait_for_mcp =
+            self.cfg.mcp && !self.cfg.mcp_servers.is_empty() && self.loaded_groups.contains("mcp");
         let mcp_tools_pending = wait_for_mcp && !crate::mcp::settled();
         // Plan mode advertises only the tools a server has promised are
         // read-only. Warming with the full list would cache a schema the next
@@ -2425,7 +2435,9 @@ impl Agent {
         // user-defined tools are: a subagent's context is narrow and its
         // mandate is to investigate, not to reach out into other systems. In
         // plan mode only the tools a server has promised are read-only.
-        if self.depth == 0 && self.cfg.mcp {
+        // Deferred with the `mcp` group: named in the prompt, loaded on
+        // `load_tools` or on the first direct call.
+        if self.depth == 0 && self.cfg.mcp && self.loaded_groups.contains("mcp") {
             list.extend(crate::mcp::openai_schemas(self.mode.read_only()));
         }
         list
@@ -3076,7 +3088,24 @@ impl Agent {
                         .map(|(_, m)| m.to_vec())
                         .unwrap_or_default();
                     self.loaded_groups.insert(group.clone());
+                    if group == "mcp" && self.cfg.mcp && !crate::mcp::settled() {
+                        // The servers were left to connect in the background;
+                        // now their tools are wanted, let them finish.
+                        crate::mcp::wait_settled(std::time::Duration::from_secs(15)).await;
+                    }
                     self.rebuild_system();
+                    let mcp_count = if group == "mcp" {
+                        crate::mcp::openai_schemas(self.mode.read_only()).len()
+                    } else {
+                        0
+                    };
+                    let members = if mcp_count > 0 {
+                        let mut m = members;
+                        m.push("and the MCP servers' tools");
+                        m
+                    } else {
+                        members
+                    };
                     tools::Outcome::ok(
                         format!(
                             "Loaded `{group}`: {}. They are available now — call one.",
@@ -4919,6 +4948,11 @@ impl Agent {
         args: &Value,
         tx: &mpsc::UnboundedSender<Event>,
     ) -> tools::Outcome {
+        if self.cfg.mcp && !crate::mcp::settled() {
+            // Deferred tools connect in the background; a direct call is the
+            // moment they are needed.
+            crate::mcp::wait_settled(std::time::Duration::from_secs(15)).await;
+        }
         if !self.cfg.mcp {
             return tools::Outcome {
                 ok: false,
@@ -8353,14 +8387,25 @@ mod tests {
                 assert_eq!(tools::deferred_group(m), Some(*group));
             }
         }
+        // Tools an MCP server lends travel with the `mcp` group.
+        assert_eq!(
+            tools::deferred_group("mcp__github__search_issues"),
+            Some("mcp")
+        );
         // And nothing everyday was deferred by accident.
         for core in [
             "read_file",
             "edit_file",
+            "write_file",
             "run_command",
             "search",
             "todo",
             "codegraph",
+            "verify",
+            "ask_user",
+            // Deferred once: asked who made it, the model answered from
+            // memory, wrongly, instead of looking.
+            "about_creator",
         ] {
             assert_eq!(
                 tools::deferred_group(core),

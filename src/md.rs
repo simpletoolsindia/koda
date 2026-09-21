@@ -370,36 +370,68 @@ fn render_table(rows: &[Vec<String>], width: usize, t: &Theme) -> Vec<Line<'stat
     let total: usize = w.iter().sum::<usize>() + gap * cols.saturating_sub(1);
     let mut out = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
-        let mut spans = vec![Span::raw(" ".to_string())];
-        for (c, &cw) in w.iter().enumerate() {
-            let cell = row.get(c).map(String::as_str).unwrap_or("");
-            // Header stays bold+plain (predictable); body cells get inline styling.
-            let base = if ri == 0 {
-                Style::default().fg(t.text).add_modifier(Modifier::BOLD)
-            } else {
-                t.body()
-            };
-            let mut cell_spans = if ri == 0 {
-                vec![Span::styled(strip_inline(cell), base)]
-            } else {
-                inline(cell, base, t)
-            };
-            // Truncate to the column width on display width, then pad.
-            let shown_w: usize = cell_spans.iter().map(|s| s.content.width()).sum();
-            if shown_w > cw {
-                cell_spans = clip_spans(cell_spans, cw);
+        // Each cell as the lines it needs: a cell wider than its column wraps
+        // rather than losing its end to an ellipsis, and the row is as tall
+        // as its tallest cell. (Below 8 columns wrapping cannot help, so a
+        // cell that narrow is clipped as before.)
+        let base = if ri == 0 {
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+        } else {
+            t.body()
+        };
+        let cells: Vec<Vec<Vec<Span<'static>>>> = w
+            .iter()
+            .enumerate()
+            .map(|(c, &cw)| {
+                let cell = row.get(c).map(String::as_str).unwrap_or("");
+                // Header stays bold+plain (predictable); body cells get inline styling.
+                let spans = if ri == 0 {
+                    vec![Span::styled(strip_inline(cell), base)]
+                } else {
+                    inline(cell, base, t)
+                };
+                let width: usize = spans.iter().map(|s| s.content.width()).sum();
+                if width <= cw {
+                    vec![spans]
+                } else if cw < 8 {
+                    vec![clip_spans(spans, cw)]
+                } else {
+                    wrap_spans(spans, cw, 0)
+                        .into_iter()
+                        .map(|l| {
+                            let mut v = l.spans;
+                            // A wrapped line can end in the space it broke at.
+                            if let Some(last) = v.last_mut() {
+                                let trimmed = last.content.trim_end().to_string();
+                                last.content = trimmed.into();
+                            }
+                            let lw: usize = v.iter().map(|s| s.content.width()).sum();
+                            if lw > cw {
+                                clip_spans(v, cw)
+                            } else {
+                                v
+                            }
+                        })
+                        .collect()
+                }
+            })
+            .collect();
+        let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        for k in 0..height {
+            let mut spans = vec![Span::raw(" ".to_string())];
+            for (c, &cw) in w.iter().enumerate() {
+                let piece = cells[c].get(k).cloned().unwrap_or_default();
+                let pad = cw.saturating_sub(piece.iter().map(|s| s.content.width()).sum::<usize>());
+                spans.extend(piece);
+                if pad > 0 && c + 1 < cols {
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+                if c + 1 < cols {
+                    spans.push(Span::styled(sep.to_string(), t.dim()));
+                }
             }
-            let pad =
-                cw.saturating_sub(cell_spans.iter().map(|s| s.content.width()).sum::<usize>());
-            spans.extend(cell_spans);
-            if pad > 0 {
-                spans.push(Span::raw(" ".repeat(pad)));
-            }
-            if c + 1 < cols {
-                spans.push(Span::styled(sep.to_string(), t.dim()));
-            }
+            out.push(Line::from(spans));
         }
-        out.push(Line::from(spans));
         if ri == 0 {
             out.push(Line::from(vec![
                 Span::raw(" ".to_string()),
@@ -1206,6 +1238,42 @@ mod tests {
         let h = text[0].find("time").unwrap();
         let r = text[2].find("8ms").unwrap();
         assert_eq!(h, r, "columns misaligned: {text:?}");
+    }
+
+    /// A cell too wide for its column wraps onto more lines; nothing is cut
+    /// off with an ellipsis, and the columns stay aligned.
+    #[test]
+    fn a_long_table_cell_wraps_instead_of_being_cut() {
+        let t = crate::theme::resolve("dark");
+        let md = "| Function | Description |\n|---|---|\n| apply_discount | Reduces amount by percent. Formula: amount * (100 - percent) / 100, e.g. 200 at 10 gives 180. |\n";
+        let lines = render(md, 60, &t);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let all = text.join("\n");
+        assert!(
+            all.contains("gives 180."),
+            "the end of the cell survives:\n{all}"
+        );
+        assert!(!all.contains('…'), "{all}");
+        assert!(text.iter().all(|l| l.width() <= 60), "{all}");
+        // The separator sits in the same column on every row of the body.
+        let cols: Vec<usize> = text
+            .iter()
+            .filter(|l| l.contains('│'))
+            .map(|l| l.find('│').unwrap())
+            .collect();
+        assert!(cols.windows(2).all(|p| p[0] == p[1]), "{all}");
+        assert!(
+            cols.len() >= 3,
+            "the body wrapped onto more than one line:\n{all}"
+        );
     }
 
     #[test]

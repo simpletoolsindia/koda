@@ -807,16 +807,36 @@ pub const FAST_CORE: &[&str] = &[
 /// guesses `browse` without asking first is right, not broken, so the worst
 /// case is the same call it would have made anyway.
 ///
-/// Only these two. `view_image` and `manage_skill` were tried here and taken
-/// back out: a test already asserts skill authoring is offered at top level,
-/// and a model that cannot see `view_image` while the user has attached an
-/// image is worse at the job, which is the one thing this must not cost. Two
-/// tools, 1,943 tokens, and both genuinely situational — most sessions open
-/// neither a browser nor a debugger.
-pub const DEFERRED: &[(&str, &[&str])] = &[("browser", &["browse"]), ("debugger", &["debug"])];
+/// Measured (serialised schema ÷ 4): browse ~1,155 tokens, debug ~801, lsp
+/// ~484, mcp ~253 plus every tool each MCP server lends, delegate ~231 — about
+/// 2,900 of the ~6,100 a full schema costs, all of it situational. Most
+/// sessions open no browser or debugger, ask no language server and delegate
+/// nothing.
+///
+/// `about_creator` was tried here too and taken back out: deferred, a model
+/// asked "who made you?" answered from memory — "Anthropic" — instead of
+/// looking it up, and that answer is simply wrong. 112 tokens is cheap for it.
+///
+/// `view_image` and `manage_skill` were tried here and taken back out: a
+/// test already asserts skill authoring is offered at top level, and a model
+/// that cannot see `view_image` while the user has attached an image is worse
+/// at the job, which is the one thing this must not cost.
+///
+/// The `mcp` group also holds every tool an MCP server lends (see
+/// `deferred_group`): a GitHub server alone can add dozens of schemas.
+pub const DEFERRED: &[(&str, &[&str])] = &[
+    ("browser", &["browse"]),
+    ("debugger", &["debug"]),
+    ("lsp", &["lsp"]),
+    ("subagents", &["delegate"]),
+    ("mcp", &["mcp"]),
+];
 
 /// The group a tool belongs to, if it is deferred at all.
 pub fn deferred_group(tool: &str) -> Option<&'static str> {
+    if crate::mcp::is_mcp_tool(tool) {
+        return Some("mcp");
+    }
     DEFERRED
         .iter()
         .find(|(_, members)| members.contains(&tool))

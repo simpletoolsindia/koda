@@ -257,6 +257,7 @@ const COMMANDS: &[(&str, &str)] = &[
         "generate a conventional-commit message and commit",
     ),
     ("/theme", "switch palette"),
+    ("/emoji", "toggle the per-tool emoji on tool cards"),
     ("/url", "change the API base URL"),
     ("/clear", "drop the conversation context"),
     ("/compact", "summarize context to free tokens"),
@@ -3194,6 +3195,17 @@ impl App {
                 _ => self.note("usage: /reason [off|low|medium|high]"),
             },
             "theme" => self.theme_cmd(&arg),
+            "emoji" => {
+                self.cfg.tool_emoji = !self.cfg.tool_emoji;
+                let _ = crate::config::save(&self.cfg);
+                self.flash(
+                    format!(
+                        "tool emoji {}",
+                        if self.cfg.tool_emoji { "on" } else { "off" }
+                    ),
+                    fx::Tone::Info,
+                );
+            }
             "url" | "endpoint" => {
                 if arg.is_empty() {
                     let e = self.endpoint.clone();
@@ -3969,6 +3981,11 @@ fn draw(f: &mut Frame, app: &mut App) {
     app.last_size = (area.width, area.height);
     let m = Metrics::of(area.width);
     crate::view::MOTION.store(app.motion.animates(), std::sync::atomic::Ordering::Relaxed);
+    let emoji = app.cfg.tool_emoji && app.glyphs.fine_blocks;
+    if crate::view::EMOJI.swap(emoji, std::sync::atomic::Ordering::Relaxed) != emoji {
+        // Every card's icon changes with it.
+        app.transcript.invalidate();
+    }
     // Slash-command completion, worked out once for this frame: the dim
     // remainder after the caret, and the argument values on offer.
     let slash = app.editor.buf.starts_with('/') && app.overlay_free();

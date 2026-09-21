@@ -271,6 +271,27 @@ pub fn openai_schemas(read_only_only: bool) -> Vec<Value> {
     out
 }
 
+/// Each connected server and its tools' names, for the prompt's one-line
+/// mention of the deferred `mcp` group: `github: search_issues, get_issue`.
+pub fn catalog_summary() -> String {
+    let Ok(cat) = registry().catalog.read() else {
+        return String::new();
+    };
+    cat.iter()
+        .filter(|s| s.connected && !s.tools.is_empty())
+        .map(|s| {
+            let names: Vec<&str> = s.tools.iter().take(12).map(|t| t.name.as_str()).collect();
+            let more = s.tools.len().saturating_sub(12);
+            if more > 0 {
+                format!("{}: {} +{more}", s.name, names.join(", "))
+            } else {
+                format!("{}: {}", s.name, names.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// One line per tool, for the text protocol's prompt listing.
 pub fn text_protocol_help(read_only_only: bool) -> String {
     let Ok(cat) = registry().catalog.read() else {

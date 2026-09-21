@@ -28,9 +28,15 @@ A plan you never update tells the user less than no plan at all. Mark a step don
 - Store repeatable procedures (release checklists, setup steps) with `manage_skill`.
 
 Style:
-- Be terse and direct.
-- No preamble, no narration, no restating the request.
-- Reply in plain text. Use fenced blocks only for writing code.
+- Be terse and direct. No preamble, no narration, no restating the request.
+- Format replies in Markdown — it is rendered in the terminal:
+  - Lead with the answer in one or two sentences.
+  - More than one point: a short bullet list. Steps in order: a numbered list.
+  - A longer answer with parts: `##` headings for the parts.
+  - Comparing options or listing properties: a table.
+  - `backticks` for file names, paths, commands, symbols and values; **bold** for the few words that matter most.
+  - Code in fenced blocks with the language named (```rust).
+  - Short paragraphs; no walls of text, no decoration, no emoji.
 - Stop calling tools and reply with a brief summary when finished.";
 
 /// The base for fast mode: the load-bearing rules a small model needs and
@@ -49,11 +55,11 @@ You are koda, an autonomous coding agent working in the user's terminal.
 Rules:
 - Read a file before editing it. `edit_file` needs an exact substring copied verbatim from `read_file`.
 - Prefer `edit_file` over `write_file` for existing files.
-- Verify with `run_command` (build, tests, linter) before you finish. If a check still fails, say so plainly — never call failing or unfinished work done.
+- Verify with `verify` (this project's own build, lint and tests) before you finish. If a check still fails, say so plainly — never call failing or unfinished work done.
 - One write or command at a time; wait for the result before the next.
 - Do not run destructive commands, or delete what you set up, unless asked.
 
-Be terse. No preamble, no narration, no restating the task. When done, stop and give ONE short summary — never repeat it. Reply in plain text; fenced blocks only for code.";
+Be terse. No preamble, no narration, no restating the task. When done, stop and give ONE short summary — never repeat it. Format in Markdown: short bullet lists, `backticks` for paths, commands and symbols, fenced code blocks with the language named.";
 
 /// The built-in base system prompt, exposed so the settings editor can
 /// pre-populate its textarea when the user has no custom prompt yet — editing
@@ -299,10 +305,11 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
         if !names.is_empty() {
             let _ = write!(
                 p,
-                "\n\nCONNECTED SERVICES (MCP): {}. Their tools are in your list as \
+                "\n\nCONNECTED SERVICES (MCP): {}. Their tools are named \
                  `mcp__<server>__<tool>` and reach systems outside this workspace — \
-                 use them when the answer is not in the code. `mcp` lists what each \
-                 one also publishes as resources and prompts.",
+                 use them when the answer is not in the code. They load with the \
+                 `mcp` group (`load_tools`), or just call one by name. `mcp` lists what \
+                 each server also publishes as resources and prompts.",
                 names.join(", ")
             );
         }
@@ -318,10 +325,20 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
              by name — it loads automatically.",
         );
     } else {
-        let groups = crate::tools::deferred_summary(|t| match t {
+        let mcp_on = cfg.mcp && !cfg.mcp_servers.is_empty();
+        let mut groups = crate::tools::deferred_summary(|t| match t {
             "browse" => cfg.browser,
+            "lsp" => cfg.lsp,
+            "delegate" => cfg.subagents,
+            "mcp" => mcp_on,
             _ => true,
         });
+        if mcp_on {
+            let lent = crate::mcp::catalog_summary();
+            if !lent.is_empty() {
+                let _ = writeln!(groups, "  (mcp also brings the servers' tools: {lent})");
+            }
+        }
         if !groups.trim().is_empty() {
             let _ = write!(
                 p,

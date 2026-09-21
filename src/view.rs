@@ -1067,6 +1067,40 @@ fn is_running(item: &Item) -> bool {
 /// flag they need that the theme and glyphs do not carry; `tui::draw` sets it.
 pub static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether tool cards wear their emoji (`tool_emoji`, and a terminal whose
+/// glyph set is not ASCII). Set by `tui::draw` like `MOTION`.
+pub static EMOJI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Each tool's emoji, as frames: cycled while the tool runs, the first one
+/// once it is done. Every one is a default-emoji-presentation character — two
+/// columns wide on every terminal, no variation selector to be measured one
+/// way and drawn another.
+pub fn tool_emoji(name: &str) -> &'static [&'static str] {
+    match name {
+        "web_fetch" | "web_search" => &["🌍", "🌎", "🌏"],
+        "browse" => &["🧭", "🌐"],
+        "search" | "find_files" | "codegraph" => &["🔍", "🔎"],
+        "read_file" | "view_image" => &["📖", "📗", "📘", "📙"],
+        "write_file" | "edit_file" => &["📝"],
+        "list_dir" => &["📁", "📂"],
+        "run_command" => &["⏳", "⌛"],
+        "verify" => &["🧪", "🔬"],
+        "delegate" => &["🤖"],
+        "lsp" => &["🧠"],
+        "debug" => &["🐞", "🐛"],
+        "todo" => &["📋"],
+        "ask_user" => &["💬"],
+        "remember" | "skill" | "manage_skill" => &["📌"],
+        "about_creator" => &["👋"],
+        other if crate::mcp::is_mcp_tool(other) || other == "mcp" => &["🔌"],
+        _ => &["🔧"],
+    }
+}
+
+fn emoji_on() -> bool {
+    EMOJI.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How long a tool's icon stays lit after it finishes.
 const TOOL_FLASH: Duration = Duration::from_millis(600);
 
@@ -1607,7 +1641,11 @@ fn render_draft(
     if started.elapsed().as_millis() > 400 {
         meta.push(human_ms(started.elapsed()));
     }
-    let spinner = (g.spinner[tick % g.spinner.len()].to_string(), t.warning);
+    let spinner = if emoji_on() {
+        (tool_emoji(name)[0].to_string(), t.warning)
+    } else {
+        (g.spinner[tick % g.spinner.len()].to_string(), t.warning)
+    };
     // Some models send the body before the path, so the name can arrive last.
     let what = if target.is_empty() {
         "new file".to_string()
@@ -1707,10 +1745,21 @@ fn render_tool(
     let avail = width.saturating_sub(indent_w).max(20);
 
     // Icon: spinner while running, tool identity once done, cross on failure.
-    let icon = match ok {
-        None => (g.spinner[tick % g.spinner.len()].to_string(), t.warning),
-        Some(true) => (settled_glyph, t.success),
-        Some(false) => (g.fail.to_string(), t.error),
+    let icon = if emoji_on() {
+        // A running tool's emoji steps every third tick (~240 ms): lively,
+        // not frantic. It settles on its first frame, or ❌.
+        let frames = tool_emoji(name);
+        match ok {
+            None => (frames[(tick / 3) % frames.len()].to_string(), t.warning),
+            Some(true) => (frames[0].to_string(), t.success),
+            Some(false) => ("❌".to_string(), t.error),
+        }
+    } else {
+        match ok {
+            None => (g.spinner[tick % g.spinner.len()].to_string(), t.warning),
+            Some(true) => (settled_glyph, t.success),
+            Some(false) => (g.fail.to_string(), t.error),
+        }
     };
     // The moment it finishes, the icon lands lit and settles into its colour:
     // the spinner visibly *becomes* the tick rather than being swapped for it.
@@ -2727,6 +2776,38 @@ mod tests {
             one.dirty_from = 0;
             one.relayout(40);
             assert_eq!(shot(&mut inc), shot(&mut one), "diverged at reveal {chars}");
+        }
+    }
+
+    /// Every tool emoji is two columns on every terminal: a default-emoji
+    /// character with no variation selector, which terminals measure and
+    /// draw inconsistently.
+    #[test]
+    fn tool_emoji_are_uniformly_two_columns() {
+        use unicode_width::UnicodeWidthStr;
+        for name in [
+            "web_fetch",
+            "browse",
+            "search",
+            "read_file",
+            "write_file",
+            "list_dir",
+            "run_command",
+            "verify",
+            "delegate",
+            "lsp",
+            "debug",
+            "todo",
+            "ask_user",
+            "remember",
+            "about_creator",
+            "mcp__gh__x",
+            "anything",
+        ] {
+            for f in super::tool_emoji(name) {
+                assert_eq!(f.width(), 2, "{name}: {f:?}");
+                assert_eq!(f.chars().count(), 1, "{name}: no selector in {f:?}");
+            }
         }
     }
 
