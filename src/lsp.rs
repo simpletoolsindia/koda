@@ -19,7 +19,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -437,7 +437,43 @@ impl Client {
         self.request_timeout(method, params, REQUEST_TIMEOUT)
     }
 
+    /// Send a request and wait for its answer, within `wait` in all.
+    ///
+    /// A server that is still settling answers `ContentModified` (-32801) or
+    /// `ServerCancelled` (-32802): not "no", but "ask again". The protocol
+    /// expects the client to retry, and rust-analyzer says it constantly while
+    /// it indexes — without the retry, the first hover on a fresh project was
+    /// an error. A few retries, backing off, inside the same budget.
     fn request_timeout(&self, method: &str, params: Value, wait: Duration) -> Result<Value> {
+        let deadline = Instant::now() + wait;
+        let mut attempt = 0u32;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.request_once(method, params.clone(), left)? {
+                Ok(v) => return Ok(v),
+                Err((code, text)) => {
+                    let retry = matches!(code, -32801 | -32802);
+                    let pause = Duration::from_millis(150 * u64::from(attempt + 1));
+                    if retry && attempt < 5 && deadline > Instant::now() + pause {
+                        attempt += 1;
+                        std::thread::sleep(pause);
+                        continue;
+                    }
+                    bail!("`{method}` failed: {text}");
+                }
+            }
+        }
+    }
+
+    /// One round trip. The outer `Result` is transport (write failed, timed
+    /// out, server gone); the inner one is the server's own error reply, with
+    /// its code, so the caller can tell "try again" from "no".
+    fn request_once(
+        &self,
+        method: &str,
+        params: Value,
+        wait: Duration,
+    ) -> Result<std::result::Result<Value, (i64, String)>> {
         let id = self.seq.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = sync_channel(1);
         self.pending.lock().expect("lock").insert(id, tx);
@@ -452,10 +488,12 @@ impl Client {
                     let text = err
                         .get("message")
                         .and_then(Value::as_str)
-                        .unwrap_or("request failed");
-                    bail!("`{method}` failed: {text}");
+                        .unwrap_or("request failed")
+                        .to_string();
+                    let code = err.get("code").and_then(Value::as_i64).unwrap_or(0);
+                    return Ok(Err((code, text)));
                 }
-                Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+                Ok(Ok(resp.get("result").cloned().unwrap_or(Value::Null)))
             }
             Err(_) => {
                 self.pending.lock().expect("lock").remove(&id);
@@ -851,6 +889,29 @@ impl Session {
     }
 }
 
+/// How long after starting a server an empty answer is retried rather than
+/// believed.
+const YOUNG_SESSION: Duration = Duration::from_secs(60);
+
+/// `null`, `[]`, or a hover with no contents.
+fn is_empty_answer(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.get("contents").is_some_and(|c| match c {
+            Value::Null => true,
+            Value::String(s) => s.is_empty(),
+            Value::Array(a) => a.is_empty(),
+            Value::Object(m) => m
+                .get("value")
+                .and_then(Value::as_str)
+                .is_some_and(str::is_empty),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 /// Every server running for this workspace, keyed by server name.
 ///
 /// A repository is routinely more than one language, so unlike the debugger —
@@ -1224,7 +1285,18 @@ pub fn run(args: &Value, root: &Path) -> Result<String> {
         at
     };
 
-    let body = session.client.request(method, params)?;
+    let mut body = session.client.request(method, params.clone())?;
+    // A server that has only just started can answer "nothing" before it has
+    // even begun to report indexing, so `ready` found it idle and let the
+    // question through too early. An empty answer from a young session is
+    // more likely "not yet" than "no": let it settle and ask again.
+    let mut tries = 0;
+    while is_empty_answer(&body) && session.started.elapsed() < YOUNG_SESSION && tries < 5 {
+        tries += 1;
+        std::thread::sleep(Duration::from_millis(400));
+        session.ready();
+        body = session.client.request(method, params.clone())?;
+    }
     let server = session.def.name;
 
     if method == "textDocument/hover" {
@@ -1568,6 +1640,167 @@ pub fn augment_symbol(root: &Path, name: &str, budget: Duration) -> Option<Strin
     None
 }
 
+/// One definition the code graph knows, to resolve references for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub file: String,
+    /// 1-based.
+    pub line: usize,
+    /// How to show it: `Cart::total` where the graph knows the owner.
+    pub label: String,
+    /// The bare name as it appears on that line, where the server is asked.
+    pub word: String,
+}
+
+/// References already resolved, keyed by definition and valid for one graph
+/// generation: any file changing anywhere can add or remove a reference, and
+/// the graph's generation moves on every change it sees.
+type RefCache = HashMap<(String, usize, String), (u64, &'static str, Vec<Location>)>;
+
+fn ref_cache() -> &'static Mutex<RefCache> {
+    static CACHE: OnceLock<Mutex<RefCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// One candidate and what its server said: the server and the locations, or
+/// why it could not be resolved.
+type Resolution<'a> = (&'a Candidate, Result<(&'static str, Vec<Location>), String>);
+
+/// How many same-named definitions one call resolves. Each is a request; past
+/// a handful, the list of candidates is the useful answer and the budget is
+/// better spent elsewhere.
+const MAX_CANDIDATES: usize = 4;
+/// References listed per definition before summarising the rest.
+const MAX_REFS_SHOWN: usize = 15;
+
+/// Semantic references for each definition of a name, from running language
+/// servers, for `codegraph query=symbol` to put above its name matches.
+///
+/// Each candidate is resolved **at its own position** — not by spelling — so
+/// two `run`s in different types get their own answers, and none is chosen
+/// on the model's behalf. Bounded like `augment_symbol`: one budget for the
+/// whole call, already-running servers only, and any failure leaves that
+/// candidate marked unresolved rather than turning into an error. When no
+/// server can speak for any candidate, it falls back to `augment_symbol`.
+pub fn semantic_references(
+    root: &Path,
+    name: &str,
+    candidates: &[Candidate],
+    generation: u64,
+    budget: Duration,
+) -> Option<String> {
+    let deadline = Instant::now() + budget;
+    let mut resolved: Vec<Resolution> = Vec::new();
+    {
+        let mut map = slot().lock().ok()?;
+        for cand in candidates.iter().take(MAX_CANDIDATES) {
+            let key = (cand.file.clone(), cand.line, cand.word.clone());
+            if let Some((gen, server, locs)) =
+                ref_cache().lock().ok().and_then(|c| c.get(&key).cloned())
+            {
+                if gen == generation {
+                    resolved.push((cand, Ok((server, locs))));
+                    continue;
+                }
+            }
+            let ext = Path::new(&cand.file)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let Some(session) = map.values_mut().find(|s| s.def.extensions.contains(&ext)) else {
+                resolved.push((cand, Err(format!("no running language server for .{ext}"))));
+                continue;
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                resolved.push((cand, Err("out of time".into())));
+                continue;
+            }
+            let answer = (|| -> Result<Vec<Location>> {
+                let uri = session.open_file(&cand.file)?;
+                let character = column_for(root, &cand.file, cand.line, Some(&cand.word), None)?;
+                let params = json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": cand.line.saturating_sub(1), "character": character },
+                    "context": { "includeDeclaration": false },
+                });
+                let body =
+                    session
+                        .client
+                        .request_timeout("textDocument/references", params, left)?;
+                Ok(locations(&body, root))
+            })();
+            match answer {
+                Ok(locs) => {
+                    let server = session.def.name;
+                    if let Ok(mut c) = ref_cache().lock() {
+                        c.insert(key, (generation, server, locs.clone()));
+                    }
+                    resolved.push((cand, Ok((server, locs))));
+                }
+                Err(e) => resolved.push((cand, Err(e.to_string()))),
+            }
+        }
+    }
+
+    if resolved.iter().all(|(_, r)| r.is_err()) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        return augment_symbol(root, name, left);
+    }
+    Some(render_semantic(name, candidates.len(), &resolved))
+}
+
+fn render_semantic(name: &str, total: usize, resolved: &[Resolution]) -> String {
+    let servers: BTreeSet<&str> = resolved
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok().map(|(s, _)| *s))
+        .collect();
+    let by = servers.into_iter().collect::<Vec<_>>().join(", ");
+    let mut out = format!(
+        "\nSemantic references — reported by {by}, resolved at each definition's position:\n"
+    );
+    for (cand, r) in resolved {
+        let at = format!("{}:{}", cand.file, cand.line);
+        match r {
+            Ok((_, locs)) if locs.is_empty() => {
+                let _ = writeln!(out, "- `{}` ({at}): no references", cand.label);
+            }
+            Ok((_, locs)) => {
+                let _ = writeln!(
+                    out,
+                    "- `{}` ({at}): {} reference(s)",
+                    cand.label,
+                    locs.len()
+                );
+                for l in locs.iter().take(MAX_REFS_SHOWN) {
+                    let _ = writeln!(out, "    {l}");
+                }
+                if locs.len() > MAX_REFS_SHOWN {
+                    let _ = writeln!(out, "    … {} more", locs.len() - MAX_REFS_SHOWN);
+                }
+            }
+            Err(why) => {
+                let _ = writeln!(out, "- `{}` ({at}): not resolved — {why}", cand.label);
+            }
+        }
+    }
+    if total > 1 {
+        let _ = writeln!(
+            out,
+            "{total} definitions are named `{name}`; each is resolved on its own and none \
+             has been chosen for you."
+        );
+    }
+    if total > MAX_CANDIDATES {
+        let _ = writeln!(
+            out,
+            "Only the first {MAX_CANDIDATES} were resolved; ask `lsp` action=references at a \
+             specific file and line for the rest."
+        );
+    }
+    out
+}
+
 /// Start the servers this project can use, in the background.
 ///
 /// Called at startup when `lsp_eager` is on. Off by default: rust-analyzer on a
@@ -1827,8 +2060,11 @@ ROOT = ""
                 return;
             }
         };
+        // Locations are grouped by file: `src/main.rs: 1`. This asserted the
+        // older `file:line` form and nobody noticed, because on a machine
+        // without a runnable rust-analyzer the test skips.
         assert!(
-            out.contains("src/main.rs:1"),
+            out.contains("src/main.rs: 1"),
             "definition should be line 1:\n{out}"
         );
 
@@ -1995,6 +2231,164 @@ ROOT = ""
         assert!(extra.contains("Resolved by fake-ls"), "{extra}");
         assert!(extra.contains("function Widget in app"), "{extra}");
         assert!(extra.contains("lib.rs:42"), "{extra}");
+
+        shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `codegraph symbol` asks the server about each definition at its own
+    /// position: two `run`s are two answers, none is picked, a language with
+    /// no running server says so, and the answer is cached only for as long as
+    /// the graph has not changed.
+    #[test]
+    fn semantic_references_resolve_each_candidate_and_label_the_rest() {
+        let _exclusive = exclusive();
+        let dir = std::env::temp_dir().join(format!("koda-lsp-sem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("a.rs"),
+            "impl Thing { fn run(&self) {} }\n\n\n\nimpl Other { fn run(&self) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.py"), "def run():\n    pass\n").unwrap();
+        let Some(session) = fake_session(&dir) else {
+            return; // no python3 on this machine
+        };
+        slot().lock().unwrap().insert("fake-ls".into(), session);
+
+        let cand = |file: &str, line: usize, label: &str| Candidate {
+            file: file.into(),
+            line,
+            label: label.into(),
+            word: "run".into(),
+        };
+        let cands = vec![
+            cand("a.rs", 1, "Thing::run"),
+            cand("a.rs", 5, "Other::run"),
+            cand("b.py", 1, "run"),
+        ];
+        let out = semantic_references(&dir, "run", &cands, 7, Duration::from_secs(10))
+            .expect("the running server answered for the .rs candidates");
+        assert!(
+            out.contains("Semantic references — reported by fake-ls"),
+            "{out}"
+        );
+        assert!(
+            out.contains("`Thing::run` (a.rs:1): 2 reference(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("`Other::run` (a.rs:5): 2 reference(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("`run` (b.py:1): not resolved — no running language server for .py"),
+            "{out}"
+        );
+        assert!(out.contains("3 definitions are named `run`"), "{out}");
+        assert!(out.contains("none") && out.contains("chosen"), "{out}");
+
+        // The server goes away. Same generation: the cached answer stands.
+        shutdown();
+        let cached =
+            semantic_references(&dir, "run", &cands, 7, Duration::from_secs(2)).expect("cached");
+        assert!(
+            cached.contains("`Thing::run` (a.rs:1): 2 reference(s)"),
+            "{cached}"
+        );
+        // The graph moved on: nothing cached may be trusted, and with no
+        // server there is nothing to say — never a stale semantic claim.
+        assert_eq!(
+            semantic_references(&dir, "run", &cands, 8, Duration::from_secs(2)),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The acceptance check against a real server: two methods named `total`
+    /// on different types, and a local that shadows a function's name. The
+    /// code graph can only say "these files mention `total`"; rust-analyzer
+    /// has to tell the two apart, and must not count the shadowing local.
+    /// Ignored by default because it needs rust-analyzer installed; run with
+    /// `cargo test --bin koda -- --ignored real_rust_analyzer`.
+    #[test]
+    #[ignore]
+    fn real_rust_analyzer_tells_same_named_methods_apart() {
+        let _exclusive = exclusive();
+        if crate::tools::which_in_path("rust-analyzer").is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("koda-lsp-ra-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"ra_probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/main.rs"),
+            "mod shop;\nuse shop::{Cart, Order};\n\nfn helper() -> u32 { 1 }\n\n\
+             fn main() {\n    let c = Cart;\n    let o = Order;\n    let a = c.total() + c.total();\n    \
+             let b = o.total();\n    let x = helper();\n    let helper = 5;\n    println!(\"{} {} {} {}\", a, b, x, helper + helper);\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/shop.rs"),
+            "pub struct Cart;\nimpl Cart {\n    pub fn total(&self) -> u32 { 1 }\n}\n\n\
+             pub struct Order;\nimpl Order {\n    pub fn total(&self) -> u32 { 2 }\n}\n",
+        )
+        .unwrap();
+
+        let g = crate::graph::scan(&dir);
+        let cands = g.candidates("total");
+        assert_eq!(cands.len(), 2, "{cands:?}");
+        // The lexical answer cannot separate them: one file mentions `total`.
+        assert!(g.symbol("total").contains("Lexical mentions"));
+
+        // Start the server the way the `lsp` tool does, and let it index.
+        {
+            let mut map = slot().lock().unwrap();
+            let session = session_for(&mut map, &dir, "src/main.rs").expect("start rust-analyzer");
+            session.open_file("src/main.rs").unwrap();
+            session.ready();
+        }
+        let mut out = String::new();
+        // A cold index can answer empty at first; give it a few tries.
+        for _ in 0..20 {
+            out = semantic_references(&dir, "total", &cands, g.generation, Duration::from_secs(30))
+                .unwrap_or_default();
+            if out.contains("`Cart::total`") && out.contains("2 reference(s)") {
+                break;
+            }
+            ref_cache().lock().unwrap().clear();
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        eprintln!("{out}");
+        assert!(
+            out.contains("`Cart::total` (src/shop.rs:3): 2 reference(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("`Order::total` (src/shop.rs:8): 1 reference(s)"),
+            "{out}"
+        );
+
+        // A shadowing local is not a use of the function.
+        let helper = g.candidates("helper");
+        let h = semantic_references(
+            &dir,
+            "helper",
+            &helper,
+            g.generation,
+            Duration::from_secs(30),
+        )
+        .unwrap_or_default();
+        eprintln!("{h}");
+        assert!(
+            h.contains("`helper` (src/main.rs:4): 1 reference(s)"),
+            "{h}"
+        );
 
         shutdown();
         let _ = std::fs::remove_dir_all(&dir);

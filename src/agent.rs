@@ -4427,7 +4427,7 @@ impl Agent {
         // consulted once the graph's read guard is released — holding a lock
         // across an await is how a whole session ends up serialised behind one
         // slow answer.
-        let mut resolve: Option<String> = None;
+        let mut resolve: Option<(String, Vec<crate::lsp::Candidate>, u64)> = None;
         // The whole graph read is one block so the lock guard is dropped before
         // any await below. A `std` guard held across an await makes the future
         // non-`Send` — and worse, would hold the graph while a language server
@@ -4455,7 +4455,7 @@ impl Agent {
                             "codegraph: missing name".to_string(),
                         )
                     } else {
-                        resolve = Some(name.to_string());
+                        resolve = Some((name.to_string(), g.candidates(name), g.generation));
                         (g.symbol(name), format!("codegraph symbol {name}"))
                     }
                 }
@@ -4489,10 +4489,18 @@ impl Agent {
         // promise of an instant, always-available answer is not up for
         // negotiation.
         let mut content = content;
-        if let Some(name) = resolve.filter(|_| self.cfg.lsp && self.cfg.lsp_in_codegraph) {
+        if let Some((name, candidates, generation)) =
+            resolve.filter(|_| self.cfg.lsp && self.cfg.lsp_in_codegraph)
+        {
             let root = self.ctx.root.clone();
             if let Ok(Some(extra)) = tokio::task::spawn_blocking(move || {
-                crate::lsp::augment_symbol(&root, &name, std::time::Duration::from_millis(1500))
+                crate::lsp::semantic_references(
+                    &root,
+                    &name,
+                    &candidates,
+                    generation,
+                    std::time::Duration::from_millis(1500),
+                )
             })
             .await
             {

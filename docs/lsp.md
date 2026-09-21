@@ -54,14 +54,37 @@ such symbol" and is the single most misleading thing this tool could report.
 
 ## With the code graph
 
-`codegraph query=symbol` folds in a language server's resolved answer when one
-is already running, under a hard time budget, failing silently. The graph's
-promise — instant, always available — is not up for negotiation, so a server
-that is cold, missing or slow is skipped rather than waited for. Turn it off
-with `lsp_in_codegraph = false`.
+`codegraph query=symbol` answers in two clearly separated parts:
+
+- **Semantic references — reported by a language server.** For every
+  definition of the name (up to four), koda asks the running server for the
+  references *at that definition's own position*. Two `total` methods on
+  different types come back as two answers, each with its own locations; none
+  is picked for you. A shadowing local is not counted as a use.
+- **Lexical mentions — matched by the local index.** The files that use the
+  name, found by the code graph without a server. Fast and always there, but a
+  mention of `total` may be a different `total`, and the answer says so.
+
+The semantic part is bounded: one 1.5 s budget for the whole call, servers that
+are *already running* only (it never starts a cold server inside a codegraph
+call), and a definition the server cannot answer for — no server for that
+language, or out of time — is listed as "not resolved" rather than guessed.
+Answers are cached until any file in the project changes. Turn the whole
+handshake off with `lsp_in_codegraph = false`.
+
+```
+Semantic references — reported by rust-analyzer, resolved at each definition's position:
+- `Cart::total` (src/shop.rs:3): 2 reference(s)
+    src/main.rs:9:15
+    src/main.rs:9:27
+- `Order::total` (src/shop.rs:8): 1 reference(s)
+    src/main.rs:10:15
+2 definitions are named `total`; each is resolved on its own and none has been chosen for you.
+```
 
 Keep reaching for `codegraph` first, for orientation. Reach for `lsp` when a
-name is ambiguous or overloaded, or when you need a type.
+question needs a position the graph does not have — a hover type, the
+references of a local, diagnostics.
 
 ## "It says it will not run"
 

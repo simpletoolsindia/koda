@@ -47,6 +47,9 @@ pub struct Graph {
     /// edit can re-join exactly the symbols it touched — including a new
     /// definition that files which did not change already mention.
     mentions: Mentions,
+    /// Moves on every change the graph sees, and differs between scans — what
+    /// anything cached against the graph (resolved references) is keyed on.
+    pub generation: u64,
     pub files: usize,
     pub scanned_ms: u128,
     pub truncated: bool,
@@ -1104,6 +1107,7 @@ pub fn scan(root: &Path) -> Graph {
     let names: Vec<String> = g.defs.keys().cloned().collect();
     g.relink(names);
 
+    g.generation = next_generation();
     g.scanned_ms = started.elapsed().as_millis();
     tel_info!(
         "graph",
@@ -1113,6 +1117,11 @@ pub fn scan(root: &Path) -> Graph {
         "ms" => g.scanned_ms,
     );
     g
+}
+
+fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One canonical order for a name's definitions, whatever order files were
@@ -1152,6 +1161,7 @@ impl Graph {
     /// those now point nowhere, or at a remaining duplicate) and what it
     /// mentioned.
     pub fn remove_file(&mut self, rel: &str) {
+        self.generation = next_generation();
         let mut touched: Vec<String> = Vec::new();
         if let Some(names) = self.by_file.remove(rel) {
             for name in names {
@@ -1371,6 +1381,38 @@ impl Graph {
         out
     }
 
+    /// Every definition of `name`, as candidates a language server can resolve
+    /// at their own positions, with the owner-qualified label where the graph
+    /// has one (`total` and `Cart::total` at the same line are one candidate).
+    pub fn candidates(&self, name: &str) -> Vec<crate::lsp::Candidate> {
+        let name = name.trim();
+        let Some(defs) = self.defs.get(name) else {
+            return Vec::new();
+        };
+        let word = name.rsplit("::").next().unwrap_or(name).to_string();
+        let mut out: Vec<crate::lsp::Candidate> = Vec::new();
+        for d in defs {
+            if out.iter().any(|c| c.file == d.file && c.line == d.line) {
+                continue;
+            }
+            let qualified = self.by_file.get(&d.file).and_then(|names| {
+                names.iter().find(|n| {
+                    n.ends_with(&format!("::{word}"))
+                        && self.defs.get(*n).is_some_and(|ds| {
+                            ds.iter().any(|x| x.file == d.file && x.line == d.line)
+                        })
+                })
+            });
+            out.push(crate::lsp::Candidate {
+                file: d.file.clone(),
+                line: d.line,
+                label: qualified.cloned().unwrap_or_else(|| name.to_string()),
+                word: word.clone(),
+            });
+        }
+        out
+    }
+
     /// Where a symbol is defined and which files mention it.
     pub fn symbol(&self, name: &str) -> String {
         let name = name.trim();
@@ -1396,7 +1438,12 @@ impl Graph {
         }
         match self.refs.get(name) {
             Some(files) if !files.is_empty() => {
-                let _ = writeln!(out, "\nMentioned in {} other file(s):", files.len());
+                let _ = writeln!(
+                    out,
+                    "\nLexical mentions — {} other file(s) use the name `{name}` (matched by \
+                     name by the local index; a mention may be a different `{name}`):",
+                    files.len()
+                );
                 for f in files.iter().take(25) {
                     let _ = writeln!(out, "- {f}");
                 }
@@ -1404,7 +1451,7 @@ impl Graph {
                     let _ = writeln!(out, "- … {} more", files.len() - 25);
                 }
             }
-            _ => out.push_str("\nNot mentioned outside its own file.\n"),
+            _ => out.push_str("\nNo lexical mentions outside its own file.\n"),
         }
         out
     }
