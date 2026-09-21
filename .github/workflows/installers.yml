@@ -83,6 +83,8 @@ jobs:
         os: [ubuntu-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - id: changed
         shell: bash
@@ -113,6 +115,70 @@ jobs:
           "$prefix/bin/koda" --version
           "$prefix/bin/koda" --help > /dev/null
           echo "installed and runs"
+
+      # The fast path, as `curl | bash` runs it: from outside any checkout,
+      # pinned to a published release so the download is what is tested.
+      - name: Install a prebuilt release
+        if: steps.changed.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$(mktemp -d)/koda"
+          cd "$(mktemp -d)"
+          KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
+          "$prefix/bin/koda" --version | grep -q '0.1.0'
+          echo "prebuilt installed and runs"
+
+  windows:
+    name: Install on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: changed
+        shell: bash
+        run: |
+          if git diff --name-only "${{ github.event.before || 'HEAD~1' }}" HEAD 2>/dev/null \
+               | grep -qE '^(install\.sh|install\.ps1|\.github/workflows/installers\.yml)$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # As `irm | iex` runs it: no $PSScriptRoot, so not the checkout.
+      - name: Install a prebuilt release
+        if: steps.changed.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $env:KODA_VERSION = "0.1.0"
+          $prefix = Join-Path $env:RUNNER_TEMP "koda-pre"
+          Set-Location $env:RUNNER_TEMP
+          $sb = [scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\install.ps1"))
+          & $sb -Prefix $prefix
+          $v = & "$prefix\bin\koda.exe" --version
+          if ($v -notmatch "0\.1\.0") { throw "unexpected version: $v" }
+          Write-Host "prebuilt installed and runs: $v"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.changed.outputs.run == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changed.outputs.run == 'true'
+
+      # From the checkout, which is built as it stands.
+      - name: Install from source
+        if: steps.changed.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP "koda-src"
+          .\install.ps1 -Prefix $prefix
+          & "$prefix\bin\koda.exe" --version
+          & "$prefix\bin\koda.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "koda --help failed" }
+          Write-Host "built, installed and runs"
 
   # --------------------------------------------------------------------------
   # No Windows runner is needed to catch a syntax error, and nobody here has

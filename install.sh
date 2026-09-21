@@ -8,6 +8,16 @@
 # uninstall / quit). When piped (no terminal, e.g. curl | bash) it just installs
 # to ~/.local so the one-liner stays a one-liner. Override the location with
 # PREFIX=/usr/local ./install.sh   (system-wide may need sudo).
+#
+# Fast path: when a published release matches the version on the branch, its
+# prebuilt binary is downloaded and checked against its SHA-256 -- seconds, and
+# no Rust toolchain. Otherwise koda is built from source, in a clone kept under
+# ~/.cache/koda so the next update rebuilds only what changed. Run from a koda
+# checkout, the checkout itself is built.
+#
+#   KODA_FROM_SOURCE=1   always build from source (the tip of the branch)
+#   KODA_VERSION=0.1.0   install that release's prebuilt binary
+#   KODA_BRANCH=name     the branch to fetch (default below)
 
 set -euo pipefail
 
@@ -17,6 +27,9 @@ BIN_NAME="koda"
 # the default was `uncensored`, which does not, so every `curl | bash` install
 # died on "clone failed" with nothing to act on. Override with KODA_BRANCH.
 BRANCH="${KODA_BRANCH:-master}"
+RELEASES="https://github.com/simpletoolsindia/koda/releases/download"
+RAW="https://raw.githubusercontent.com/simpletoolsindia/koda"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/koda"
 
 C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
 C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
@@ -34,7 +47,9 @@ is_koda_src() {
     [ -f "$1/Cargo.toml" ] && grep -q '^name = "koda"' "$1/Cargo.toml" 2>/dev/null
 }
 
-resolve_src() {
+# A koda checkout next to this script, or the cwd: the developer's own source,
+# which is built as it stands.
+local_src() {
     local here
     here="$(dirname "${BASH_SOURCE[0]:-$0}")"
     if is_koda_src "$here"; then
@@ -42,12 +57,124 @@ resolve_src() {
     elif is_koda_src "$(pwd)"; then
         SRC="$(pwd)"
     else
-        command -v git >/dev/null 2>&1 || die "git not found — needed to fetch koda."
-        SRC="$(mktemp -d)/koda"
-        info "cloning koda ($BRANCH edition)…"
-        git clone --depth 1 --branch "$BRANCH" "$REPO" "$SRC" >/dev/null 2>&1 \
-            || die "clone failed"
+        return 1
     fi
+}
+
+# Otherwise a clone kept in the cache. Keeping it (and its target/ directory)
+# is what makes an update an incremental rebuild instead of a from-scratch
+# compile of every dependency. The cache is the installer's own, so bringing it
+# to the branch tip may discard whatever is in it.
+cached_src() {
+    command -v git >/dev/null 2>&1 || die "git not found — needed to fetch koda."
+    SRC="$CACHE_DIR/src"
+    if [ -d "$SRC/.git" ] && is_koda_src "$SRC"; then
+        info "fetching the latest ${BRANCH}…"
+        if git -C "$SRC" fetch --quiet --depth 1 origin "$BRANCH" 2>/dev/null \
+            && git -C "$SRC" reset --quiet --hard FETCH_HEAD 2>/dev/null; then
+            return 0
+        fi
+        warn "the cached source at $SRC is unusable — cloning afresh"
+    fi
+    rm -rf "$SRC"
+    mkdir -p "$CACHE_DIR"
+    info "cloning koda ($BRANCH edition)…"
+    git clone --quiet --depth 1 --single-branch --branch "$BRANCH" "$REPO" "$SRC" \
+        >/dev/null 2>&1 || die "clone failed"
+}
+
+resolve_src() {
+    local_src || cached_src
+}
+
+# --- the prebuilt fast path ----------------------------------------------------
+# curl or wget, whichever is here: to a file, or to stdout without one.
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --connect-timeout 10 -o "${2:--}" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 10 -O "${2:--}" "$1"
+    else
+        return 1
+    fi
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        return 1
+    fi
+}
+
+# The release target this machine runs, as the release workflow names it.
+target_triple() {
+    case "$(uname -s)/$(uname -m)" in
+        Linux/x86_64|Linux/amd64)   echo x86_64-unknown-linux-gnu ;;
+        Linux/aarch64|Linux/arm64)  echo aarch64-unknown-linux-gnu ;;
+        Darwin/x86_64)              echo x86_64-apple-darwin ;;
+        Darwin/arm64|Darwin/aarch64) echo aarch64-apple-darwin ;;
+        *) return 1 ;;
+    esac
+}
+
+WORK=""
+cleanup() { [ -z "$WORK" ] || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+# Sets BUILT to a downloaded, verified binary, or returns 1 -- quietly when
+# there is simply nothing to download -- and the caller builds from source.
+#
+# Only the release whose version is the branch's own is taken: "latest release"
+# would happily install something older than the source the user asked for.
+download_prebuilt() {
+    [ -z "${KODA_FROM_SOURCE:-}" ] || return 1
+    # Releases are built from master. Another branch -- the uncensored edition
+    # -- is a different program under the same version number, so it is built.
+    [ "$BRANCH" = "master" ] || [ -n "${KODA_VERSION:-}" ] || return 1
+    local target version asset want got bin
+    target="$(target_triple)" || return 1
+    version="${KODA_VERSION:-}"
+    if [ -z "$version" ]; then
+        version="$(fetch "$RAW/$BRANCH/Cargo.toml" 2>/dev/null \
+            | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)" || true
+        [ -n "$version" ] || return 1
+    fi
+    version="${version#v}"
+    asset="koda-${version}-${target}.tar.gz"
+    WORK="$(mktemp -d)"
+    # The checksum first: it is tiny, and its absence means no such release.
+    if ! fetch "$RELEASES/v$version/$asset.sha256" "$WORK/sum" 2>/dev/null; then
+        [ -z "${KODA_VERSION:-}" ] || die "no prebuilt koda $version for $target"
+        info "no prebuilt binary for $version yet — building from source"
+        return 1
+    fi
+    info "downloading koda $version for ${target}…"
+    fetch "$RELEASES/v$version/$asset" "$WORK/$asset" || {
+        warn "download failed — building from source instead"
+        return 1
+    }
+    want="$(cut -d' ' -f1 < "$WORK/sum")"
+    got="$(sha256_of "$WORK/$asset")" || {
+        warn "no sha256sum or shasum to verify the download — building from source"
+        return 1
+    }
+    # A mismatch is not a network hiccup to shrug off: stop, loudly.
+    [ "$want" = "$got" ] || die "checksum mismatch for $asset (expected $want, got $got)"
+    tar -xzf "$WORK/$asset" -C "$WORK" || die "could not unpack $asset"
+    bin="$WORK/koda-${version}-${target}/$BIN_NAME"
+    [ -f "$bin" ] || die "$asset does not contain $BIN_NAME"
+    chmod +x "$bin"
+    # Linux builds link the build machine's glibc; an older or musl system
+    # cannot run them. Find that out here, and compile there instead.
+    if ! "$bin" --version >/dev/null 2>&1; then
+        warn "the prebuilt binary does not run here — building from source"
+        return 1
+    fi
+    ok "downloaded and verified (sha256 $(printf '%s' "$got" | cut -c1-12)…)"
+    BUILT="$bin"
 }
 
 # --- the browse tool's engine ------------------------------------------------
@@ -97,30 +224,50 @@ ensure_rust() {
     ok "Rust installed"
 }
 
-# --- build + copy into $BIN_DIR ----------------------------------------------
-build_and_install() {
-    local prefix="$1"; local bin_dir="$prefix/bin"
-    # Check this before the build, not after: finding out that /usr/local/bin
-    # needs root is worth knowing now rather than two minutes into a compile.
-    if [ ! -w "$prefix" ] && [ ! -w "$bin_dir" ] && [ ! -w "$(dirname "$prefix")" ]; then
-        die "cannot write $bin_dir — re-run with sudo, or install for yourself with PREFIX=\$HOME/.local"
-    fi
+# --- get a binary: download it, or build it ------------------------------------
+build_from_source() {
     ensure_rust
     resolve_src
     cd "$SRC"
-    info "building the release binary (a minute or two the first time)…"
-    cargo build --release --quiet
-    local built="target/release/$BIN_NAME"
-    [ -x "$built" ] || die "build finished but $built is missing"
-    ok "built ($(du -h "$built" | cut -f1))"
+    info "building the release binary (a few minutes the first time, seconds after)…"
+    # --locked: build exactly the dependency versions that were tested, and do
+    # not stop to re-resolve the whole graph against the registry.
+    cargo build --release --locked --quiet \
+        || die "build failed — see the errors above"
+    BUILT="$SRC/target/release/$BIN_NAME"
+    [ -x "$BUILT" ] || die "build finished but $BUILT is missing"
+    ok "built ($(du -h "$BUILT" | awk '{print $1}'))"
+}
 
+# Sets BUILT. A checkout is the developer's own work and is always built; for
+# everyone else the release binary is tried first.
+obtain_binary() {
+    if local_src; then
+        build_from_source
+    elif ! download_prebuilt; then
+        build_from_source
+    fi
+}
+
+# Check before fetching anything: finding out that /usr/local/bin needs root is
+# worth knowing now rather than two minutes into a compile.
+check_writable() {
+    local prefix="$1"
+    if [ ! -w "$prefix" ] && [ ! -w "$prefix/bin" ] && [ ! -w "$(dirname "$prefix")" ]; then
+        die "cannot write $prefix/bin — re-run with sudo, or install for yourself with PREFIX=\$HOME/.local"
+    fi
+}
+
+# --- copy BUILT into <prefix>/bin ----------------------------------------------
+install_binary() {
+    local bin_dir="$1/bin"
     mkdir -p "$bin_dir"
     # Install beside, then rename over. Writing straight onto the destination
     # fails with "text file busy" when the koda being replaced is running --
     # which is exactly when people re-run this script -- while a rename works
     # even then, and is atomic: the binary is never half-written.
     local staged="$bin_dir/.$BIN_NAME.new"
-    install -m 0755 "$built" "$staged"
+    install -m 0755 "$BUILT" "$staged"
     # macOS kills a copied ad-hoc-signed binary; re-sign before it is in place.
     if [ "$(uname)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
         codesign --force --sign - "$staged" >/dev/null 2>&1 || true
@@ -130,9 +277,12 @@ build_and_install() {
         die "could not install to $bin_dir/$BIN_NAME"
     }
     ok "installed to $bin_dir/$BIN_NAME"
+}
 
+# Everything after the binary is in place: once, however many copies there are.
+finish() {
+    local bin_dir="$1/bin"
     ensure_browse_engine "$bin_dir/$BIN_NAME"
-
     case ":$PATH:" in
         *":$bin_dir:"*) ok "$bin_dir is on your PATH" ;;
         *) warn "add $bin_dir to your PATH:  export PATH=\"$bin_dir:\$PATH\"" ;;
@@ -140,6 +290,13 @@ build_and_install() {
     ensure_ripgrep
     ensure_tesseract
     ok "done — run '$BIN_NAME' to start, or '$BIN_NAME --help'"
+}
+
+build_and_install() {
+    check_writable "$1"
+    obtain_binary
+    install_binary "$1"
+    finish "$1"
 }
 
 # --- optional speedup: ripgrep -----------------------------------------------
@@ -305,8 +462,9 @@ update() {
     info "installed: $before"
     printf '%s\n' "$targets" | while IFS= read -r t; do printf '    %s\n' "$t"; done
 
-    resolve_src
-    if [ -d "$SRC/.git" ]; then
+    # A checkout is fast-forwarded here; the cache and the download fetch
+    # the latest themselves.
+    if local_src && [ -d "$SRC/.git" ]; then
         command -v git >/dev/null 2>&1 || die "git not found — needed to fetch updates."
         info "fetching the latest source…"
         # --ff-only: a fast-forward is an update. Anything else means local
@@ -318,24 +476,36 @@ update() {
         fi
     fi
 
-    # Update every copy found, so a shadowed one cannot keep serving old code.
+    # Fetch or build once, then update every copy found, so a shadowed one
+    # cannot keep serving old code.
     #
     # A `while read ... done <<EOF` loop would redirect stdin to the heredoc for
-    # everything inside it, and build_and_install prompts on stdin -- it would
-    # see a non-tty, take the non-interactive branch and refuse to install Rust
-    # or ripgrep. Splitting on newlines with IFS leaves stdin alone.
+    # everything inside it, and the steps below prompt on stdin -- they would
+    # see a non-tty and take the non-interactive branch. Splitting on newlines
+    # with IFS leaves stdin alone.
     local prefix t oldifs="$IFS"
+    IFS='
+'
+    for t in $targets; do
+        IFS="$oldifs"
+        [ -n "$t" ] && check_writable "$(dirname "$(dirname "$t")")"
+        IFS='
+'
+    done
+    IFS="$oldifs"
+    obtain_binary
     IFS='
 '
     for t in $targets; do
         IFS="$oldifs"
         [ -n "$t" ] || continue
         prefix="$(dirname "$(dirname "$t")")"
-        build_and_install "$prefix"
+        install_binary "$prefix"
         IFS='
 '
     done
     IFS="$oldifs"
+    finish "$(dirname "$(dirname "$first")")"
     ok "updated: $before → $(version_of "$first")"
 }
 
@@ -425,7 +595,7 @@ fi
 banner
 printf '  %s1%s  Install for me            %s(%s)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$USER_PREFIX/bin" "$C_OFF"
 printf '  %s2%s  Install system-wide       %s(%s, may need sudo)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$SYS_PREFIX/bin" "$C_OFF"
-printf '  %s3%s  Update to the latest      %s(git pull + rebuild)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
+printf '  %s3%s  Update to the latest      %s(download or rebuild)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
 printf '  %s4%s  Uninstall                 %s(binary; asks about settings)%s\n' "$C_GREEN" "$C_OFF" "$C_DIM" "$C_OFF"
 printf '  %s5%s  Quit\n\n' "$C_GREEN" "$C_OFF"
 printf '  choose [1]: '

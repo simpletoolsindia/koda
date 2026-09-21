@@ -66,8 +66,14 @@ checkout: `git checkout master` or `git checkout uncensored`, then re-run
 
 ## Install
 
-koda builds from source (one static binary, no runtime deps). The installers
-build and install it, and will offer to install Rust for you if it's missing.
+koda is one static binary with no runtime deps. The installers download the
+prebuilt binary for your platform when a release matches the version on
+`master` (verified against its SHA-256; a few seconds, no Rust needed), and
+otherwise build it from source, offering to install Rust if it's missing. The
+source is kept in `~/.cache/koda` (`%LOCALAPPDATA%\koda\cache` on Windows), so
+an update rebuilds only what changed. Run from a checkout, they build that
+checkout. `KODA_FROM_SOURCE=1` always builds the branch tip;
+`KODA_VERSION=0.1.0` installs a specific release.
 They also offer to install two optional extras, neither of which koda needs to
 run: ripgrep, for faster search, and tesseract, for
 [offline image OCR](#reading-files-text-csv-and-images). Both are a single
