@@ -1670,7 +1670,7 @@ impl Agent {
                 // system, no checkable file among those changed — means there
                 // is nothing to ask for, and the turn ends as it would have.
                 let plan = (self.depth == 0 && self.wrote_source && !self.ran_check)
-                    .then(|| crate::verify::detect(&self.ctx.root, &self.changed))
+                    .then(|| crate::verify::detect(&self.ctx.root, &self.changed, &self.cfg.shell))
                     .flatten()
                     .filter(|p| !p.steps.is_empty());
                 if let Some(plan) = plan.filter(|_| self.check_nudges == 0 && !summarising) {
@@ -4862,9 +4862,9 @@ impl Agent {
         call: &ToolCall,
         tx: &mpsc::UnboundedSender<Event>,
     ) -> tools::Outcome {
-        let plan = crate::verify::detect(&self.ctx.root, &self.changed);
+        let plan = crate::verify::detect(&self.ctx.root, &self.changed, &self.cfg.shell);
         let Some(plan) = plan.filter(|p| !p.steps.is_empty()) else {
-            let why = match crate::verify::detect(&self.ctx.root, &self.changed) {
+            let why = match crate::verify::detect(&self.ctx.root, &self.changed, &self.cfg.shell) {
                 Some(p) => format!(
                     "Detected {}, but none of its checks can run here:\n- {}",
                     p.kinds.join(" + "),

@@ -896,9 +896,26 @@ pub fn runs_git(command: &str) -> bool {
                 }
                 words.next();
             }
-            words.next().is_some_and(|prog| {
+            words.next().is_some_and(|first| {
+                // A quoted program runs to its closing quote, spaces and all:
+                // `"C:\Program Files\Git\cmd\git.exe" push`.
+                let mut prog = first.to_string();
+                if let Some(q) = first.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                    while prog.len() < 2 || !prog.ends_with(q) {
+                        match words.next() {
+                            Some(w) => {
+                                prog.push(' ');
+                                prog.push_str(w);
+                            }
+                            None => break,
+                        }
+                    }
+                }
                 let prog = prog.trim_matches(|c| c == '"' || c == '\'');
-                prog == "git" || prog.ends_with("/git") || prog == "git.exe"
+                // `/usr/bin/git`, `C:\Program Files\Git\cmd\git.exe`, `GIT`:
+                // Windows and macOS file systems ignore case.
+                let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
+                base.eq_ignore_ascii_case("git") || base.eq_ignore_ascii_case("git.exe")
             })
         })
 }
@@ -2319,25 +2336,41 @@ fn ripgrep_path() -> Option<std::path::PathBuf> {
 /// Minimal `which`: find an executable by name on PATH. Avoids a dependency.
 pub fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
+    // Windows finds `cargo` as `cargo.exe`: a bare name is tried with each
+    // extension in PATHEXT, as the shell itself would. Looking for a file
+    // called exactly `cargo` found nothing there, so every program looked
+    // uninstalled.
+    let names: Vec<String> = if cfg!(windows) && std::path::Path::new(name).extension().is_none() {
+        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        exts.split(';')
+            .filter(|e| !e.is_empty())
+            .map(|e| format!("{name}{}", e.to_ascii_lowercase()))
+            .chain(std::iter::once(name.to_string()))
+            .collect()
+    } else {
+        vec![name.to_string()]
+    };
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if let Ok(meta) = std::fs::metadata(&candidate) {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                    return Some(candidate);
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                if meta.is_file() {
-                    return Some(candidate);
-                }
+        for name in &names {
+            let candidate = dir.join(name);
+            if let Some(found) = executable(candidate) {
+                return Some(found);
             }
         }
     }
     None
+}
+
+fn executable(candidate: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    let meta = std::fs::metadata(&candidate).ok()?;
+    #[cfg(unix)]
+    let runnable = {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let runnable = meta.is_file();
+    runnable.then_some(candidate)
 }
 
 /// ripgrep fast path: run `rg` and parse its `path:line:text` output into the
@@ -4873,6 +4906,9 @@ mod tests {
             "(cd sub && git pull)",
             "echo $(git rev-parse HEAD)",
             "command git branch -D x",
+            r#""C:\Program Files\Git\cmd\git.exe" push"#,
+            r"C:\tools\git.exe reset --hard",
+            "GIT status",
         ] {
             assert!(runs_git(c), "should be held: {c}");
         }

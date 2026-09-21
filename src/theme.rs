@@ -661,7 +661,8 @@ pub const ASCII: Glyphs = Glyphs {
     ready: "o",
 };
 
-/// Unicode unless the locale says the terminal cannot handle it.
+/// Unicode unless the locale says the terminal cannot handle it (Windows
+/// Terminal says so by being there).
 pub fn glyphs(configured: &str) -> Glyphs {
     match configured.trim() {
         "ascii" => ASCII,
@@ -675,7 +676,11 @@ pub fn glyphs(configured: &str) -> Glyphs {
                     })
                     .unwrap_or(false)
             });
-            if utf8 {
+            // Windows sets no locale variables at all. Windows Terminal draws
+            // Unicode and emoji well; the old console host does not, and gets
+            // the ASCII set.
+            let windows_terminal = std::env::var_os("WT_SESSION").is_some();
+            if utf8 || windows_terminal {
                 UNICODE
             } else {
                 ASCII

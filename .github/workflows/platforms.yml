@@ -1,0 +1,33 @@
+name: Platforms
+
+# The release gate runs the tests on Linux only; the release builds prove koda
+# compiles for Windows and macOS, not that it works there. This runs the whole
+# suite on each, so path, shell and terminal code that only breaks off Linux
+# is caught where it breaks.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: platforms-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --all

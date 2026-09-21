@@ -31,6 +31,64 @@ pub struct Plan {
     pub steps: Vec<String>,
     /// Checks that apply but cannot run here, with the reason.
     pub skipped: Vec<String>,
+    /// The shell the steps are written for.
+    pub dialect: Dialect,
+}
+
+/// How the shell that runs a plan quotes. `cmd.exe`, Windows' default, keeps
+/// single quotes as part of the word -- `python -m py_compile 'a.py'` looks for
+/// a file called `'a.py'` -- and PowerShell escapes a quote by doubling it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    #[default]
+    Posix,
+    Cmd,
+    PowerShell,
+}
+
+impl Dialect {
+    /// The dialect of a configured `shell`.
+    pub fn of(shell: &str) -> Self {
+        let base = shell
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(shell)
+            .trim_end_matches(".exe")
+            .to_ascii_lowercase();
+        match base.as_str() {
+            "cmd" => Dialect::Cmd,
+            "powershell" | "pwsh" => Dialect::PowerShell,
+            _ => Dialect::Posix,
+        }
+    }
+
+    fn quote(self, s: &str) -> String {
+        match self {
+            Dialect::Posix => format!("'{}'", s.replace('\'', r"'\''")),
+            // A Windows file name cannot contain a double quote.
+            Dialect::Cmd => format!("\"{s}\""),
+            Dialect::PowerShell => format!("'{}'", s.replace('\'', "''")),
+        }
+    }
+
+    /// A command that prints `s` as it is.
+    fn echo(self, s: &str) -> String {
+        match self {
+            // cmd's echo prints the rest of the line, quotes included, so the
+            // text goes unquoted with its operators escaped.
+            Dialect::Cmd => {
+                let mut out = String::from("echo ");
+                for c in s.chars() {
+                    if "^&|<>()%".contains(c) {
+                        out.push('^');
+                    }
+                    out.push(c);
+                }
+                out
+            }
+            d => format!("echo {}", d.quote(s)),
+        }
+    }
 }
 
 impl Plan {
@@ -44,14 +102,10 @@ impl Plan {
     pub fn script(&self) -> String {
         self.steps
             .iter()
-            .map(|s| format!("echo {} && {s}", shell_quote(&format!("$ {s}"))))
+            .map(|s| format!("{} && {s}", self.dialect.echo(&format!("$ {s}"))))
             .collect::<Vec<_>>()
             .join(" && ")
     }
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 fn has(root: &Path, name: &str) -> bool {
@@ -69,23 +123,48 @@ fn installed(program: &str) -> bool {
     crate::tools::which_in_path(program).is_some()
 }
 
-/// Decide the checks for `root`, given the files this turn changed (relative
-/// to the root). `None` when there is nothing to check.
-pub fn detect(root: &Path, changed: &[String]) -> Option<Plan> {
-    detect_with(root, changed, &installed)
+/// A step that needs nothing but the shell running it.
+const SHELL: &str = "";
+
+/// The Python to run. On Windows `python3` is usually the Microsoft Store's
+/// "install me" stub; the python.org launcher is `py`.
+fn python_program(can_run: Installed) -> &'static str {
+    let order: &[&'static str] = if cfg!(windows) {
+        &["py", "python", "python3"]
+    } else {
+        &["python3", "python"]
+    };
+    order
+        .iter()
+        .copied()
+        .find(|p| can_run(p))
+        .unwrap_or(order[0])
 }
 
-fn detect_with(root: &Path, changed: &[String], can_run: Installed) -> Option<Plan> {
+/// Decide the checks for `root`, given the files this turn changed (relative
+/// to the root), written for `shell`. `None` when there is nothing to check.
+pub fn detect(root: &Path, changed: &[String], shell: &str) -> Option<Plan> {
+    detect_with(root, changed, Dialect::of(shell), &installed)
+}
+
+fn detect_with(
+    root: &Path,
+    changed: &[String],
+    dialect: Dialect,
+    can_run: Installed,
+) -> Option<Plan> {
     let mut plan = Plan {
         kinds: Vec::new(),
         steps: Vec::new(),
         skipped: Vec::new(),
+        dialect,
     };
+    let py = python_program(can_run);
     let mut add = |plan: &mut Plan, kind: &str, program: &str, step: String| {
         if !plan.kinds.iter().any(|k| k == kind) {
             plan.kinds.push(kind.to_string());
         }
-        if can_run(program) {
+        if program == SHELL || can_run(program) {
             plan.steps.push(step);
         } else {
             plan.skipped
@@ -95,7 +174,7 @@ fn detect_with(root: &Path, changed: &[String], can_run: Installed) -> Option<Pl
 
     // 1. What the project declares.
     if let Some(cmd) = declared_check(root) {
-        add(&mut plan, "koda.toml", "sh", cmd);
+        add(&mut plan, "koda.toml", SHELL, cmd);
         return Some(plan);
     }
     if makefile_has(root, "check") {
@@ -122,13 +201,18 @@ fn detect_with(root: &Path, changed: &[String], can_run: Installed) -> Option<Pl
         node(root, &mut plan, &mut add);
     }
     if is_python_project(root) {
-        python(root, changed, &mut plan, &mut add);
+        python(root, changed, py, &mut plan, &mut add);
     }
     if has(root, "pom.xml") {
         add(&mut plan, "java (maven)", "mvn", "mvn -q test".into());
     } else if has(root, "build.gradle") || has(root, "build.gradle.kts") {
-        if has(root, "gradlew") {
-            add(&mut plan, "java (gradle)", "sh", "./gradlew test".into());
+        let wrapper = match dialect {
+            Dialect::Posix => has(root, "gradlew").then_some("./gradlew test"),
+            Dialect::Cmd => has(root, "gradlew.bat").then_some("gradlew.bat test"),
+            Dialect::PowerShell => has(root, "gradlew.bat").then_some(".\\gradlew.bat test"),
+        };
+        if let Some(step) = wrapper {
+            add(&mut plan, "java (gradle)", SHELL, step.into());
         } else {
             add(&mut plan, "java (gradle)", "gradle", "gradle test".into());
         }
@@ -138,7 +222,7 @@ fn detect_with(root: &Path, changed: &[String], can_run: Installed) -> Option<Pl
     }
 
     // 3. Not a project: check just the files that changed.
-    loose_files(changed, &mut plan, &mut add);
+    loose_files(changed, py, &mut plan, &mut add);
     if !plan.kinds.is_empty() {
         return Some(plan);
     }
@@ -262,15 +346,16 @@ fn has_python_tests(root: &Path) -> bool {
 /// The changed Python files compiled (a syntax error is the cheapest thing to
 /// catch), then ruff where the project configures it, then pytest where there
 /// are tests.
-fn python(root: &Path, changed: &[String], plan: &mut Plan, add: &mut Add) {
+fn python(root: &Path, changed: &[String], python: &str, plan: &mut Plan, add: &mut Add) {
+    let d = plan.dialect;
     let py: Vec<&String> = changed.iter().filter(|f| f.ends_with(".py")).collect();
     if !py.is_empty() {
-        let files: Vec<String> = py.iter().map(|f| shell_quote(f)).collect();
+        let files: Vec<String> = py.iter().map(|f| d.quote(f)).collect();
         add(
             plan,
             "python",
-            "python3",
-            format!("python3 -m py_compile {}", files.join(" ")),
+            python,
+            format!("{python} -m py_compile {}", files.join(" ")),
         );
     }
     let pyproject = read(root, "pyproject.toml");
@@ -278,7 +363,7 @@ fn python(root: &Path, changed: &[String], plan: &mut Plan, add: &mut Add) {
         add(plan, "python", "ruff", "ruff check .".into());
     }
     if has_python_tests(root) || pyproject.contains("[tool.pytest") || has(root, "pytest.ini") {
-        add(plan, "python", "python3", "python3 -m pytest -q".into());
+        add(plan, "python", python, format!("{python} -m pytest -q"));
     }
     if plan.steps.is_empty() && plan.skipped.is_empty() {
         plan.kinds.push("python".into());
@@ -287,12 +372,13 @@ fn python(root: &Path, changed: &[String], plan: &mut Plan, add: &mut Add) {
 
 /// Outside any project: a syntax check of each changed file its language's
 /// own tool can check without building anything.
-fn loose_files(changed: &[String], plan: &mut Plan, add: &mut Add) {
+fn loose_files(changed: &[String], python: &str, plan: &mut Plan, add: &mut Add) {
+    let d = plan.dialect;
     let of = |ext: &[&str]| -> Vec<String> {
         changed
             .iter()
             .filter(|f| ext.iter().any(|e| f.ends_with(e)))
-            .map(|f| shell_quote(f))
+            .map(|f| d.quote(f))
             .collect()
     };
     let py = of(&[".py"]);
@@ -300,8 +386,8 @@ fn loose_files(changed: &[String], plan: &mut Plan, add: &mut Add) {
         add(
             plan,
             "python file",
-            "python3",
-            format!("python3 -m py_compile {}", py.join(" ")),
+            python,
+            format!("{python} -m py_compile {}", py.join(" ")),
         );
     }
     for f in of(&[".js", ".mjs", ".cjs"]) {
@@ -345,7 +431,7 @@ mod tests {
     fn plan(tag: &str, files: &[(&str, &str)], changed: &[&str]) -> Option<Plan> {
         let d = dir(tag, files);
         let changed: Vec<String> = changed.iter().map(|s| s.to_string()).collect();
-        let p = detect_with(&d, &changed, &all);
+        let p = detect_with(&d, &changed, Dialect::Posix, &all);
         let _ = std::fs::remove_dir_all(&d);
         p
     }
@@ -452,7 +538,7 @@ mod tests {
     #[test]
     fn a_missing_tool_is_skipped_and_said() {
         let d = dir("missing", &[("go.mod", "")]);
-        let p = detect_with(&d, &[], &|prog| prog != "go").unwrap();
+        let p = detect_with(&d, &[], Dialect::Posix, &|prog| prog != "go").unwrap();
         let _ = std::fs::remove_dir_all(&d);
         assert!(p.steps.is_empty());
         assert_eq!(p.skipped.len(), 3);
@@ -465,10 +551,75 @@ mod tests {
             kinds: vec!["x".into()],
             steps: vec!["false".into(), "echo it's".into()],
             skipped: vec![],
+            dialect: Dialect::Posix,
         };
         assert_eq!(
             p.script(),
             r"echo '$ false' && false && echo '$ echo it'\''s' && echo it's"
         );
+    }
+
+    /// cmd.exe keeps single quotes as part of a word, so a quoted file name
+    /// became a file that does not exist; and `./gradlew` is not a program to it.
+    #[test]
+    fn windows_shells_get_steps_they_can_run() {
+        assert_eq!(Dialect::of(r"C:\Windows\system32\cmd.exe"), Dialect::Cmd);
+        assert_eq!(Dialect::of("pwsh"), Dialect::PowerShell);
+        assert_eq!(Dialect::of("/bin/bash"), Dialect::Posix);
+
+        let d = dir(
+            "win",
+            &[
+                ("requirements.txt", ""),
+                ("gradlew.bat", ""),
+                ("build.gradle", ""),
+            ],
+        );
+        let changed = vec!["my cart.py".to_string()];
+        let p = detect_with(&d, &changed, Dialect::Cmd, &all).unwrap();
+        let py = if cfg!(windows) { "py" } else { "python3" };
+        assert!(
+            p.steps
+                .contains(&format!("{py} -m py_compile \"my cart.py\"")),
+            "{:?}",
+            p.steps
+        );
+        assert!(
+            p.steps.contains(&"gradlew.bat test".to_string()),
+            "{:?}",
+            p.steps
+        );
+        let p = detect_with(&d, &changed, Dialect::PowerShell, &all).unwrap();
+        assert!(
+            p.steps.contains(&r".\gradlew.bat test".to_string()),
+            "{:?}",
+            p.steps
+        );
+
+        let script = Plan {
+            kinds: vec![],
+            steps: vec!["a && b".into()],
+            skipped: vec![],
+            dialect: Dialect::Cmd,
+        }
+        .script();
+        assert_eq!(script, "echo $ a ^&^& b && a && b");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A project's own check needs no `sh`: on Windows there usually is none,
+    /// and the check was skipped as "sh is not installed".
+    #[test]
+    fn a_declared_check_does_not_need_sh() {
+        let d = dir(
+            "declared-nosh",
+            &[(
+                "koda.toml",
+                "[[tools]]\nname = \"check\"\ndescription = \"gate\"\ncommand = \"make lint\"\n",
+            )],
+        );
+        let p = detect_with(&d, &[], Dialect::Cmd, &|prog| prog != "sh").unwrap();
+        assert_eq!(p.steps, vec!["make lint"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
