@@ -523,6 +523,10 @@ pub fn draw(f: &mut Frame, area: Rect, s: &Setup, t: &Theme, g: &Glyphs) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(crate::panel::frame_set(
+            ratatui::widgets::BorderType::Plain,
+            g,
+        ))
         .border_style(t.fg(t.border_focus))
         .title(Span::styled(
             " provider setup ",

@@ -10,6 +10,7 @@ mod detailhelp;
 mod editor;
 mod engine;
 mod fuzzy;
+mod fx;
 mod graph;
 mod index;
 mod learning;

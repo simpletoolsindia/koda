@@ -226,6 +226,11 @@ impl Transcript {
     }
 
     fn push(&mut self, item: Item) {
+        // Only the tail can be mid-reveal, and it is about to stop being the
+        // tail: settle it now, while `finish_reveal` can still find it.
+        // Relayout walks forward from the new block and would never come back
+        // to repaint the reply's cut-short lines.
+        self.finish_reveal();
         self.blocks.push(Block {
             item,
             cache: None,
@@ -364,9 +369,9 @@ impl Transcript {
             self.dirty_from = self.dirty_from.min(last);
             return;
         }
+        self.push(Item::Assistant(chunk.to_string()));
         self.reveal = 0;
         self.reveal_at = None;
-        self.push(Item::Assistant(chunk.to_string()));
     }
 
     /// Characters in the streaming tail block, or None if the tail is not one.
@@ -2277,6 +2282,20 @@ mod tests {
         );
     }
 
+    /// The words on screen, styling dropped, for asserting on content.
+    fn text(t: &mut Transcript) -> String {
+        t.window(0, t.total_lines().max(1))
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn shot(t: &mut Transcript) -> String {
         t.window(0, t.total_lines().max(1))
             .iter()
@@ -2347,6 +2366,37 @@ mod tests {
             one.relayout(40);
             assert_eq!(shot(&mut inc), shot(&mut one), "diverged at reveal {chars}");
         }
+    }
+
+    /// Only the tail can be mid-reveal, so anything pushed after a reply that is
+    /// still catching up must settle it first. A notice landing between the last
+    /// delta and the end of the turn ("learned 10 rule candidates") used to
+    /// strand the reply at its half-revealed length for good: `finish_reveal`
+    /// looks at the tail, which was now the notice, and relayout never walked
+    /// back to the reply's cached, cut-short lines.
+    #[test]
+    fn a_block_pushed_mid_reveal_does_not_strand_the_reply() {
+        let doc = "the reply ends with these exact words";
+        let mut t = tr();
+        t.animate_reveal = true;
+        t.user("q".into());
+        t.assistant_delta(doc);
+        t.reveal = 9;
+        t.relayout(80);
+        assert!(
+            !text(&mut t).contains("exact words"),
+            "precondition: cut short"
+        );
+
+        t.notice("learned 10 new project rule candidate(s)".into());
+        t.finish_reveal();
+        t.relayout(80);
+        let screen = text(&mut t);
+        assert!(
+            screen.contains("these exact words"),
+            "reply stranded:\n{screen}"
+        );
+        assert!(!t.revealing(), "nothing is left mid-reveal");
     }
 
     /// A width change throws away every wrap, including the kept prefix.
@@ -3044,6 +3094,7 @@ mod perf {
             t.finish_reveal();
             t.relayout(100);
         }
+
         let total = t.total_lines();
         assert!(total > 40_000, "test needs a big transcript, got {total}");
         assert!(

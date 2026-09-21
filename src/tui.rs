@@ -11,6 +11,7 @@ use crate::anim;
 use crate::config::{AutoTier, Config, Mode};
 use crate::editor::Editor;
 use crate::fuzzy::FileIndex;
+use crate::fx;
 use crate::log;
 use crate::md;
 use crate::panel::{self, Panel};
@@ -36,7 +37,7 @@ use ratatui::crossterm::terminal::{
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Stdout, Write};
@@ -101,6 +102,33 @@ fn turn_meter(elapsed: Duration, received_bytes: usize) -> String {
         return format!("({})", anim::short_elapsed(elapsed));
     }
     format!("({} · ↓ {})", anim::short_elapsed(elapsed), Tokens(tokens))
+}
+
+/// The one-line receipt a finished turn leaves in the status row: how long it
+/// took, roughly how much came back, and whether files changed. The same
+/// vocabulary as `turn_meter`, so the number that was climbing while the turn
+/// ran is the number it ends on.
+fn turn_receipt(took: Duration, received_bytes: usize, wrote: bool, completed: bool) -> fx::Toast {
+    if !completed {
+        return fx::Toast::new(
+            format!("stopped after {}", anim::short_elapsed(took)),
+            fx::Tone::Warn,
+        );
+    }
+    // "done in 0s" reads as a fault; a reply that fast is simply done.
+    let mut text = if took < Duration::from_secs(1) {
+        "done".to_string()
+    } else {
+        format!("done in {}", anim::short_elapsed(took))
+    };
+    let tokens = received_bytes / 4;
+    if tokens > 0 {
+        text.push_str(&format!(" · ↓ {}", Tokens(tokens)));
+    }
+    if wrote {
+        text.push_str(" · files changed");
+    }
+    fx::Toast::new(text, fx::Tone::Done)
 }
 
 /// Things koda can do that a user is unlikely to find on their own. Shown one
@@ -482,6 +510,23 @@ pub struct App {
     /// moves with the clock would re-roll on every redraw and the status glyph
     /// would flicker between faces.
     costume: Option<usize>,
+    /// The transitions (`fx`). Each one is started by an event, bounded, and
+    /// colour-only; `wants_frames` lists them all, so none can run on its own.
+    ///
+    /// A transient message in the status row, in place of "ready".
+    toast: Option<fx::Toast>,
+    /// The mode the composer frame is easing away from.
+    mode_from: Option<(Mode, fx::Pulse)>,
+    /// The context gauge, easing between readings.
+    gauge: fx::Tween,
+    /// Plan steps that just finished, by index, still lit.
+    step_flash: Vec<(usize, fx::Pulse)>,
+    /// A finished plan stays docked this long, so its last tick is seen.
+    plan_linger: Option<fx::Pulse>,
+    /// Transcript length when the user scrolled away from the bottom, and how
+    /// many lines have landed below them since.
+    unseen_base: Option<usize>,
+    unseen: usize,
     /// The id of an `about_creator` call in flight, and when its answer landed.
     /// The one moment koda celebrates: someone asked who made it.
     dance_call: Option<String>,
@@ -866,6 +911,46 @@ impl App {
         self.follow = true;
     }
 
+    /// Feedback on something the user just did, shown in the status row and
+    /// then gone. While a turn runs that row belongs to the turn, so the
+    /// message goes to the transcript instead of being lost.
+    fn flash(&mut self, msg: impl Into<String>, tone: fx::Tone) {
+        if self.busy || self.compacting.is_some() {
+            self.note(msg);
+        } else {
+            self.toast = Some(fx::Toast::new(msg, tone));
+        }
+    }
+
+    fn set_tokens(&mut self, n: usize) {
+        self.tokens = n;
+        let frac = (n as f32 / self.context_budget.max(1) as f32).min(1.0);
+        self.gauge.set(frac, self.motion.animates());
+    }
+
+    /// Light the steps a plan update has just checked off. Only the *same*
+    /// plan counts — a new plan whose step 2 happens to be done was not just
+    /// finished by anyone.
+    fn flash_finished_steps(&mut self, next: &[crate::tools::Todo]) {
+        use crate::tools::TodoStatus;
+        if !self.motion.animates() {
+            return;
+        }
+        let before = self.transcript.current_todos().unwrap_or_default();
+        let mut any = false;
+        for (i, it) in next.iter().enumerate() {
+            let was = before.get(i).filter(|b| b.text == it.text);
+            if it.status == TodoStatus::Done && was.is_some_and(|b| b.status != TodoStatus::Done) {
+                self.step_flash.retain(|(j, _)| *j != i);
+                self.step_flash.push((i, fx::Pulse::new(fx::STEP_FLASH)));
+                any = true;
+            }
+        }
+        if any && next.iter().all(|i| i.status == TodoStatus::Done) {
+            self.plan_linger = Some(fx::Pulse::new(fx::PLAN_LINGER));
+        }
+    }
+
     fn set_theme(&mut self, t: Theme) {
         self.theme = t;
         self.transcript.theme = t;
@@ -891,6 +976,9 @@ impl App {
                 self.wrote_this_turn = false;
                 self.received = 0;
                 self.draft_seen = 0;
+                // The status row is about to say "working"; a receipt from the
+                // last turn would only be talking over it.
+                self.toast = None;
                 self.follow = true;
                 self.turn_started = Some(Instant::now());
                 self.last_delta = Some((Instant::now(), true));
@@ -1001,6 +1089,12 @@ impl App {
                     self.files.invalidate();
                     self.files_ready = false;
                 }
+                // An edit changes a file too — the common case, and the one the
+                // turn receipt's "files changed" and the visitor used to miss —
+                // but creates none, so the file index stays good.
+                if ok && summary.starts_with("edit ") {
+                    self.wrote_this_turn = true;
+                }
                 self.transcript.tool_end(&id, ok, summary, detail, view);
             }
             Event::ToolPending {
@@ -1043,9 +1137,10 @@ impl App {
                 // WezTerm, Ghostty…; ignored elsewhere).
                 notify_user("koda needs you", &question);
             }
-            Event::Tokens(n) => self.tokens = n,
+            Event::Tokens(n) => self.set_tokens(n),
             Event::NeedsExecuteMode(_) => self.plan_blocked = true,
             Event::Todos(items) => {
+                self.flash_finished_steps(&items);
                 self.transcript.todos(items);
                 self.follow = true;
             }
@@ -1075,7 +1170,7 @@ impl App {
             Event::Compacted { after, .. } => {
                 self.compacting = None;
                 self.cancelling = false;
-                self.tokens = after;
+                self.set_tokens(after);
                 // Anything the user typed while compaction ran was queued rather
                 // than lost or dropped into a frozen prompt. Send the first now
                 // that history is ready; the rest flush on the next TurnEnd.
@@ -1118,6 +1213,8 @@ impl App {
             } => {
                 // A turn that has ended must not leave half a sentence hidden.
                 self.transcript.finish_reveal();
+                let turn_took = self.turn_started.map(|t| t.elapsed()).unwrap_or_default();
+                let wrote = self.wrote_this_turn;
                 let worked = self.wrote_this_turn
                     || self
                         .turn_started
@@ -1128,7 +1225,8 @@ impl App {
                 self.turn_started = None;
                 self.costume = None;
                 self.maybe_send_visitor(completed && worked);
-                self.tokens = history_tokens;
+                self.set_tokens(history_tokens);
+                self.toast = Some(turn_receipt(turn_took, self.received, wrote, completed));
                 // Prompts the user queued while koda was working are picked up
                 // here, once the current task's tool calls have all finished.
                 // Frame them so the agent folds them into its plan rather than
@@ -1258,16 +1356,25 @@ impl App {
             || self
                 .visitor_at
                 .is_some_and(|t| t.elapsed() < VISITOR_WALK)
+            // The transitions. A toast holds still between its fade-in and
+            // fade-out, and ratatui's diff writes nothing for an unchanged
+            // frame, so the quiet middle costs a redraw but no terminal output.
+            || self.toast.as_ref().is_some_and(|t| t.live())
+            || self.mode_from.is_some_and(|(_, p)| p.live())
+            || self.gauge.moving()
+            || self.step_flash.iter().any(|(_, p)| p.live())
+            || self.plan_linger.is_some_and(|p| p.live())
     }
 
     /// Apply a thinking level and tell the running agent.
     fn set_reasoning(&mut self, level: String) {
         self.cfg.reasoning_effort = level.clone();
         self.send(Command::UpdateConfig(Box::new(self.cfg.clone())));
-        self.note(match level.as_str() {
+        let msg = match level.as_str() {
             "off" => "thinking off — the model answers directly".to_string(),
             other => format!("thinking → {other}"),
-        });
+        };
+        self.flash(msg, fx::Tone::Info);
     }
 
     fn show_welcome(&mut self, cfg: &Config) {
@@ -1532,7 +1639,10 @@ impl App {
         }
 
         let cmds = self.command_matches();
-        if cmds.len() > 1 && !ctrl && !alt {
+        // One match counts too: the palette is showing a single command, so
+        // Enter has to take it rather than send the half-typed `/reas` off as
+        // an unknown command. An exact match still runs, below.
+        if !cmds.is_empty() && !ctrl && !alt {
             // If what's typed is already an exact command (e.g. "/mode" while
             // "/model" and "/models" also match), Enter should RUN it, not
             // complete to a longer neighbour. Tab still completes.
@@ -1674,11 +1784,7 @@ impl App {
         if !buf.starts_with('/') || buf.contains(' ') {
             return Vec::new();
         }
-        COMMANDS
-            .iter()
-            .map(|(c, _)| *c)
-            .filter(|c| c.starts_with(buf.as_str()))
-            .collect()
+        command_hits(buf).into_iter().map(|(c, _)| *c).collect()
     }
 
     fn picker_key(&mut self, key: KeyEvent) {
@@ -2162,6 +2268,9 @@ impl App {
         if self.mode == m {
             return;
         }
+        if self.motion.animates() {
+            self.mode_from = Some((self.mode, fx::Pulse::new(fx::MODE_SHIFT)));
+        }
         self.mode = m;
         self.plan_blocked = false;
         self.send(Command::SetMode(m));
@@ -2170,7 +2279,9 @@ impl App {
             Mode::Execute => "execute — edits and commands, with approval",
             Mode::Vibe => "vibe — spec-driven: plans, delegates, and verifies its own work",
         };
-        self.note(explain);
+        // The frame, its title and the bottom bar already show the mode; the
+        // explanation is feedback on the switch, not something to keep.
+        self.flash(explain, fx::Tone::Info);
     }
 
     fn key_up(&mut self) {
@@ -2859,7 +2970,10 @@ impl App {
                     self.transcript.finish_reveal();
                 }
                 let on = self.motion.animates();
-                self.note(format!("animation {}", if on { "on" } else { "off" }));
+                self.flash(
+                    format!("animation {}", if on { "on" } else { "off" }),
+                    fx::Tone::Info,
+                );
             }
             "reveal" => {
                 // The streaming text reveal is a distinct preference from
@@ -2870,20 +2984,24 @@ impl App {
                     self.transcript.finish_reveal();
                 }
                 let on = self.reveal_pref;
-                if self.motion.animates() {
-                    self.note(format!("text reveal {}", if on { "on" } else { "off" }));
+                let msg = if self.motion.animates() {
+                    format!("text reveal {}", if on { "on" } else { "off" })
                 } else {
-                    self.note(format!(
+                    format!(
                         "text reveal {} (takes effect when motion is on)",
                         if on { "on" } else { "off" }
-                    ));
-                }
+                    )
+                };
+                self.flash(msg, fx::Tone::Info);
             }
             "think" => {
                 self.transcript.show_reasoning = !self.transcript.show_reasoning;
                 let on = self.transcript.show_reasoning;
                 self.transcript.invalidate();
-                self.note(format!("reasoning {}", if on { "shown" } else { "hidden" }));
+                self.flash(
+                    format!("reasoning {}", if on { "shown" } else { "hidden" }),
+                    fx::Tone::Info,
+                );
             }
             "copy" => match self.transcript.last_assistant() {
                 Some(text) => {
@@ -2954,7 +3072,8 @@ impl App {
                 // overwrite it back, since that path reads from self.cfg too).
                 self.cfg.theme = t.name.to_string();
                 match crate::config::save(&self.cfg) {
-                    Ok(_) => self.note(format!("theme → {}", t.name)),
+                    Ok(_) => self.flash(format!("theme → {}", t.name), fx::Tone::Info),
+                    // Not saved is worth keeping: it will revert next launch.
                     Err(e) => self.note(format!("theme → {} (not saved: {e})", t.name)),
                 }
             }
@@ -3429,6 +3548,13 @@ fn draw(f: &mut Frame, app: &mut App) {
     // event, and layout decisions elsewhere need the real width.
     app.last_size = (area.width, area.height);
     let m = Metrics::of(area.width);
+    // Spent transitions go before anything reads them, so a finished one never
+    // draws a last stale frame. `wants_frames` stops asking for frames the
+    // moment each ends; this only tidies the state it left behind.
+    app.toast = app.toast.take().filter(|t| t.live());
+    app.mode_from = app.mode_from.filter(|(_, p)| p.live());
+    app.step_flash.retain(|(_, p)| p.live());
+    app.plan_linger = app.plan_linger.filter(|p| p.live());
 
     let input_w = area.width.saturating_sub(3).max(4) as usize;
     let (rows, crow, ccol) = app.editor.visual(input_w);
@@ -3456,11 +3582,16 @@ fn draw(f: &mut Frame, app: &mut App) {
     // above the input so it stays visible and updates in place as steps finish —
     // even after it has scrolled out of the transcript. Hidden when there is no
     // plan or every step is done. Capped so a long plan can't eat the screen.
+    // A plan that has just finished stays docked for a moment, so its last
+    // tick is seen landing instead of the panel vanishing on the frame it goes
+    // green.
+    let lingering = app.plan_linger.is_some();
     let sticky = app.transcript.current_todos().filter(|items| {
         !items.is_empty()
-            && items
-                .iter()
-                .any(|i| i.status != crate::tools::TodoStatus::Done)
+            && (lingering
+                || items
+                    .iter()
+                    .any(|i| i.status != crate::tools::TodoStatus::Done))
     });
     let plan_h: u16 = if m.tiny {
         0
@@ -3537,8 +3668,14 @@ fn draw(f: &mut Frame, app: &mut App) {
     let max_scroll = total.saturating_sub(app.body_h);
     if app.follow {
         app.scroll = max_scroll;
+        app.unseen_base = None;
+        app.unseen = 0;
     } else {
         app.scroll = app.scroll.min(max_scroll);
+        // Scrolled up to read, and the reply keeps coming: count what lands
+        // below, so "pgdn" says what it would take you to.
+        let base = *app.unseen_base.get_or_insert(total);
+        app.unseen = total.saturating_sub(base);
     }
     let mut window = app.transcript.window(app.scroll, app.body_h);
     if let Some(range) = app.selection_range() {
@@ -3649,20 +3786,31 @@ fn draw(f: &mut Frame, app: &mut App) {
         // The field is framed in the colour of the mode it will send in, with
         // the mode named in the top edge. It is the one border you look at
         // while typing, so it is the one worth making say something.
-        let (mode_c, mode_name) = match app.mode {
-            Mode::Plan => (t.warning, "plan"),
-            Mode::Execute => (t.success, "execute"),
-            Mode::Vibe => (t.accent_alt, "vibe"),
+        let mode_c = mode_colour(app.mode, t);
+        let mode_name = match app.mode {
+            Mode::Plan => "plan",
+            Mode::Execute => "execute",
+            Mode::Vibe => "vibe",
         };
         // Dimmed while a turn runs: the field is not what to look at then.
         let edge = if app.busy { t.muted } else { mode_c };
+        // A mode switch eases the frame from the old mode's colour into the new
+        // one, and lights the new name as it lands. Colour only: the frame and
+        // the text inside it never move.
+        let (edge, title_c) = match app.mode_from {
+            Some((from, p)) if !app.busy => match p.t() {
+                Some(k) => fx::mode_shift(mode_colour(from, t), edge, k),
+                None => (edge, edge),
+            },
+            _ => (edge, edge),
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
             .border_style(t.fg(edge))
             .title(Span::styled(
                 format!(" {mode_name} "),
-                Style::default().fg(edge).add_modifier(Modifier::BOLD),
+                Style::default().fg(title_c).add_modifier(Modifier::BOLD),
             ));
         let inner = panel::fill(
             input_lines,
@@ -3743,6 +3891,16 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Each mode's colour, shared by the composer frame and the bottom bar so a
+/// switch can ease from one to the other.
+fn mode_colour(mode: Mode, t: &Theme) -> Color {
+    match mode {
+        Mode::Plan => t.warning,
+        Mode::Execute => t.success,
+        Mode::Vibe => t.accent_alt,
+    }
+}
+
 /// The event log. Opened with `/logs` when something looked wrong and the
 /// transcript only showed the short version.
 fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
@@ -3810,6 +3968,7 @@ fn log_overlay(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Plain, g))
         .border_style(t.fg(t.border))
         .title(Span::styled(title, t.dim()))
         .title_bottom(Line::from(vec![
@@ -3931,6 +4090,21 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                     .as_deref()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| working_message(started.elapsed()).to_string());
+                // Past a few seconds of silence, stop claiming "thinking" or
+                // "writing": the model is producing something koda cannot see
+                // yet — some servers buffer a whole tool call and flush it in
+                // one delta — and how long it has been quiet is the honest sign
+                // the connection is alive. A running tool keeps its own label:
+                // it is the tool taking the time, not the model.
+                let (quiet, on_model) = app
+                    .last_delta
+                    .map(|(t, on)| (t.elapsed(), on))
+                    .unwrap_or_default();
+                let verb = if on_model && quiet.as_secs() >= QUIET_AFTER_SECS && !m.tiny {
+                    format!("generating · quiet {}", anim::short_elapsed(quiet))
+                } else {
+                    verb
+                };
                 let label = format!("{verb} {}", turn_meter(started.elapsed(), app.received));
                 if app.motion.animates() {
                     // A highlight sweeping the label reads as ongoing activity
@@ -3954,13 +4128,29 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 }
             }
             (true, _) => left.push(Span::styled("  working".to_string(), t.dim())),
-            (false, _) => {
-                left.push(Span::styled(
-                    format!(" {} ", g.ready),
-                    t.emphasis(t.success),
-                ));
-                left.push(Span::styled("ready".to_string(), t.dim()));
-            }
+            (false, _) => match &app.toast {
+                // Feedback on what just happened holds the row for a few
+                // seconds, then hands it back to "ready".
+                Some(toast) => {
+                    let (glyph, tone) = match toast.tone {
+                        fx::Tone::Done => (g.ok, t.success),
+                        fx::Tone::Info => (g.ready, t.accent),
+                        fx::Tone::Warn => (g.warning, t.warning),
+                    };
+                    let c = toast
+                        .colour(tone, t.muted, app.motion.animates())
+                        .unwrap_or(tone);
+                    left.push(Span::styled(format!(" {glyph} "), t.emphasis(c)));
+                    left.push(Span::styled(toast.text.clone(), t.fg(c)));
+                }
+                None => {
+                    left.push(Span::styled(
+                        format!(" {} ", g.ready),
+                        t.emphasis(t.success),
+                    ));
+                    left.push(Span::styled("ready".to_string(), t.dim()));
+                }
+            },
         }
     }
 
@@ -3984,6 +4174,9 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
     }
 
     // Only the keys that apply to the current state.
+    let unseen_label = format!("{} new below", app.unseen);
+    let unseen_hint;
+    let unseen_hint2;
     let hints: &[(&str, &str)] = if app.pending.is_some() {
         &[("y", "allow"), ("a", "always"), ("n", "decline")]
     } else if let Some(a) = &app.asking {
@@ -3999,9 +4192,17 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
         &[("↑↓", "move"), ("enter", "choose"), ("esc", "cancel")]
     } else if app.plan_blocked {
         &[("ctrl+p", "switch to execute")]
+    } else if (app.busy || app.compacting.is_some()) && !app.follow && app.unseen > 0 {
+        // Scrolled up to read while the reply streams in below: the new lines
+        // are what "pgdn" is for, and they only ever arrive during a turn.
+        unseen_hint2 = [("esc", "interrupt"), ("pgdn", unseen_label.as_str())];
+        &unseen_hint2
     } else if app.busy || app.compacting.is_some() {
         // Two distinct states, one thing the user can do about either.
         &[("esc", "interrupt")]
+    } else if !app.follow && app.unseen > 0 {
+        unseen_hint = [("pgdn", unseen_label.as_str())];
+        &unseen_hint
     } else if !app.follow {
         &[("pgdn", "latest")]
     } else if m.tiny {
@@ -4104,54 +4305,9 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
         segs.push(Segment::new(label, t.accent_alt));
     }
 
-    // While a turn is running, surface what the agent is doing right now (the
-    // running tool / command / subagent) in the persistent bottom bar, so the
-    // user can always see it even when the transcript has scrolled the tool
-    // block out of view. It leads the bar so it's the first thing read.
-    if app.busy {
-        if let Some(act) = &app.activity {
-            let glyph = if app.motion.animates() {
-                g.thinking[anim::sweep(app.turn_started.map(|s| s.elapsed()).unwrap_or_default())
-                    % g.thinking.len()]
-            } else {
-                g.thinking[0]
-            };
-            // Keep it short so the model/mode/tokens still fit on the right.
-            let cap = if m.tiny {
-                16
-            } else if m.compact {
-                24
-            } else {
-                40
-            };
-            let text: String = act.chars().take(cap).collect();
-            let text = if act.chars().count() > cap {
-                format!("{text}…")
-            } else {
-                text
-            };
-            // Past a few seconds of silence, say how long. A label that never
-            // changes reads as a hang even while the spinner turns.
-            //
-            // And stop claiming "thinking": once the stream has gone quiet the
-            // model is producing something koda cannot see — some servers
-            // buffer a whole tool call and flush it in one delta, so a 90s
-            // write looks exactly like a stall. "generating" is what is
-            // actually known. A running tool is not relabelled: it is the tool
-            // taking the time, not the model.
-            let (quiet, on_model) = app
-                .last_delta
-                .map(|(t, on)| (t.elapsed(), on))
-                .unwrap_or_default();
-            let text = if quiet.as_secs() >= QUIET_AFTER_SECS && !m.tiny {
-                let verb = if on_model { "generating" } else { &text };
-                format!("{verb} · {}", anim::short_elapsed(quiet))
-            } else {
-                text
-            };
-            segs.push(Segment::new(format!("{glyph} {text}"), t.accent).bold());
-        }
-    }
+    // What the agent is doing right now is *not* repeated here: the status
+    // row directly above says it, with the quiet-stream timer, and it is never
+    // scrolled away. Two live copies of one fact was the bar's busiest cell.
 
     let dir = app
         .root
@@ -4179,22 +4335,17 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
     let mut right = Vec::new();
     // Model name and the current mode both live in the bottom-right corner now.
     right.push(Segment::new(short_model(&app.model, m), t.accent).bold());
-    let mode_colour = match app.mode {
-        Mode::Plan => t.warning,
-        Mode::Execute => t.success,
-        Mode::Vibe => t.accent_alt,
-    };
-    right.push(Segment::new(app.mode.label().to_string(), mode_colour).bold());
-    if app.web {
-        right.push(Segment::new("web", t.info));
+    right.push(Segment::new(app.mode.label().to_string(), mode_colour(app.mode, t)).bold());
+    // One segment for the web UI, carrying the port it landed on, so it stays
+    // answerable without scrolling back to the banner — several sessions at
+    // once each get a different one. It used to be two ("web", "ui :7717").
+    match crate::webui::address() {
+        Some(addr) => right.push(Segment::new(format!("web :{}", addr.port()), t.info)),
+        None if app.web => right.push(Segment::new("web", t.info)),
+        None => {}
     }
     if app.fast {
         right.push(Segment::new("FAST", t.accent_alt).bold());
-    }
-    // Which port the web UI landed on, so it stays answerable without scrolling
-    // back to the banner — several sessions at once each get a different one.
-    if let Some(addr) = crate::webui::address() {
-        right.push(Segment::new(format!("ui :{}", addr.port()), t.muted));
     }
     if app.auto_tier != AutoTier::Ask {
         // Full-auto is the loud one (red): it means no human in the loop.
@@ -4223,7 +4374,9 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 format!(
                     "{}  {} {pct}%",
                     Tokens(app.tokens),
-                    panel::gauge(frac, 8, g)
+                    // The bar eases to the new reading; the number beside it
+                    // is always the true one.
+                    panel::gauge(f64::from(app.gauge.value()), 8, g)
                 ),
                 panel::gauge_style(frac, t).fg.unwrap_or(t.muted),
             ));
@@ -4251,15 +4404,25 @@ fn truncate_line(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
     let mut out = Vec::new();
     let mut used = 0usize;
     let limit = width as usize;
+    // Cells, not chars: a CJK path or an emoji in a tool label is two columns
+    // wide, and counting it as one let the row run off the edge.
     for s in spans {
-        let w = s.content.chars().count();
+        let w = s.content.width();
         if used + w <= limit {
             used += w;
             out.push(s);
         } else {
-            let room = limit.saturating_sub(used);
-            if room > 0 {
-                let clipped: String = s.content.chars().take(room).collect();
+            let mut room = limit.saturating_sub(used);
+            let mut clipped = String::new();
+            for ch in s.content.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if cw > room {
+                    break;
+                }
+                room -= cw;
+                clipped.push(ch);
+            }
+            if !clipped.is_empty() {
                 out.push(Span::styled(clipped, s.style));
             }
             break;
@@ -4339,14 +4502,19 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
     lines.push(Line::from(vec![
         Span::styled(format!("{}{} ", g.corner_tl, g.hline), t.fg(edge)),
         Span::styled("Plan".to_string(), t.emphasis(t.heading)),
-        Span::styled(
-            if untracked {
-                format!("  {total} steps · never tracked")
-            } else {
-                format!("  {done}/{total} done")
-            },
-            t.dim(),
-        ),
+        if done == total && app.plan_linger.is_some() {
+            // The plan's last tick, held for a moment before the panel folds.
+            Span::styled(format!("  all {total} done"), t.emphasis(t.success))
+        } else {
+            Span::styled(
+                if untracked {
+                    format!("  {total} steps · never tracked")
+                } else {
+                    format!("  {done}/{total} done")
+                },
+                t.dim(),
+            )
+        },
         Span::styled(
             format!(
                 "  {}",
@@ -4369,8 +4537,23 @@ fn draw_sticky_plan(f: &mut Frame, rect: Rect, app: &App, items: &[crate::tools:
         active.saturating_sub(cap / 2).min(items.len() - cap)
     };
     let shown = &items[start..(start + cap).min(items.len())];
-    for it in shown {
+    for (k, it) in shown.iter().enumerate() {
+        // A step that has just been checked off lands lit and settles into the
+        // done colour; the strike-through arrives with it, so nothing moves.
+        let flash = app
+            .step_flash
+            .iter()
+            .find(|(j, _)| *j == start + k)
+            .and_then(|(_, p)| p.t());
         let (glyph, gstyle, tstyle) = match it.status {
+            TodoStatus::Done if flash.is_some() => {
+                let c = fx::step_flash(t.success, flash.unwrap_or(1.0));
+                (
+                    g.ok,
+                    t.emphasis(c),
+                    t.fg(c).add_modifier(Modifier::CROSSED_OUT),
+                )
+            }
             TodoStatus::Done => (
                 g.ok,
                 t.emphasis(t.success),
@@ -4405,6 +4588,7 @@ fn action_popup(
         return;
     }
     let t = &app.theme;
+    let g = &app.glyphs;
     let rows = hits.len().min(8);
     let h = rows as u16 + 2;
     let y = input.y.saturating_sub(h);
@@ -4442,20 +4626,69 @@ fn action_popup(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
         .border_style(t.dim())
         .title(Span::styled(" edit ", t.dim()))
         .title_bottom(Span::styled(" ↑↓ pick · enter run · esc cancel ", t.dim()));
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
+/// Commands for a typed `/word`: prefix matches first, in their usual order,
+/// then fuzzy ones by score — so `/mo` still lists `/model` before anything
+/// clever, and `/cmpt` finds `/compact` instead of an empty list.
+///
+/// One function for the list and the keys that pick from it, so the row under
+/// the selection is always the command Enter runs.
+fn command_hits(typed: &str) -> Vec<&'static (&'static str, &'static str)> {
+    let mut hits: Vec<&'static (&'static str, &'static str)> = COMMANDS
+        .iter()
+        .filter(|(c, _)| c.starts_with(typed))
+        .collect();
+    // Fuzzy only past two letters after the slash: `/mo` fuzzed would
+    // drag in `/fastmode`, which is noise to someone typing `/model`.
+    if typed.chars().count() > 3 {
+        let mut fuzzy: Vec<(i32, &'static (&'static str, &'static str))> = COMMANDS
+            .iter()
+            .filter(|(c, _)| !c.starts_with(typed))
+            .filter_map(|e| crate::fuzzy::score(e.0, typed).map(|s| (s, e)))
+            .collect();
+        fuzzy.sort_by_key(|(s, e)| (std::cmp::Reverse(*s), e.0));
+        hits.extend(fuzzy.into_iter().map(|(_, e)| e));
+    }
+    hits
+}
+
+/// `text` as spans, with the characters a fuzzy `pattern` matched drawn in
+/// `hit` — the fzf convention, and the quickest way to see why a row is there.
+fn highlighted(text: &str, pattern: &str, base: Style, hit: Style) -> Vec<Span<'static>> {
+    let marks = fx::match_positions(text, pattern);
+    if marks.is_empty() {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_hit = false;
+    for (i, ch) in text.chars().enumerate() {
+        let is_hit = marks.binary_search(&i).is_ok();
+        if is_hit != run_hit && !run.is_empty() {
+            out.push(Span::styled(
+                std::mem::take(&mut run),
+                if run_hit { hit } else { base },
+            ));
+        }
+        run_hit = is_hit;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        out.push(Span::styled(run, if run_hit { hit } else { base }));
+    }
+    out
+}
+
 fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     let t = &app.theme;
     let prefix = app.editor.buf.clone();
-    let hits: Vec<&(&str, &str)> = COMMANDS
-        .iter()
-        .filter(|(c, _)| c.starts_with(&prefix))
-        .collect();
+    let hits = command_hits(&prefix);
     if hits.is_empty() || input.y == 0 {
         return;
     }
@@ -4493,26 +4726,50 @@ fn command_popup(f: &mut Frame, app: &App, input: Rect) {
     let shown: Vec<&&(&str, &str)> = hits.iter().skip(start).take(max_rows).collect();
     let inner_w = input.width.max(10) as usize;
 
+    // "3/47" on the top row, fzf-style: how much the filter has narrowed.
+    let count = format!("{}/{} ", hits.len(), COMMANDS.len());
+    let count_w = count.width();
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, (name, desc)) in shown.iter().map(|h| **h).enumerate() {
         let idx = start + i;
         let selected = idx == sel;
-        let marker = if selected { "›" } else { " " };
+        let marker = if selected { app.glyphs.pick } else { " " };
+        let reserve = if i == 0 { count_w + 1 } else { 0 };
         let desc: String = desc
             .chars()
-            .take(inner_w.saturating_sub(name_w + 6))
+            .take(inner_w.saturating_sub(name_w + 6 + reserve))
             .collect();
-        let name_style = if selected {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-        } else {
-            t.fg(t.accent)
+        // The selected row is lifted on the theme's selection tint where it
+        // has one, reversed where it does not — the same rule as the pickers.
+        let row = match (selected, t.bg_selected) {
+            (true, Some(bg)) => Style::default().bg(bg),
+            (true, None) => Style::default().add_modifier(Modifier::REVERSED),
+            (false, _) => Style::default(),
         };
-        let line = Line::from(vec![
-            Span::styled(format!(" {marker} "), t.fg(t.accent)),
-            Span::styled(format!("{name:<name_w$}  "), name_style),
-            Span::styled(desc, t.dim()),
-        ]);
-        lines.push(line);
+        let name_base = if selected {
+            row.fg(t.text).add_modifier(Modifier::BOLD)
+        } else {
+            row.fg(t.text)
+        };
+        let name_hit = row.fg(t.accent).add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(format!(" {marker} "), row.fg(t.accent))];
+        let pad = name_w.saturating_sub(name.width()) + 2;
+        spans.extend(highlighted(name, &prefix, name_base, name_hit));
+        spans.push(Span::styled(" ".repeat(pad), row));
+        spans.push(Span::styled(desc, row.fg(t.muted)));
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
+        if selected {
+            // Carry the tint to the edge so the row reads as one bar.
+            let fill = inner_w.saturating_sub(used + reserve);
+            spans.push(Span::styled(" ".repeat(fill), row));
+        }
+        if i == 0 {
+            let used: usize = spans.iter().map(|s| s.content.width()).sum();
+            let gap = inner_w.saturating_sub(used + count_w);
+            spans.push(Span::raw(" ".repeat(gap)));
+            spans.push(Span::styled(count.clone(), t.dim()));
+        }
+        lines.push(Line::from(spans));
     }
 
     let h = (lines.len() as u16).min(max_rows as u16);
@@ -4714,7 +4971,7 @@ fn creator_card(f: &mut Frame, app: &App, area: Rect, elapsed: Duration) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
         .border_style(t.fg(t.accent))
         .title(Span::styled(
             " koda ".to_string(),
@@ -4852,29 +5109,29 @@ fn mention_popup(f: &mut Frame, app: &App, input: Rect, hits: &[String]) {
         height: h,
     };
     let sel = app.mention_sel.min(hits.len().saturating_sub(1));
+    let query = app.editor.mention().map(|(_, q)| q).unwrap_or_default();
     let lines: Vec<Line> = hits
         .iter()
         .enumerate()
         .map(|(i, path)| {
             let selected = i == sel;
-            Line::from(vec![
-                Span::styled(
-                    if selected {
-                        format!(" {} ", g.prompt)
-                    } else {
-                        "   ".to_string()
-                    },
-                    t.fg(t.accent),
-                ),
-                Span::styled(
-                    path.clone(),
-                    if selected {
-                        Style::default().fg(t.text).add_modifier(Modifier::BOLD)
-                    } else {
-                        t.dim()
-                    },
-                ),
-            ])
+            let base = if selected {
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD)
+            } else {
+                t.dim()
+            };
+            // The letters the query matched, lit: `@vwrs` → s**r**c/**v**ie**w**.**rs**
+            let hit = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+            let mut spans = vec![Span::styled(
+                if selected {
+                    format!(" {} ", g.prompt)
+                } else {
+                    "   ".to_string()
+                },
+                t.fg(t.accent),
+            )];
+            spans.extend(highlighted(path, &query, base, hit));
+            Line::from(spans)
         })
         .collect();
     f.render_widget(Clear, rect);
@@ -4958,6 +5215,7 @@ fn session_picker(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Plain, g))
         .border_style(t.fg(t.border_focus))
         .title(Span::styled(
             format!(" {} saved session(s) ", list.len()),
@@ -5024,7 +5282,7 @@ fn choices_popup(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
         .border_style(t.fg(t.border_focus))
         .title(Span::styled(
             format!(" {title} "),
@@ -5131,7 +5389,7 @@ fn approval_popup(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Thick)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Thick, g))
         .border_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
         .title(Span::styled(
             format!(" {} {verb} ", g.pending),
@@ -5297,7 +5555,7 @@ fn asking_popup(f: &mut ratatui::Frame, app: &App, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
         .border_style(Style::default().fg(t.info).add_modifier(Modifier::BOLD))
         .title(Span::styled(
             format!(" {} Ask ", g.pending),
@@ -5480,6 +5738,13 @@ pub async fn run(
         visitor_at: None,
         last_visitor: None,
         costume: None,
+        toast: None,
+        mode_from: None,
+        gauge: fx::Tween::at(0.0),
+        step_flash: Vec::new(),
+        plan_linger: None,
+        unseen_base: None,
+        unseen: 0,
         dance_call: None,
         dance_at: None,
         // The clock is seed enough: this only has to differ between sessions.
@@ -5871,6 +6136,69 @@ mod tests {
         let m = turn_meter(Duration::from_secs(257), 59_200);
         assert!(m.contains("↓ 14.8k tok"), "{m}");
         assert!(m.starts_with('(') && m.ends_with(')'), "{m}");
+    }
+
+    /// The receipt a finished turn leaves in the status row reads in the same
+    /// vocabulary as the meter that was climbing while it ran.
+    #[test]
+    fn a_finished_turn_leaves_an_honest_receipt() {
+        let r = turn_receipt(Duration::from_secs(12), 4_800, true, true);
+        assert_eq!(r.text, "done in 12s · ↓ 1.2k tok · files changed");
+        assert_eq!(r.tone, fx::Tone::Done);
+        // "done in 0s" reads as a fault.
+        assert_eq!(
+            turn_receipt(Duration::from_millis(400), 0, false, true).text,
+            "done"
+        );
+        // A turn cut short does not get to say "done".
+        let cut = turn_receipt(Duration::from_secs(75), 9_000, true, false);
+        assert_eq!(cut.text, "stopped after 1m15s");
+        assert_eq!(cut.tone, fx::Tone::Warn);
+    }
+
+    /// Prefix matches keep their place at the top; the fuzzy tail only adds.
+    #[test]
+    fn the_command_palette_ranks_prefix_before_fuzzy() {
+        let names = |typed: &str| -> Vec<&str> {
+            command_hits(typed).into_iter().map(|(c, _)| *c).collect()
+        };
+        let mo = names("/mo");
+        assert!(mo.iter().all(|c| c.starts_with("/mo")), "{mo:?}");
+        let cmpt = names("/cmpt");
+        assert!(cmpt.contains(&"/compact"), "fuzzy finds it: {cmpt:?}");
+        assert!(names("/zzzq").is_empty());
+        // Two letters are too few to fuzz: `/m` or `/mo` would match half the list.
+        assert!(names("/m").iter().all(|c| c.starts_with("/m")));
+        assert!(!mo.contains(&"/fastmode"), "{mo:?}");
+    }
+
+    #[test]
+    fn highlighted_splits_on_the_matched_characters() {
+        let base = Style::default();
+        let hit = Style::default().add_modifier(Modifier::BOLD);
+        let spans = highlighted("/model", "/mdl", base, hit);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "/model", "highlighting never changes the text");
+        let lit: String = spans
+            .iter()
+            .filter(|s| s.style == hit)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(lit, "/mdl");
+        assert_eq!(
+            highlighted("/help", "zz", base, hit).len(),
+            1,
+            "no match, one span"
+        );
+    }
+
+    /// Two-column characters count as two, or the status row overruns.
+    #[test]
+    fn truncation_counts_cells_not_chars() {
+        let line = truncate_line(vec![Span::raw("ab漢字cd")], 5);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "ab漢", "漢 fits in cells 3-4; 字 would need 5-6");
+        assert!(text.width() <= 5);
     }
 
     /// A tip is for a wait with nothing to read. A quick answer must never

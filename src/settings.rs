@@ -10,7 +10,7 @@ use crate::theme::{Glyphs, Theme};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 /// Which setting a row controls. Kept as an enum so the row order, labels, and
@@ -558,7 +558,7 @@ impl Settings {
         // overlay becomes a wrapped multi-line editor showing the real prompt
         // text, so the user can see and edit it rather than typing blind.
         if self.editing_multiline() {
-            self.draw_prompt_editor(f, area, t);
+            self.draw_prompt_editor(f, area, t, g);
             return;
         }
         let w = area.width.saturating_sub(8).clamp(30, 74);
@@ -618,7 +618,10 @@ impl Settings {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_set(crate::panel::frame_set(
+                ratatui::widgets::BorderType::Rounded,
+                g,
+            ))
             .border_style(t.fg(t.border_focus))
             .title(Span::styled(
                 " Settings ",
@@ -642,7 +645,7 @@ impl Settings {
     /// A full-size, wrapped multi-line editor for the system prompt. Shows the
     /// current text (built-in when none was set) with a caret, scrolled so the
     /// end stays in view. Enter inserts a newline; ctrl+s saves; esc cancels.
-    fn draw_prompt_editor(&self, f: &mut Frame, area: Rect, t: &Theme) {
+    fn draw_prompt_editor(&self, f: &mut Frame, area: Rect, t: &Theme, g: &Glyphs) {
         let buf = self.editing.as_deref().unwrap_or("");
         let w = area.width.saturating_sub(6).clamp(40, 100);
         let h = area.height.saturating_sub(4).clamp(8, 40);
@@ -688,7 +691,10 @@ impl Settings {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_set(crate::panel::frame_set(
+                ratatui::widgets::BorderType::Rounded,
+                g,
+            ))
             .border_style(t.fg(t.border_focus))
             .title(Span::styled(
                 " Edit system prompt ",

@@ -493,6 +493,26 @@ pub fn gauge_style(fraction: f64, t: &Theme) -> Style {
     }
 }
 
+/// The characters a frame is drawn with. Box drawing where the terminal has it,
+/// `+-|` where `theme::glyphs()` chose ASCII — every frame goes through here, so
+/// a non-UTF-8 terminal never gets a border of mojibake around good ASCII text.
+pub fn frame_set(kind: ratatui::widgets::BorderType, g: &Glyphs) -> ratatui::symbols::border::Set {
+    if g.fine_blocks {
+        kind.to_border_set()
+    } else {
+        ratatui::symbols::border::Set {
+            top_left: "+",
+            top_right: "+",
+            bottom_left: "+",
+            bottom_right: "+",
+            vertical_left: "|",
+            vertical_right: "|",
+            horizontal_top: "-",
+            horizontal_bottom: "-",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
