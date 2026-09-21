@@ -399,7 +399,9 @@ pub const ROSE_PINE: Theme = Theme {
 
 pub const SOLARIZED_LIGHT: Theme = Theme {
     name: "solarized-light",
-    text: rgb(88, 110, 117),
+    // base01 deepened a shade: on the panel fill it measured 4.49:1, just
+    // under WCAG AA for body text.
+    text: rgb(76, 96, 102),
     muted: rgb(147, 161, 161),
     accent: rgb(38, 139, 210),
     accent_alt: rgb(211, 54, 130),
@@ -429,6 +431,307 @@ pub const SOLARIZED_LIGHT: Theme = Theme {
     colored: true,
 };
 
+/// Kanagawa (wave): ink-wash blues and autumn tones, after Hokusai's Great Wave.
+pub const KANAGAWA: Theme = Theme {
+    name: "kanagawa",
+    text: rgb(220, 215, 186),
+    muted: rgb(114, 113, 105),
+    accent: rgb(126, 156, 216),
+    accent_alt: rgb(149, 127, 184),
+    success: rgb(152, 187, 108),
+    warning: rgb(230, 195, 132),
+    error: rgb(228, 104, 118),
+    info: rgb(127, 180, 202),
+    border: rgb(54, 54, 70),
+    border_focus: rgb(126, 156, 216),
+    surface: rgb(45, 79, 103),
+    bg_user: Some(rgb(39, 38, 50)),
+    bg_tool: Some(rgb(25, 25, 33)),
+    bg_tool_err: Some(rgb(55, 40, 49)),
+    bg_panel: Some(rgb(31, 31, 40)),
+    bg_selected: Some(rgb(45, 79, 103)),
+    heading: rgb(230, 195, 132),
+    tool_title: rgb(230, 195, 132),
+    diff_add: rgb(152, 187, 108),
+    diff_del: rgb(228, 104, 118),
+    diff_hunk: rgb(127, 180, 202),
+    syn_keyword: rgb(149, 127, 184),
+    syn_string: rgb(152, 187, 108),
+    syn_number: rgb(210, 126, 153),
+    syn_comment: rgb(114, 113, 105),
+    syn_func: rgb(126, 156, 216),
+    syn_type: rgb(122, 168, 159),
+    colored: true,
+};
+
+/// Everforest (dark, medium): soft greens and warm earth, easy on long sessions.
+pub const EVERFOREST: Theme = Theme {
+    name: "everforest",
+    text: rgb(211, 198, 170),
+    muted: rgb(133, 146, 137),
+    accent: rgb(127, 187, 179),
+    accent_alt: rgb(214, 153, 182),
+    success: rgb(167, 192, 128),
+    warning: rgb(219, 188, 127),
+    error: rgb(230, 126, 128),
+    info: rgb(131, 192, 146),
+    border: rgb(71, 82, 88),
+    border_focus: rgb(127, 187, 179),
+    surface: rgb(84, 58, 72),
+    bg_user: Some(rgb(57, 60, 68)),
+    bg_tool: Some(rgb(37, 43, 48)),
+    bg_tool_err: Some(rgb(67, 62, 67)),
+    bg_panel: Some(rgb(45, 53, 59)),
+    bg_selected: Some(rgb(84, 58, 72)),
+    heading: rgb(219, 188, 127),
+    tool_title: rgb(219, 188, 127),
+    diff_add: rgb(167, 192, 128),
+    diff_del: rgb(230, 126, 128),
+    diff_hunk: rgb(131, 192, 146),
+    syn_keyword: rgb(230, 126, 128),
+    syn_string: rgb(167, 192, 128),
+    syn_number: rgb(214, 153, 182),
+    syn_comment: rgb(133, 146, 137),
+    syn_func: rgb(167, 192, 128),
+    syn_type: rgb(219, 188, 127),
+    colored: true,
+};
+
+/// One Dark: Atom's classic, balanced and familiar.
+pub const ONE_DARK: Theme = Theme {
+    name: "one-dark",
+    text: rgb(171, 178, 191),
+    muted: rgb(92, 99, 112),
+    accent: rgb(97, 175, 239),
+    accent_alt: rgb(198, 120, 221),
+    success: rgb(152, 195, 121),
+    warning: rgb(229, 192, 123),
+    error: rgb(232, 102, 113),
+    info: rgb(86, 182, 194),
+    border: rgb(59, 63, 76),
+    border_focus: rgb(97, 175, 239),
+    surface: rgb(57, 63, 74),
+    bg_user: Some(rgb(51, 49, 64)),
+    bg_tool: Some(rgb(33, 36, 43)),
+    bg_tool_err: Some(rgb(63, 51, 59)),
+    bg_panel: Some(rgb(40, 44, 52)),
+    bg_selected: Some(rgb(57, 63, 74)),
+    heading: rgb(229, 192, 123),
+    tool_title: rgb(229, 192, 123),
+    diff_add: rgb(152, 195, 121),
+    diff_del: rgb(232, 102, 113),
+    diff_hunk: rgb(86, 182, 194),
+    syn_keyword: rgb(198, 120, 221),
+    syn_string: rgb(152, 195, 121),
+    syn_number: rgb(209, 154, 102),
+    syn_comment: rgb(92, 99, 112),
+    syn_func: rgb(97, 175, 239),
+    syn_type: rgb(229, 192, 123),
+    colored: true,
+};
+
+/// GitHub Dark: the colours of github.com at night.
+pub const GITHUB_DARK: Theme = Theme {
+    name: "github-dark",
+    text: rgb(230, 237, 243),
+    muted: rgb(132, 141, 151),
+    accent: rgb(88, 166, 255),
+    accent_alt: rgb(188, 140, 255),
+    success: rgb(63, 185, 80),
+    warning: rgb(210, 153, 34),
+    error: rgb(248, 81, 73),
+    info: rgb(121, 192, 255),
+    border: rgb(48, 54, 61),
+    border_focus: rgb(88, 166, 255),
+    surface: rgb(31, 41, 55),
+    bg_user: Some(rgb(25, 26, 39)),
+    bg_tool: Some(rgb(11, 14, 19)),
+    bg_tool_err: Some(rgb(41, 25, 29)),
+    bg_panel: Some(rgb(13, 17, 23)),
+    bg_selected: Some(rgb(31, 41, 55)),
+    heading: rgb(255, 166, 87),
+    tool_title: rgb(255, 166, 87),
+    diff_add: rgb(63, 185, 80),
+    diff_del: rgb(248, 81, 73),
+    diff_hunk: rgb(121, 192, 255),
+    syn_keyword: rgb(255, 123, 114),
+    syn_string: rgb(165, 214, 255),
+    syn_number: rgb(121, 192, 255),
+    syn_comment: rgb(139, 148, 158),
+    syn_func: rgb(210, 168, 255),
+    syn_type: rgb(255, 166, 87),
+    colored: true,
+};
+
+/// Ayu Mirage: muted slate with bright, warm highlights.
+pub const AYU_MIRAGE: Theme = Theme {
+    name: "ayu-mirage",
+    text: rgb(204, 202, 194),
+    muted: rgb(112, 122, 140),
+    accent: rgb(115, 208, 255),
+    accent_alt: rgb(223, 191, 255),
+    success: rgb(135, 217, 108),
+    warning: rgb(255, 204, 102),
+    error: rgb(242, 135, 121),
+    info: rgb(149, 230, 203),
+    border: rgb(52, 59, 76),
+    border_focus: rgb(115, 208, 255),
+    surface: rgb(51, 65, 94),
+    bg_user: Some(rgb(44, 47, 62)),
+    bg_tool: Some(rgb(25, 30, 39)),
+    bg_tool_err: Some(rgb(56, 48, 57)),
+    bg_panel: Some(rgb(31, 36, 48)),
+    bg_selected: Some(rgb(51, 65, 94)),
+    heading: rgb(255, 209, 115),
+    tool_title: rgb(255, 209, 115),
+    diff_add: rgb(135, 217, 108),
+    diff_del: rgb(242, 135, 121),
+    diff_hunk: rgb(149, 230, 203),
+    syn_keyword: rgb(255, 173, 102),
+    syn_string: rgb(213, 255, 128),
+    syn_number: rgb(223, 191, 255),
+    syn_comment: rgb(108, 122, 139),
+    syn_func: rgb(255, 209, 115),
+    syn_type: rgb(115, 208, 255),
+    colored: true,
+};
+
+/// Night Owl: deep navy tuned for late-night reading.
+pub const NIGHT_OWL: Theme = Theme {
+    name: "night-owl",
+    text: rgb(214, 222, 235),
+    muted: rgb(99, 119, 119),
+    accent: rgb(130, 170, 255),
+    accent_alt: rgb(199, 146, 234),
+    success: rgb(34, 218, 110),
+    warning: rgb(236, 196, 141),
+    error: rgb(239, 83, 80),
+    info: rgb(33, 199, 168),
+    border: rgb(29, 59, 83),
+    border_focus: rgb(130, 170, 255),
+    surface: rgb(29, 59, 83),
+    bg_user: Some(rgb(15, 31, 53)),
+    bg_tool: Some(rgb(1, 18, 32)),
+    bg_tool_err: Some(rgb(30, 29, 44)),
+    bg_panel: Some(rgb(1, 22, 39)),
+    bg_selected: Some(rgb(29, 59, 83)),
+    heading: rgb(255, 203, 139),
+    tool_title: rgb(255, 203, 139),
+    diff_add: rgb(34, 218, 110),
+    diff_del: rgb(239, 83, 80),
+    diff_hunk: rgb(33, 199, 168),
+    syn_keyword: rgb(199, 146, 234),
+    syn_string: rgb(236, 196, 141),
+    syn_number: rgb(247, 140, 108),
+    syn_comment: rgb(99, 119, 119),
+    syn_func: rgb(130, 170, 255),
+    syn_type: rgb(255, 203, 139),
+    colored: true,
+};
+
+/// Catppuccin Latte: the light flavour of the most-used palette of 2026. Its
+/// pale yellows and greys are deepened, in the same hue, to 3:1 on the base:
+/// in a terminal they are body text, not accents on a page.
+pub const CATPPUCCIN_LATTE: Theme = Theme {
+    name: "catppuccin-latte",
+    text: rgb(76, 79, 105),
+    muted: rgb(134, 137, 155),
+    accent: rgb(30, 102, 245),
+    accent_alt: rgb(136, 57, 239),
+    success: rgb(63, 157, 42),
+    warning: rgb(195, 122, 24),
+    error: rgb(210, 15, 57),
+    info: rgb(4, 147, 204),
+    border: rgb(188, 192, 204),
+    border_focus: rgb(30, 102, 245),
+    surface: rgb(204, 208, 218),
+    bg_user: Some(rgb(232, 228, 245)),
+    bg_tool: Some(rgb(227, 237, 244)),
+    bg_tool_err: Some(rgb(236, 214, 222)),
+    bg_panel: Some(rgb(239, 241, 245)),
+    bg_selected: Some(rgb(204, 208, 218)),
+    heading: rgb(234, 92, 11),
+    tool_title: rgb(234, 92, 11),
+    diff_add: rgb(63, 157, 42),
+    diff_del: rgb(210, 15, 57),
+    diff_hunk: rgb(4, 147, 204),
+    syn_keyword: rgb(136, 57, 239),
+    syn_string: rgb(63, 157, 42),
+    syn_number: rgb(234, 92, 11),
+    syn_comment: rgb(135, 139, 154),
+    syn_func: rgb(30, 102, 245),
+    syn_type: rgb(195, 122, 24),
+    colored: true,
+};
+
+/// Rosé Pine Dawn: soho vibes, in daylight. Faint tones deepened to 3:1, as
+/// for Latte.
+pub const ROSE_PINE_DAWN: Theme = Theme {
+    name: "rose-pine-dawn",
+    text: rgb(70, 66, 97),
+    muted: rgb(143, 138, 156),
+    accent: rgb(40, 105, 131),
+    accent_alt: rgb(144, 122, 169),
+    success: rgb(86, 148, 159),
+    warning: rgb(192, 127, 42),
+    error: rgb(180, 99, 122),
+    info: rgb(86, 148, 159),
+    border: rgb(223, 218, 217),
+    border_focus: rgb(40, 105, 131),
+    surface: rgb(223, 218, 217),
+    bg_user: Some(rgb(243, 235, 232)),
+    bg_tool: Some(rgb(242, 239, 233)),
+    bg_tool_err: Some(rgb(242, 227, 223)),
+    bg_panel: Some(rgb(250, 244, 237)),
+    bg_selected: Some(rgb(223, 218, 217)),
+    heading: rgb(199, 120, 117),
+    tool_title: rgb(199, 120, 117),
+    diff_add: rgb(86, 148, 159),
+    diff_del: rgb(180, 99, 122),
+    diff_hunk: rgb(86, 148, 159),
+    syn_keyword: rgb(40, 105, 131),
+    syn_string: rgb(192, 127, 42),
+    syn_number: rgb(199, 120, 117),
+    syn_comment: rgb(143, 138, 156),
+    syn_func: rgb(199, 120, 117),
+    syn_type: rgb(86, 148, 159),
+    colored: true,
+};
+
+/// Everforest (light, medium): the forest on paper. Faint tones deepened to
+/// 3:1, as for Latte.
+pub const EVERFOREST_LIGHT: Theme = Theme {
+    name: "everforest-light",
+    text: rgb(92, 106, 114),
+    muted: rgb(132, 144, 130),
+    accent: rgb(58, 148, 197),
+    accent_alt: rgb(215, 101, 178),
+    success: rgb(132, 152, 1),
+    warning: rgb(187, 133, 0),
+    error: rgb(248, 85, 82),
+    info: rgb(50, 158, 118),
+    border: rgb(230, 226, 204),
+    border_focus: rgb(58, 148, 197),
+    surface: rgb(230, 226, 204),
+    bg_user: Some(rgb(251, 236, 224)),
+    bg_tool: Some(rgb(243, 242, 222)),
+    bg_tool_err: Some(rgb(252, 227, 210)),
+    bg_panel: Some(rgb(253, 246, 227)),
+    bg_selected: Some(rgb(230, 226, 204)),
+    heading: rgb(220, 114, 33),
+    tool_title: rgb(220, 114, 33),
+    diff_add: rgb(132, 152, 1),
+    diff_del: rgb(248, 85, 82),
+    diff_hunk: rgb(50, 158, 118),
+    syn_keyword: rgb(248, 85, 82),
+    syn_string: rgb(132, 152, 1),
+    syn_number: rgb(215, 101, 178),
+    syn_comment: rgb(132, 144, 130),
+    syn_func: rgb(132, 152, 1),
+    syn_type: rgb(187, 133, 0),
+    colored: true,
+};
+
 pub const THEMES: &[Theme] = &[
     DARK,
     NEON,
@@ -439,7 +742,16 @@ pub const THEMES: &[Theme] = &[
     NORD,
     DRACULA,
     ROSE_PINE,
+    KANAGAWA,
+    EVERFOREST,
+    ONE_DARK,
+    GITHUB_DARK,
+    AYU_MIRAGE,
+    NIGHT_OWL,
     SOLARIZED_LIGHT,
+    CATPPUCCIN_LATTE,
+    ROSE_PINE_DAWN,
+    EVERFOREST_LIGHT,
     MONO,
 ];
 
@@ -763,5 +1075,103 @@ mod tests {
     fn explicit_glyph_choice_wins() {
         assert_eq!(glyphs("ascii").ok, ASCII.ok);
         assert_eq!(glyphs("unicode").ok, UNICODE.ok);
+    }
+    fn luminance(c: Color) -> f64 {
+        let Color::Rgb(r, g, b) = c else {
+            panic!("not an rgb colour: {c:?}")
+        };
+        let ch = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Body text meets WCAG AA on every palette theme, and nothing it draws
+    /// with nearly vanishes into the background -- which is what a mistyped
+    /// hex, or a background colour pasted into a text slot, looks like.
+    #[test]
+    fn every_palette_theme_is_readable() {
+        for t in THEMES {
+            let Some(bg) = t.bg_panel else { continue };
+            let ratio = contrast(t.text, bg);
+            assert!(ratio >= 4.5, "{}: text is {ratio:.1}:1", t.name);
+            for (slot, c) in [
+                ("muted", t.muted),
+                ("accent", t.accent),
+                ("success", t.success),
+                ("warning", t.warning),
+                ("error", t.error),
+                ("info", t.info),
+                ("heading", t.heading),
+                ("keyword", t.syn_keyword),
+                ("string", t.syn_string),
+                ("number", t.syn_number),
+                ("comment", t.syn_comment),
+                ("function", t.syn_func),
+                ("type", t.syn_type),
+            ] {
+                let r = contrast(c, bg);
+                assert!(r >= 2.0, "{}: {slot} is {r:.1}:1", t.name);
+            }
+            // A selected row and a tool block stand apart from the panel.
+            for (slot, fill) in [("selected", t.bg_selected), ("tool", t.bg_tool)] {
+                assert_ne!(
+                    fill,
+                    Some(bg),
+                    "{}: {slot} fill is the panel colour",
+                    t.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn theme_names_are_unique_kebab_case() {
+        let mut seen = std::collections::HashSet::new();
+        for t in THEMES {
+            assert!(seen.insert(t.name), "duplicate theme {}", t.name);
+            assert!(
+                t.name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{} is not kebab-case",
+                t.name
+            );
+        }
+        assert_eq!(names().len(), THEMES.len());
+        assert_eq!(by_name(" Kanagawa ").map(|t| t.name), Some("kanagawa"));
+    }
+
+    #[test]
+    fn light_themes_have_light_panels_and_dark_text() {
+        for name in [
+            "solarized-light",
+            "catppuccin-latte",
+            "rose-pine-dawn",
+            "everforest-light",
+        ] {
+            let t = by_name(name).unwrap();
+            let bg = t.bg_panel.unwrap();
+            assert!(luminance(bg) > luminance(t.text), "{name}");
+            assert!(luminance(bg) > 0.5, "{name} panel is not light");
+        }
+    }
+
+    #[test]
+    fn mix_blends_rgb_and_snaps_named_colours() {
+        assert_eq!(mix(rgb(0, 0, 0), rgb(200, 100, 50), 0.0), rgb(0, 0, 0));
+        assert_eq!(mix(rgb(0, 0, 0), rgb(200, 100, 50), 1.0), rgb(200, 100, 50));
+        assert_eq!(mix(Color::Red, Color::Blue, 0.2), Color::Red);
+        assert_eq!(mix(Color::Red, Color::Blue, 0.7), Color::Blue);
     }
 }

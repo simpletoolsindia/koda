@@ -971,8 +971,17 @@ so you can pick by eye. The choice is saved to the config file immediately, so
 it survives a restart. The `--theme` flag and `theme` config key set it at
 start.
 
-Available palettes: `dark`, `neon`, `ansi`, `catppuccin-mocha`, `tokyo-night`,
-`gruvbox-dark`, `nord`, `dracula`, `rose-pine`, `solarized-light`, `mono`.
+Available palettes:
+
+- **Dark:** `dark`, `neon`, `ansi`, `catppuccin-mocha`, `tokyo-night`,
+  `gruvbox-dark`, `nord`, `dracula`, `rose-pine`, `kanagawa`, `everforest`,
+  `one-dark`, `github-dark`, `ayu-mirage`, `night-owl`.
+- **Light:** `solarized-light`, `catppuccin-latte`, `rose-pine-dawn`,
+  `everforest-light`.
+- **No colour:** `mono`.
+
+Every palette keeps body text at WCAG AA contrast (4.5:1) on its background;
+a test holds them to it.
 
 The default (`theme = "auto"` or empty) resolves to the vibrant **neon**
 palette, because the block fills that give the transcript its shape need

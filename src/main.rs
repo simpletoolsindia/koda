@@ -108,8 +108,10 @@ struct Cli {
     #[arg(short = 't', long)]
     temperature: Option<f64>,
 
-    /// Palette: auto, catppuccin-mocha, tokyo-night, gruvbox-dark, nord,
-    /// dracula, rose-pine, solarized-light, mono.
+    /// Palette: auto, dark, neon, ansi, catppuccin-mocha, tokyo-night,
+    /// gruvbox-dark, nord, dracula, rose-pine, kanagawa, everforest, one-dark,
+    /// github-dark, ayu-mirage, night-owl, solarized-light, catppuccin-latte,
+    /// rose-pine-dawn, everforest-light, mono.
     #[arg(long)]
     theme: Option<String>,
 

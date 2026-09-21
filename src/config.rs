@@ -1312,8 +1312,11 @@ motion = true
 # Needs motion = true. Toggle live with /reveal.
 reveal = true
 
-# Palette: auto (your terminal's 16 colours), catppuccin-mocha, tokyo-night,
-# gruvbox-dark, nord, dracula, rose-pine, solarized-light, mono.
+# Palette: auto (neon), dark, neon, ansi (your terminal's 16 colours),
+# catppuccin-mocha, tokyo-night, gruvbox-dark, nord, dracula, rose-pine,
+# kanagawa, everforest, one-dark, github-dark, ayu-mirage, night-owl;
+# light: solarized-light, catppuccin-latte, rose-pine-dawn, everforest-light;
+# and mono.
 # NO_COLOR=1 forces mono. Switch live with /theme.
 theme = "auto"
 
