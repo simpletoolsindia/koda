@@ -19,6 +19,29 @@ A custom tool is a named shell command the model can call like any built-in.
 Declare it in your config (`~/.config/koda/config.toml` for all projects, or a
 project-local `koda.toml`) as a `[[tools]]` table.
 
+### Checks: `verify` works these out for you
+
+koda has a built-in `verify` tool, and after a turn that changed code it asks
+the model to call it. `verify` decides the checks from the project on disk, per
+call:
+
+1. the project's own gate — a `check` or `verify` tool (no arguments) in its
+   `koda.toml`, or a `check` target in its Makefile;
+2. otherwise its build system: Cargo (`cargo build --all-targets`, `cargo
+   test`), Go (`go build`, `go vet`, `go test`), npm/pnpm/yarn/bun (the
+   package's `typecheck`, `lint` and `test` scripts, or `tsc --noEmit`),
+   Python (compile the changed files, `ruff` when configured, `pytest` when
+   there are tests), Maven or Gradle — all of them in a mixed repository;
+3. outside any project, a syntax check of just the files that changed
+   (`py_compile`, `node --check`, `bash -n`, `ruby -c`).
+
+A tool that is not installed is skipped and reported. Writing only prose or
+data (`.txt`, `.md`, `.json`) asks for no check at all.
+
+So a project-specific gate belongs in that project's `koda.toml`, not in the
+global config: a `check` defined globally is offered in every folder, and a
+Rust gate run in a Python project fails before it checks anything.
+
 ### Schema
 
 | field | required | meaning |

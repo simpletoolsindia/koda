@@ -34,6 +34,7 @@ mod theme;
 mod tools;
 mod trace;
 mod tui;
+mod verify;
 mod view;
 mod watch;
 mod web;

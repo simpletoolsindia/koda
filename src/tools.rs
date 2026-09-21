@@ -724,6 +724,17 @@ fn build_specs() -> Vec<Spec> {
             mutating: false,
         },
         Spec {
+            name: "verify",
+            desc: "Check the work: build, lint/typecheck and test THIS project, whatever it is. \
+                   It detects the setup itself — the project's own `check` in koda.toml or \
+                   `make check`, else Cargo, Go, npm/pnpm/yarn/bun scripts, Python (compile, \
+                   ruff, pytest), Maven or Gradle — and for loose files outside any project, \
+                   syntax-checks just the files you changed. Call it after changing code, \
+                   before saying you are done. It needs no arguments.",
+            params: json!({ "type": "object", "properties": {} }),
+            mutating: true,
+        },
+        Spec {
             name: "about_creator",
             desc: "Who created koda, and how to reach them. Call this whenever someone asks \
                    who made, built, wrote or maintains koda, who its author, creator or \
@@ -773,6 +784,7 @@ pub const FAST_CORE: &[&str] = &[
     "edit_file",
     "run_command",
     "codegraph",
+    "verify",
     "todo",
     "load_tools",
 ];

@@ -4400,6 +4400,7 @@ fn activity_label(name: &str, label: &str) -> String {
         "find_files" => "finding files",
         "search" => "searching",
         "run_command" => "running",
+        "verify" => "verifying",
         "codegraph" => "mapping the code",
         "lsp" => "asking the language server",
         "mcp" => "asking a connected service",

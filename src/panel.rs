@@ -264,7 +264,7 @@ pub fn status_line_badged(
 pub fn tool_tint(title: &str, t: &Theme) -> Color {
     match title {
         "Write" | "Edit" | "Create" => t.warning,
-        "Run" | "Debug" => t.accent_alt,
+        "Run" | "Debug" | "Verify" => t.accent_alt,
         "Search" | "Fetch" | "Browse" => t.accent,
         "Task" | "MCP" | "Skill" | "Memory" | "Plan" => t.accent_alt,
         _ => t.info,

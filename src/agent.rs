@@ -377,6 +377,9 @@ pub struct Agent {
     /// mechanical half: a turn that wrote code and never checked it gets one
     /// nudge before it is allowed to end. Reset per top-level turn.
     wrote_source: bool,
+    /// Files written or edited this turn, relative to the root: what `verify`
+    /// syntax-checks outside a project, and compiles inside a Python one.
+    changed: Vec<String>,
     ran_check: bool,
     /// Outcome of the most recent verification command, if any ran.
     ///
@@ -706,6 +709,7 @@ impl Agent {
             empty_replies: 0,
             curator: Default::default(),
             wrote_source: false,
+            changed: Vec::new(),
             ran_check: false,
             last_check_ok: None,
             check_nudges: 0,
@@ -976,6 +980,7 @@ impl Agent {
             empty_replies: 0,
             curator: Default::default(),
             wrote_source: false,
+            changed: Vec::new(),
             ran_check: false,
             last_check_ok: None,
             check_nudges: 0,
@@ -1427,6 +1432,7 @@ impl Agent {
             self.turn_seq = self.turn_seq.wrapping_add(1);
             self.empty_replies = 0;
             self.wrote_source = false;
+            self.changed.clear();
             self.ran_check = false;
             self.last_check_ok = None;
             self.check_nudges = 0;
@@ -1615,22 +1621,30 @@ impl Agent {
                     ));
                     continue;
                 }
-                if self.depth == 0
-                    && self.wrote_source
-                    && !self.ran_check
-                    && self.check_nudges == 0
-                    && !summarising
-                {
+                // What a check here would be. Nothing detectable — no build
+                // system, no checkable file among those changed — means there
+                // is nothing to ask for, and the turn ends as it would have.
+                let plan = (self.depth == 0 && self.wrote_source && !self.ran_check)
+                    .then(|| crate::verify::detect(&self.ctx.root, &self.changed))
+                    .flatten()
+                    .filter(|p| !p.steps.is_empty());
+                if let Some(plan) = plan.filter(|_| self.check_nudges == 0 && !summarising) {
                     self.check_nudges += 1;
                     self.history.push(Message::assistant(result.text.clone()));
-                    self.history.push(Message::user(
-                        "[You changed source in this turn but ran no build, test or linter.                          Run the check for this project now -- a `verify`/`check` tool if one                          is offered, otherwise the build or test command for this language --                          and fix what it reports. Do not edit the check to make it pass, and                          do not remove a feature or a call your own code still needs. If you                          cannot run a check, name the command you would have run and say why                          you could not: do not describe the work as done, tested or verified.]",
-                    ));
+                    self.history.push(Message::user(format!(
+                        "[You changed code in this turn but ran no build, test or linter. \
+                         Call the `verify` tool now: it runs this project's own checks \
+                         ({}). Fix what it reports. Do not edit the checks to make them \
+                         pass, and do not remove a feature or a call your own code still \
+                         needs. If a check cannot run here, say which and why: do not \
+                         describe the work as done, tested or verified.]",
+                        plan.describe()
+                    )));
                     crate::tel_info!("agent", "check gate: nothing was built or tested");
-                    let _ = tx.send(Event::Notice(
-                        "source changed but nothing was built or tested - asking for a check"
-                            .into(),
-                    ));
+                    let _ = tx.send(Event::Notice(format!(
+                        "code changed but nothing was checked - asking for verify ({})",
+                        plan.kinds.join(" + ")
+                    )));
                     continue;
                 }
                 reply = result.text.clone();
@@ -2972,6 +2986,12 @@ impl Agent {
             crate::tel_info!("tool", "custom tool ran", "name" => name, "ms" => started.elapsed().as_millis());
             return outcome;
         }
+        // `verify`: this project's checks, decided now from what is on disk,
+        // then run exactly like a command — the same approval, the same
+        // timeout handling, the same output capping.
+        if name == "verify" {
+            return self.run_verify(call, tx).await;
+        }
         // A tool lent by an MCP server. Routed here rather than through
         // `tools::run` because the built-in table is static and these are not:
         // they arrive from a server at connect time and differ per project.
@@ -3182,7 +3202,21 @@ impl Agent {
         // failed still means the tree was touched and is worth a look.
         if self.depth == 0 {
             if matches!(name.as_str(), "write_file" | "edit_file") {
-                self.wrote_source = true;
+                // Only code asks for a check: writing a `.txt` or a README
+                // changes nothing a build or a test would catch, and asking
+                // anyway sent the model off to run a Rust gate on a text file.
+                if let Some(path) = args_for_memory.get("path").and_then(|p| p.as_str()) {
+                    let rel = std::path::Path::new(path)
+                        .strip_prefix(&self.ctx.root)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| path.to_string());
+                    if crate::verify::is_code(&rel) {
+                        self.wrote_source = true;
+                    }
+                    if !self.changed.contains(&rel) {
+                        self.changed.push(rel);
+                    }
+                }
             }
             if name == "run_command" {
                 if let Some(cmd) = args_for_memory.get("command").and_then(|c| c.as_str()) {
@@ -4583,6 +4617,85 @@ impl Agent {
         }
     }
 
+    /// Detect this project's checks and run them as one command.
+    async fn run_verify(
+        &mut self,
+        call: &ToolCall,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> tools::Outcome {
+        let plan = crate::verify::detect(&self.ctx.root, &self.changed);
+        let Some(plan) = plan.filter(|p| !p.steps.is_empty()) else {
+            let why = match crate::verify::detect(&self.ctx.root, &self.changed) {
+                Some(p) => format!(
+                    "Detected {}, but none of its checks can run here:\n- {}",
+                    p.kinds.join(" + "),
+                    p.skipped.join("\n- ")
+                ),
+                None => "No build, lint or test setup was found for this folder, and none \
+                         of the files changed this turn is one a syntax check applies to. \
+                         There is nothing to verify here — say so plainly rather than \
+                         calling the work verified."
+                    .to_string(),
+            };
+            let _ = tx.send(Event::ToolStart {
+                id: call.id.clone(),
+                name: "verify".into(),
+                label: "verify".into(),
+                depth: self.depth,
+            });
+            let _ = tx.send(Event::ToolEnd {
+                id: call.id.clone(),
+                ok: true,
+                summary: "verify: nothing to check here".into(),
+                detail: why.clone(),
+                view: tools::ToolView::Plain,
+            });
+            return tools::Outcome {
+                ok: true,
+                content: why,
+                summary: "verify: nothing to check here".into(),
+                view: tools::ToolView::Plain,
+            };
+        };
+        // A build can take a while; the everyday command timeout is sized for
+        // a quick command, not for `cargo build` on a cold cache.
+        let timeout = self.cfg.command_timeout_ms.max(600_000);
+        let run_args = serde_json::json!({ "command": plan.script(), "timeout_ms": timeout });
+        if !self.approve("run_command", &run_args, tx).await {
+            return tools::Outcome {
+                ok: false,
+                content: "ERROR: the user denied this action.".into(),
+                summary: "verify: denied".into(),
+                view: tools::ToolView::Plain,
+            };
+        }
+        let _ = tx.send(Event::ToolStart {
+            id: call.id.clone(),
+            name: "verify".into(),
+            label: format!("verify: {}", plan.describe()),
+            depth: self.depth,
+        });
+        let mut outcome = tools::run("run_command", run_args, &self.ctx).await;
+        let mut head = format!("verify — {}\n", plan.describe());
+        if !plan.skipped.is_empty() {
+            head.push_str(&format!("skipped: {}\n", plan.skipped.join("; ")));
+        }
+        outcome.content = format!("{head}\n{}", outcome.content);
+        outcome.summary = format!(
+            "verify {} — {}",
+            plan.kinds.join(" + "),
+            if outcome.ok { "passed" } else { "failed" }
+        );
+        let _ = tx.send(Event::ToolEnd {
+            id: call.id.clone(),
+            ok: outcome.ok,
+            summary: outcome.summary.clone(),
+            detail: outcome.content.clone(),
+            view: outcome.view.clone(),
+        });
+        outcome
+    }
+
     /// The `lsp` tool: precise, type-aware answers from a real language server.
     ///
     /// Runs on a blocking thread because the client is a synchronous protocol
@@ -5922,6 +6035,20 @@ fn is_verification_command(cmd: &str) -> bool {
         "cargo run",
         "npm test",
         "npm run",
+        "pnpm run",
+        "yarn run",
+        "bun test",
+        "bun run",
+        "deno test",
+        "deno check",
+        "tsc",
+        "py_compile",
+        "compileall",
+        "unittest",
+        "node --check",
+        "bash -n",
+        "sh -n",
+        "ruby -c",
         "npx tsc",
         "yarn test",
         "yarn build",
@@ -5948,8 +6075,32 @@ fn is_verification_command(cmd: &str) -> bool {
         "ctest",
         "bazel",
     ];
+    // Launchers in front of the real check: `python3 -m pytest`, `uv run
+    // pytest`, `npx eslint`. Matching only the start of the segment missed
+    // every one of them, so a turn that had just run its tests was still told
+    // it had checked nothing.
+    const LAUNCHERS: &[&str] = &[
+        "sudo ",
+        "python3 -m ",
+        "python -m ",
+        "py -m ",
+        "uv run ",
+        "poetry run ",
+        "pipenv run ",
+        "npx --no-install ",
+        "npx ",
+        "bunx ",
+        "pnpm exec ",
+        "yarn exec ",
+    ];
     cmd.split(['&', ';', '|', '\n'])
-        .map(|seg| seg.trim().trim_start_matches("sudo ").to_ascii_lowercase())
+        .map(|seg| {
+            let mut seg = seg.trim().to_ascii_lowercase();
+            while let Some(rest) = LAUNCHERS.iter().find_map(|l| seg.strip_prefix(l)) {
+                seg = rest.trim_start().to_string();
+            }
+            seg
+        })
         .any(|seg| VERBS.iter().any(|v| seg.starts_with(v)))
 }
 
@@ -6729,6 +6880,7 @@ pub fn label_for(name: &str, args: &Value) -> String {
                 .to_string()
         }
         "view_image" => format!("image {}", s("path")),
+        "verify" => "this project".to_string(),
         "debug" => format!("debug {}", s("action")).trim_end().to_string(),
         "delegate" => {
             let task: String = s("task").chars().take(60).collect();
@@ -6956,6 +7108,17 @@ mod tests {
             "sudo make install",
             "just check",
             "pytest -q",
+            // Behind a launcher, which used to go unrecognised.
+            "python3 -m pytest -q",
+            "uv run pytest",
+            "poetry run mypy src",
+            "npx --no-install tsc --noEmit",
+            "npx eslint .",
+            // What `verify` itself runs outside a project.
+            "python3 -m py_compile 'cart.py'",
+            "node --check 'a.js'",
+            "bash -n 'tool.sh'",
+            "pnpm run lint",
         ] {
             assert!(super::is_verification_command(c), "should count: {c}");
         }
@@ -6966,6 +7129,8 @@ mod tests {
             "find . -name Cargo.toml",
             "cp native/engine/src/lib.rs windows-platform/engine/src/lib.rs",
             "echo make",
+            "python3 -m http.server",
+            "npx create-react-app demo",
         ] {
             assert!(!super::is_verification_command(c), "should not count: {c}");
         }
