@@ -4,6 +4,7 @@ mod agent;
 mod anim;
 mod config;
 mod context;
+mod curtain;
 mod dap;
 mod debug;
 mod detailhelp;

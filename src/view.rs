@@ -1546,6 +1546,7 @@ fn tool_identity(name: &str, g: &Glyphs) -> (&'static str, String) {
         "ask_user" => ("Ask", g.ok.to_string()),
         "manage_skill" => ("Skill", g.ok.to_string()),
         "load_tools" => ("Tools", g.ok.to_string()),
+        "about_creator" => ("About", g.ok.to_string()),
         "codegraph" => ("Graph", g.magnify.to_string()),
         "lsp" => ("Types", g.magnify.to_string()),
         "mcp" => ("MCP", g.branch_arrow.to_string()),

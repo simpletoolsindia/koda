@@ -1088,7 +1088,9 @@ impl App {
                 // Someone asked who made this. Say it with a bit of ceremony.
                 if self.dance_call.as_deref() == Some(id.as_str()) {
                     self.dance_call = None;
-                    if ok && self.motion.animates() {
+                    // With motion off it still appears — as the finished card,
+                    // held still — rather than not at all.
+                    if ok {
                         self.dance_at = Some(Instant::now());
                     }
                 }
@@ -1373,7 +1375,7 @@ impl App {
                 .is_some_and(|t| t.elapsed() < WELCOME_ANIM)
             // …and the curtain call, which is the only other thing that moves
             // on its own. Both are bounded, so an idle koda still does nothing.
-            || self.dance_at.is_some_and(|t| t.elapsed() < DANCE)
+            || self.dance_at.is_some_and(|t| t.elapsed() < crate::curtain::DURATION)
             || self
                 .visitor_at
                 .is_some_and(|t| t.elapsed() < VISITOR_WALK)
@@ -3899,8 +3901,16 @@ fn draw(f: &mut Frame, app: &mut App) {
     // The curtain call goes on top of everything and takes itself away.
     if let Some(started) = app.dance_at {
         let elapsed = started.elapsed();
-        if elapsed < DANCE {
-            creator_card(f, app, area, elapsed);
+        if elapsed < crate::curtain::DURATION {
+            crate::curtain::draw(
+                f.buffer_mut(),
+                area,
+                &app.theme,
+                &app.glyphs,
+                banner_art(&app.glyphs),
+                elapsed,
+                app.motion.animates(),
+            );
         } else {
             app.dance_at = None;
         }
@@ -5010,15 +5020,6 @@ const COSTUMES: [[&str; 6]; 4] = [
 /// delight.
 const COSTUME_ODDS: u64 = 12;
 
-/// How long the creator card dances before it clears itself.
-const DANCE: Duration = Duration::from_millis(4200);
-
-/// The dancer, one frame per beat. Arms up, arms down — the oldest joke in
-/// ASCII, and still the one people smile at.
-const DANCE_FRAMES: [&str; 4] = ["♪┏(°.°)┛♪", "♪┗(°.°)┓♪", "♪┏(°.°)┓♪", "♪┗(°.°)┛♪"];
-/// The same beat where the box-drawing set is not available.
-const DANCE_ASCII: [&str; 4] = [r"\o/", "|o|", r"/o", "|o|"];
-
 /// One braille cell, bouncing left to right across the spacer row and walking
 /// off the end.
 ///
@@ -5052,75 +5053,6 @@ fn draw_visitor(f: &mut Frame, app: &App, row: Rect, elapsed: Duration) {
         ))),
         cell,
     );
-}
-
-/// A short curtain call when someone asks who made koda.
-///
-/// Event-tied, not ambient: it plays because a person asked a question, once,
-/// and clears itself. That is the whole reason it is allowed to exist — a
-/// surprise you asked for is delight, and the same animation arriving unbidden
-/// while you are reading a diff is an interruption.
-///
-/// Drawn as an overlay, so the transcript is never invalidated and nothing
-/// below it moves; the answer itself is already in the transcript and stays
-/// there after the dancing stops.
-fn creator_card(f: &mut Frame, app: &App, area: Rect, elapsed: Duration) {
-    let t = &app.theme;
-    let g = &app.glyphs;
-    let frames: &[&str; 4] = if g.fine_blocks {
-        &DANCE_FRAMES
-    } else {
-        &DANCE_ASCII
-    };
-    // One step every 180ms: fast enough to read as dancing, slow enough that
-    // the eye follows it rather than seeing a blur.
-    let beat = (elapsed.as_millis() / 180) as usize % frames.len();
-    let dancer = frames[beat];
-    // A gentle bob, so the whole figure moves rather than only its arms.
-    let lift = usize::from(beat % 2 == 0);
-
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("{}{dancer}", " ".repeat(4 + lift)),
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-        Line::from(vec![
-            Span::styled("  made by  ".to_string(), t.dim()),
-            Span::styled(
-                "Sridhar Karuppusamy".to_string(),
-                Style::default()
-                    .fg(t.accent_alt)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  reach him at  ".to_string(), t.dim()),
-            Span::styled("support@simpletools.in".to_string(), t.fg(t.info)),
-        ]),
-    ];
-
-    let w = 40u16.min(area.width.saturating_sub(4));
-    let h = lines.len() as u16 + 2;
-    if w < 24 || area.height < h + 2 {
-        return; // No room to be charming without being in the way.
-    }
-    let rect = Rect {
-        x: (area.width.saturating_sub(w)) / 2,
-        y: (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(panel::frame_set(ratatui::widgets::BorderType::Rounded, g))
-        .border_style(t.fg(t.accent))
-        .title(Span::styled(
-            " koda ".to_string(),
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 fn welcome_shimmer(f: &mut Frame, app: &App, text_area: Rect, elapsed: Duration) {

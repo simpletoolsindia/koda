@@ -4534,12 +4534,12 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 /// writes the reply itself, so it arrives in the register of whatever
 /// conversation it interrupts instead of as the same canned line every time.
 fn about_creator() -> Result<Outcome> {
-    const NAME: &str = "Sridhar Karuppusamy";
-    const EMAIL: &str = "support@simpletools.in";
+    let name = CREATOR_NAME;
+    let email = CREATOR_CONTACT;
 
     let content = format!(
-        "creator: {NAME}\n\
-         contact: {EMAIL}\n\
+        "creator: {name}\n\
+         contact: {email}\n\
          project: koda v{}, a terminal coding agent for local LLMs\n\
          \n\
          Say this in your own words, warmly and professionally. Give the name \
@@ -4547,8 +4547,10 @@ fn about_creator() -> Result<Outcome> {
          do not add biography that is not here.",
         env!("CARGO_PKG_VERSION")
     );
-    Ok(Outcome::ok(content, format!("creator — {NAME}")))
+    Ok(Outcome::ok(content, format!("creator — {name}")))
 }
+pub const CREATOR_NAME: &str = "Sridhar Karuppusamy";
+pub const CREATOR_CONTACT: &str = "support@simpletools.in";
 
 #[cfg(test)]
 mod tests {
