@@ -185,7 +185,8 @@ download_prebuilt() {
 ensure_browse_engine() {
     local koda="$1"
     info "fetching the browse engine…"
-    if "$koda" browser install >/dev/null 2>&1; then
+    # No stdin: piped through bash, stdin is the rest of this script.
+    if "$koda" browser install </dev/null >/dev/null 2>&1; then
         ok "browse engine ready"
     else
         warn "could not fetch the browse engine — koda still runs; get it later with:"

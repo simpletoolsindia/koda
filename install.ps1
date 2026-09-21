@@ -226,12 +226,17 @@ function Add-ToUserPath($dir) {
 # from the user. Best-effort: a network hiccup must not fail the install.
 function Ensure-BrowseEngine($koda) {
     Info "fetching the browse engine..."
+    # Time-boxed, with no console input: an installer that hangs is worse
+    # than one that says "later". A stalled fetch once held CI for an hour.
     try {
-        & $koda browser install 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
+        $in = [System.IO.Path]::GetTempFileName()
+        $p = Start-Process -FilePath $koda -ArgumentList "browser", "install" -NoNewWindow -PassThru `
+            -RedirectStandardInput $in -RedirectStandardOutput "$in.out" -RedirectStandardError "$in.err"
+        if ($p.WaitForExit(180000) -and $p.ExitCode -eq 0) {
             Ok "browse engine ready"
             return
         }
+        if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     } catch { }
     Warn "could not fetch the browse engine - koda still runs; get it later with:"
     Warn "  koda browser install"
