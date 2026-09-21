@@ -138,6 +138,8 @@ pub struct Transcript {
     /// Whether to reveal gradually at all. Only the TUI sets this, and only
     /// when a frame clock exists to advance the cursor.
     pub animate_reveal: bool,
+    /// The reply is streaming: draw a cursor at the end of it.
+    pub cursor: bool,
     total: usize,
     /// Width the offsets were computed at.
     laid_out_at: u16,
@@ -174,6 +176,7 @@ impl Transcript {
             // nobody advancing the cursor must show all of its text, not none
             // of it — that is the difference between an animation and a bug.
             animate_reveal: false,
+            cursor: false,
             total: 0,
             laid_out_at: 0,
             stream: None,
@@ -839,6 +842,33 @@ impl Transcript {
     /// Offsets are sorted, so the first visible block is a binary search rather
     /// than a walk from the top — the difference between O(blocks) and
     /// O(log blocks) on every single frame.
+    /// Whether a recent tool card is still moving: running, or settling out
+    /// of its finish flash. The frame clock has to keep ticking for the second
+    /// case after the turn itself has ended.
+    pub fn animating(&self) -> bool {
+        self.blocks
+            .iter()
+            .rev()
+            .take(8)
+            .any(|b| is_running(&b.item))
+    }
+
+    /// The absolute line the typing cursor sits on, when a reply is streaming.
+    fn caret_line(&self) -> Option<usize> {
+        if !self.cursor {
+            return None;
+        }
+        let b = self.blocks.last()?;
+        if !matches!(b.item, Item::Assistant(_)) {
+            return None;
+        }
+        let (_, _, lines) = b.cache.as_ref()?;
+        let last = lines
+            .iter()
+            .rposition(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))?;
+        Some(b.offset + last)
+    }
+
     pub fn window(&mut self, from: usize, count: usize) -> Vec<Line<'static>> {
         let mut out = Vec::with_capacity(count);
         if self.blocks.is_empty() || count == 0 {
@@ -860,6 +890,11 @@ impl Transcript {
             self.expand_reasoning,
         );
         let (theme, glyphs) = (self.theme, self.glyphs);
+        // The typing cursor: after the last written line of a streaming reply,
+        // blinking at a relaxed ~1 Hz. Placed here rather than baked into the
+        // block's cached lines, so the blink costs no re-render.
+        let caret_at = self.caret_line();
+        let caret_on = (self.now.elapsed().as_millis() / 530) % 2 == 0;
         let mut restored = 0usize;
         for b in &mut self.blocks[start_block..] {
             if b.cache.is_none() {
@@ -891,8 +926,19 @@ impl Transcript {
             if skip >= lines.len() {
                 continue;
             }
-            for l in &lines[skip..] {
-                out.push(l.clone());
+            for (k, l) in lines[skip..].iter().enumerate() {
+                let mut l = l.clone();
+                if caret_at == Some(b.offset + skip + k) {
+                    l.spans.push(Span::styled(
+                        glyphs.caret.to_string(),
+                        ratatui::style::Style::default().fg(if caret_on {
+                            theme.accent
+                        } else {
+                            theme.muted
+                        }),
+                    ));
+                }
+                out.push(l);
                 if out.len() == count {
                     self.retained += restored;
                     return out;
@@ -922,7 +968,33 @@ fn raw_hash(lines: &[Line<'static>]) -> usize {
 }
 
 fn is_running(item: &Item) -> bool {
-    matches!(item, Item::Tool { ok: None, .. })
+    matches!(item, Item::Tool { ok: None, .. }) || tool_flash(item).is_some()
+}
+
+/// Whether the UI may animate at all (`/motion`, reduced-motion env, non-tty).
+/// The renderers are free functions several calls deep, and this is the one
+/// flag they need that the theme and glyphs do not carry; `tui::draw` sets it.
+pub static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long a tool's icon stays lit after it finishes.
+const TOOL_FLASH: Duration = Duration::from_millis(600);
+
+/// Progress through a just-finished tool's flash, or `None` once settled.
+fn tool_flash(item: &Item) -> Option<f32> {
+    let Item::Tool {
+        ok: Some(_),
+        started,
+        elapsed: Some(took),
+        ..
+    } = item
+    else {
+        return None;
+    };
+    if !MOTION.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let since = started.elapsed().saturating_sub(*took);
+    (since < TOOL_FLASH).then(|| since.as_secs_f32() / TOOL_FLASH.as_secs_f32())
 }
 
 fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
@@ -979,7 +1051,11 @@ fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
                 // Streamed progress changes what the card says, so it has to
                 // change the key or the count would freeze at its first value.
                 + progress.map(|(d, _)| d + 1).unwrap_or(0)
-                + if ok.is_none() { tick % 10 * 4096 } else { 0 },
+                + if ok.is_none() || tool_flash(item).is_some() {
+                    tick % 10 * 4096
+                } else {
+                    0
+                },
             16 | (match ok {
                 None => 0,
                 Some(true) => 1,
@@ -1148,6 +1224,18 @@ fn render_item(
                 0,
             );
             let mut lines = panel::fill(body, width, t.bg_user, 2);
+            // An accent bar down the left edge: your turns in the conversation
+            // read as yours at a glance, before a word of them.
+            for l in &mut lines {
+                if let Some(first) = l.spans.first_mut() {
+                    let bg = first.style.bg;
+                    let mut bar = ratatui::style::Style::default().fg(t.accent);
+                    if let Some(bg) = bg {
+                        bar = bar.bg(bg);
+                    }
+                    *first = Span::styled(format!("{} ", g.user_bar), bar);
+                }
+            }
             lines.push(Line::default());
             lines
         }
@@ -1360,6 +1448,13 @@ fn tool_identity(name: &str, g: &Glyphs) -> (&'static str, String) {
         "list_dir" => ("List", g.ok.to_string()),
         "delegate" => ("Task", g.branch_arrow.to_string()),
         "web_search" => ("Search", g.magnify.to_string()),
+        "web_fetch" => ("Fetch", g.magnify.to_string()),
+        "browse" => ("Browse", g.branch_arrow.to_string()),
+        "debug" => ("Debug", g.prompt.to_string()),
+        "view_image" => ("Image", g.magnify.to_string()),
+        "ask_user" => ("Ask", g.ok.to_string()),
+        "manage_skill" => ("Skill", g.ok.to_string()),
+        "load_tools" => ("Tools", g.ok.to_string()),
         "codegraph" => ("Graph", g.magnify.to_string()),
         "lsp" => ("Types", g.magnify.to_string()),
         "mcp" => ("MCP", g.branch_arrow.to_string()),
@@ -1368,6 +1463,19 @@ fn tool_identity(name: &str, g: &Glyphs) -> (&'static str, String) {
         "todo" => ("Plan", g.check_on.to_string()),
         other if crate::mcp::is_mcp_tool(other) => ("MCP", g.branch_arrow.to_string()),
         _ => ("Tool", g.ok.to_string()),
+    }
+}
+
+/// "search \"q\" (6 results)" under a SEARCH label says "search" twice: drop
+/// the summary's leading verb when it is the label's own ("fetched" under
+/// FETCH, "searching" under SEARCH).
+fn strip_verb<'a>(head: &'a str, title: &str) -> &'a str {
+    let stem: String = title.to_ascii_lowercase().chars().take(5).collect();
+    match head.split_once(' ') {
+        Some((first, rest)) if stem.len() >= 3 && first.to_ascii_lowercase().starts_with(&stem) => {
+            rest
+        }
+        _ => head,
     }
 }
 
@@ -1403,6 +1511,20 @@ fn render_tool(
         None => (g.spinner[tick % g.spinner.len()].to_string(), t.warning),
         Some(true) => (settled_glyph, t.success),
         Some(false) => (g.fail.to_string(), t.error),
+    };
+    // The moment it finishes, the icon lands lit and settles into its colour:
+    // the spinner visibly *becomes* the tick rather than being swapped for it.
+    let icon = match (ok, elapsed) {
+        (Some(_), Some(took)) if crate::view::MOTION.load(std::sync::atomic::Ordering::Relaxed) => {
+            let since = started.elapsed().saturating_sub(*took);
+            if since < TOOL_FLASH {
+                let k = since.as_secs_f32() / TOOL_FLASH.as_secs_f32();
+                (icon.0, crate::fx::step_flash(icon.1, k))
+            } else {
+                icon
+            }
+        }
+        _ => icon,
     };
     let mut timing = match (ok, elapsed) {
         (Some(_), Some(d)) if d.as_millis() >= 10 => vec![human_ms(*d)],
@@ -1795,7 +1917,11 @@ fn render_tool(
                 Some(_) => summary.to_string(),
             };
             let mut spans = vec![Span::styled(format!("{} ", icon.0), t.emphasis(icon.1))];
-            spans.push(Span::styled(head, t.fg(t.tool_title)));
+            spans.extend(panel::tool_label(title, t, g));
+            spans.push(Span::styled(
+                format!(" {}", strip_verb(&head, title)),
+                t.fg(t.text),
+            ));
             if !timing.is_empty() {
                 spans.push(Span::styled(format!("  {}", timing.join(g.sep)), t.dim()));
             }
@@ -2576,7 +2702,7 @@ mod tests {
             },
             72,
         );
-        assert!(out.contains("Run"), "{out}");
+        assert!(out.contains("RUN"), "{out}");
         assert!(out.contains("$ python3 -m pytest -q"), "{out}");
         assert!(out.contains("3 passed"), "{out}");
         println!("\n--- run ---\n{out}");
@@ -2599,8 +2725,9 @@ mod tests {
         assert!(out.contains("exit 1"), "{out}");
     }
 
-    /// A settled tool card wears a coloured [done]/[failed] badge (oh-my-pi
-    /// style), and success uses the heavier ✔ glyph.
+    /// A settled card says how it went once: success by its icon and colour
+    /// alone (a `[done]` beside a green tick was the same fact three times), a
+    /// failure with the word as well, because that is the one to not miss.
     #[test]
     fn tool_cards_show_a_status_badge() {
         use crate::tools::ToolView;
@@ -2615,9 +2742,10 @@ mod tests {
             },
             72,
         );
+        assert!(done.contains("RUN"), "the tool is labelled: {done}");
         assert!(
-            done.contains("[done]"),
-            "success card needs a badge: {done}"
+            !done.contains("done") && !done.contains("failed"),
+            "success needs no word: {done}"
         );
         // The heavier oh-my-pi status glyphs are in force.
         assert_eq!(crate::theme::UNICODE.ok, "✔");
@@ -2641,8 +2769,8 @@ mod tests {
         t.relayout(72);
         let failed = flat(&t.window(0, 40));
         assert!(
-            failed.contains("[failed]"),
-            "failure card needs a badge: {failed}"
+            failed.contains("failed"),
+            "failure card needs the word: {failed}"
         );
         assert!(
             failed.contains('✘'),
@@ -2673,7 +2801,7 @@ mod tests {
             },
             72,
         );
-        assert!(out.contains("Grep"), "{out}");
+        assert!(out.contains("GREP"), "{out}");
         assert!(out.contains("3 matches"), "{out}");
         assert!(out.contains("2 files"), "{out}");
         assert!(
@@ -2765,7 +2893,7 @@ mod tests {
             },
             72,
         );
-        assert!(out.contains("Edit"), "{out}");
+        assert!(out.contains("EDIT"), "{out}");
         assert!(
             out.contains("+1") && out.contains("-1"),
             "stats in footer: {out}"
@@ -2806,7 +2934,11 @@ mod tests {
         );
         t.relayout(60);
         let text = flat(&t.window(0, 20));
-        assert!(text.contains("read a.rs (12 lines)"), "{text}");
+        // The label says READ, so the summary's own "read" is not repeated.
+        assert!(
+            text.contains("READ") && text.contains("a.rs (12 lines)"),
+            "{text}"
+        );
         assert!(
             !text.contains("1| x"),
             "detail should stay collapsed: {text}"

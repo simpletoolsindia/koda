@@ -237,30 +237,54 @@ pub fn status_line_badged(
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if let Some((ic, c)) = icon {
-        spans.push(Span::styled(format!("{ic} "), t.fg(c)));
+        spans.push(Span::styled(format!("{ic} "), t.emphasis(c)));
     }
-    spans.push(Span::styled(
-        title.to_string(),
-        Style::default()
-            .fg(t.tool_title)
-            .add_modifier(Modifier::BOLD),
-    ));
+    spans.extend(tool_label(title, t, g));
     if let Some((d, c)) = desc {
-        spans.push(Span::styled(": ".to_string(), t.dim()));
-        spans.push(Span::styled(d, t.fg(c)));
+        spans.push(Span::styled(format!(" {d}"), t.fg(c)));
     }
-    if let Some((label, c)) = badge {
-        spans.push(Span::styled(format!("  [{label}]"), t.fg(c)));
+    // Only a failure earns a word: the icon and its colour already say done,
+    // and `[done]` beside a green tick was the same fact three times.
+    if let Some((label, c)) = badge.filter(|(l, _)| l != "done") {
+        spans.push(Span::styled(format!("  {label}"), t.emphasis(c)));
     }
     if !meta.is_empty() {
-        // Their sep.dot is space-dot-space; without the spaces the meta reads
-        // as one run-together word.
         spans.push(Span::styled(
             format!("  {}", meta.join(&format!(" {} ", g.sep))),
             t.dim(),
         ));
     }
     spans
+}
+
+/// Which family a tool belongs to, by the colour its label wears: reading and
+/// looking are cool, changing files is warm, running things and reaching out
+/// are the accents. The same colour every time, so a run of cards scans by
+/// kind before a word of it is read.
+pub fn tool_tint(title: &str, t: &Theme) -> Color {
+    match title {
+        "Write" | "Edit" | "Create" => t.warning,
+        "Run" | "Debug" => t.accent_alt,
+        "Search" | "Fetch" | "Browse" => t.accent,
+        "Task" | "MCP" | "Skill" | "Memory" | "Plan" => t.accent_alt,
+        _ => t.info,
+    }
+}
+
+/// The tool's name as a label: upper-case, bold, in its family's colour, on a
+/// faint tint of that colour where the theme paints backgrounds. Padded to one
+/// width so the descriptions after it line up down a run of cards.
+pub fn tool_label(title: &str, t: &Theme, g: &Glyphs) -> Vec<Span<'static>> {
+    let c = tool_tint(title, t);
+    let name = format!(" {:<6} ", title.to_uppercase());
+    let style = match t.bg_panel {
+        Some(bg) if g.fine_blocks => Style::default()
+            .fg(c)
+            .bg(crate::theme::mix(bg, c, 0.18))
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(c).add_modifier(Modifier::BOLD),
+    };
+    vec![Span::styled(name, style)]
 }
 
 /// `[Ctrl+O: Expand]` — shown only when there is genuinely more to see.

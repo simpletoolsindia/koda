@@ -1,6 +1,6 @@
 # koda UI — the next version: transitions, a status row that answers, a palette that forgives
 
-Status: landed. `src/fx.rs` (new), `src/tui.rs`, `src/view.rs`.
+Status: landed. `src/fx.rs` (new), `src/tui.rs`, `src/view.rs`, `src/panel.rs`.
 
 This builds on `research-tui-delight.md` (why motion must be caused, bounded and
 colour-only) and `spec-animation-engine.md` (the clock). It does not relax
@@ -110,6 +110,45 @@ the interrupt key when a turn is running:
 `esc interrupt · pgdn 42 new below`.
 
 ---
+
+## 2.7 The resting screen — what you see before anything moves
+
+The first pass of this work put motion only into moments of change, and the
+screen at rest looked exactly as it had. That was the wrong reading of "a new
+version": these are the changes visible on every frame.
+
+```
+ ▄▀ koda  ·  MiniMax-M2.7                               PLAN  ◖ EXEC ◗  VIBE
+ ▌ fix the failing discount test
+   ╭─ ✔  READ    test_cart.py  4 lines · 29 tokens
+   ╭─ ✎  EDIT    cart.py
+ The bug: apply_discount subtracts percent directly▋
+ ✳ editing ░░░▒▓█▓▒░░ (4s · ↓ 109 tok)                         esc interrupt
+```
+
+- **Header bar.** A gradient wordmark (accent → accent-alt, per character),
+  the model, and the three modes as pills with the active one filled in its
+  colour. The wordmark shimmers while a turn runs; the active pill eases
+  between colours on a mode switch. The model and mode left the bottom bar,
+  which no longer repeats them. Hidden below 64 columns, where the bottom bar
+  keeps them. ASCII: `<> koda … [PLAN]`.
+- **Tool labels.** Every tool header — cards and one-liners alike — leads with
+  its name as a bold, upper-case label on a faint tint of its family's colour:
+  reads and lookups blue, file changes amber, runs and delegation violet, the
+  web in the accent. `[done]` is gone (the ✔ and its colour said it); a failure
+  still says `failed`. A summary's leading verb is dropped under a label that
+  already says it (`FETCH  https://…`, not `fetched https://…`). Fetch, Browse,
+  Debug, Image, Ask got names of their own instead of "Tool".
+- **Live tool cards.** Spinner and a live timer while running; on finishing,
+  the icon lands lit and settles over 600 ms (the transcript keeps animating
+  until it has, so a turn ending mid-flash never freezes a lit icon).
+- **Working bar.** A crest sweeping a 10-cell `░▒▓█` track between the current
+  step and the meter, hue running accent → accent-alt. The one animation that
+  runs for a whole turn — it *is* the working signal — and it stops with it.
+- **Typing cursor.** `▋` after the last written line of a streaming reply,
+  blinking at ~1 Hz; drawn at window time, so the blink costs no re-render.
+  Gone the moment a tool starts or the turn ends.
+- **Your messages** carry an accent bar down their left edge.
 
 ## 3. Clutter removed (the skill's clutter audit, counted)
 

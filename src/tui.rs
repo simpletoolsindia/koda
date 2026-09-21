@@ -990,6 +990,7 @@ impl App {
                 self.activity = Some("writing the reply".into());
                 self.received += chunk.len();
                 self.transcript.assistant_delta(&chunk);
+                self.transcript.cursor = true;
             }
             Event::Reasoning(chunk) => {
                 // Reasoning can run for many seconds before any visible output;
@@ -997,6 +998,7 @@ impl App {
                 self.last_delta = Some((Instant::now(), true));
                 self.activity = Some("thinking".into());
                 self.received += chunk.len();
+                self.transcript.cursor = false;
                 self.transcript.reasoning_delta(&chunk);
             }
             Event::ToolStart {
@@ -1009,6 +1011,7 @@ impl App {
                 // under a running tool would read as though it were still being
                 // written.
                 self.transcript.finish_reveal();
+                self.transcript.cursor = false;
                 // Surface what the agent is doing right now in the status row.
                 // Inside a delegated subagent (depth>0) say so, so the user can
                 // see the child is working — e.g. "↳ subagent: reading cart.py".
@@ -1181,6 +1184,7 @@ impl App {
                 }
             }
             Event::Error(msg) => {
+                self.transcript.cursor = false;
                 self.transcript.error(msg);
                 self.follow = true;
             }
@@ -1213,6 +1217,7 @@ impl App {
             } => {
                 // A turn that has ended must not leave half a sentence hidden.
                 self.transcript.finish_reveal();
+                self.transcript.cursor = false;
                 let turn_took = self.turn_started.map(|t| t.elapsed()).unwrap_or_default();
                 let wrote = self.wrote_this_turn;
                 let worked = self.wrote_this_turn
@@ -1364,6 +1369,8 @@ impl App {
             || self.gauge.moving()
             || self.step_flash.iter().any(|(_, p)| p.live())
             || self.plan_linger.is_some_and(|p| p.live())
+            // A tool card settling out of its finish flash after the turn ended.
+            || self.transcript.animating()
     }
 
     /// Apply a thinking level and tell the running agent.
@@ -3548,6 +3555,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     // event, and layout decisions elsewhere need the real width.
     app.last_size = (area.width, area.height);
     let m = Metrics::of(area.width);
+    crate::view::MOTION.store(app.motion.animates(), std::sync::atomic::Ordering::Relaxed);
     // Spent transitions go before anything reads them, so a finished one never
     // draws a last stale frame. `wants_frames` stops asking for frames the
     // moment each ends; this only tidies the state it left behind.
@@ -3612,6 +3620,14 @@ fn draw(f: &mut Frame, app: &mut App) {
             .and_then(|started| tip_for(started.elapsed(), app.tip_seed))
     };
 
+    // The header: wordmark, model, and the mode as pills. Dropped on a tiny
+    // screen, where the bottom bar keeps carrying the model and mode.
+    let header_h: u16 = if m.tiny { 0 } else { 1 };
+    let [header_area, area_below] =
+        Layout::vertical([Constraint::Length(header_h), Constraint::Min(1)]).areas(area);
+    if header_h > 0 {
+        f.render_widget(Paragraph::new(header_row(app, area.width)), header_area);
+    }
     let chunks = Layout::vertical([
         Constraint::Min(1),                       // transcript
         Constraint::Length(plan_h),               // sticky plan (0 when none)
@@ -3621,7 +3637,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(input_h),              // input
         Constraint::Length(1),                    // powerline status bar (mode + model)
     ])
-    .split(area);
+    .split(area_below);
     let (body, plan_area, rule, tip_area, spacer_area, input, status) = (
         chunks[0], chunks[1], chunks[2], chunks[3], chunks[4], chunks[5], chunks[6],
     );
@@ -3891,6 +3907,93 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// The top row: a gradient wordmark, the model, and the three modes as pills
+/// with the active one filled.
+///
+/// The wordmark shimmers while a turn runs — the one piece of chrome that says
+/// "working" from the top of the screen — and holds still otherwise.
+fn header_row(app: &App, width: u16) -> Line<'static> {
+    let t = &app.theme;
+    let g = &app.glyphs;
+    let mut left: Vec<Span<'static>> = vec![Span::raw(" ")];
+
+    let mark = if g.fine_blocks {
+        "▄▀ koda"
+    } else {
+        "<> koda"
+    };
+    let n = mark.chars().count().max(2) - 1;
+    let lit = if app.busy && app.motion.animates() {
+        app.turn_started.map(|s| {
+            anim::shimmer(
+                mark.chars().count(),
+                s.elapsed(),
+                Duration::from_millis(1800),
+            )
+        })
+    } else {
+        None
+    };
+    for (i, ch) in mark.chars().enumerate() {
+        let hue = theme::mix(t.accent, t.accent_alt, i as f32 / n as f32);
+        let hue = match &lit {
+            Some(b) if b[i] > 0.0 => theme::mix(hue, Color::Rgb(255, 255, 255), b[i] * 0.6),
+            _ => hue,
+        };
+        left.push(Span::styled(
+            ch.to_string(),
+            Style::default().fg(hue).add_modifier(Modifier::BOLD),
+        ));
+    }
+    left.push(Span::styled(format!("  {}  ", g.sep), t.dim()));
+    left.push(Span::styled(app.model.clone(), t.fg(t.muted)));
+
+    // The pills. The active one is filled in its mode's colour; mid-switch it
+    // eases from the previous mode's colour, like the composer frame.
+    let mut right: Vec<Span<'static>> = Vec::new();
+    for mode in [Mode::Plan, Mode::Execute, Mode::Vibe] {
+        let c = mode_colour(mode, t);
+        let name = mode.label();
+        if mode == app.mode {
+            let fill = match app.mode_from.and_then(|(from, p)| p.t().map(|k| (from, k))) {
+                Some((from, k)) => fx::mode_shift(mode_colour(from, t), c, k).0,
+                None => c,
+            };
+            let ink = t.bg_panel.unwrap_or(Color::Black);
+            if g.fine_blocks && t.colored {
+                right.push(Span::styled("◖", t.fg(fill)));
+                right.push(Span::styled(
+                    format!(" {name} "),
+                    Style::default()
+                        .fg(ink)
+                        .bg(fill)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                right.push(Span::styled("◗", t.fg(fill)));
+            } else {
+                right.push(Span::styled(
+                    format!("[{name}]"),
+                    Style::default()
+                        .fg(fill)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                ));
+            }
+        } else {
+            right.push(Span::styled(format!("  {name}  "), t.dim()));
+        }
+    }
+    right.push(Span::raw(" "));
+
+    let lw: usize = left.iter().map(|s| s.content.width()).sum();
+    let rw: usize = right.iter().map(|s| s.content.width()).sum();
+    let mut spans = left;
+    if (width as usize) > lw + rw {
+        spans.push(Span::raw(" ".repeat(width as usize - lw - rw)));
+        spans.extend(right);
+    }
+    truncate_line(spans, width)
+}
+
 /// Each mode's colour, shared by the composer frame and the bottom bar so a
 /// switch can ease from one to the other.
 fn mode_colour(mode: Mode, t: &Theme) -> Color {
@@ -4105,7 +4208,15 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                 } else {
                     verb
                 };
-                let label = format!("{verb} {}", turn_meter(started.elapsed(), app.received));
+                let meter = turn_meter(started.elapsed(), app.received);
+                // With motion, the verb shimmers and a crest sweeps a short
+                // track between it and the meter; without, the plain line.
+                let wave_on = app.motion.animates() && !m.tiny;
+                let label = if wave_on {
+                    verb.clone()
+                } else {
+                    format!("{verb} {meter}")
+                };
                 if app.motion.animates() {
                     // A highlight sweeping the label reads as ongoing activity
                     // without moving any text around.
@@ -4125,6 +4236,17 @@ fn hint_row(app: &App, width: u16, m: Metrics) -> Line<'static> {
                     }
                 } else {
                     left.push(Span::styled(label, t.dim()));
+                }
+                if wave_on {
+                    left.push(Span::raw(" "));
+                    let cells = fx::wave(10, started.elapsed(), g.fine_blocks);
+                    let n = cells.len().max(2) - 1;
+                    for (i, (glyph, k)) in cells.into_iter().enumerate() {
+                        // Accent to its partner along the track, lit by the crest.
+                        let hue = theme::mix(t.accent, t.accent_alt, i as f32 / n as f32);
+                        left.push(Span::styled(glyph, t.fg(theme::mix(t.muted, hue, k))));
+                    }
+                    left.push(Span::styled(format!(" {meter}"), t.dim()));
                 }
             }
             (true, _) => left.push(Span::styled("  working".to_string(), t.dim())),
@@ -4334,8 +4456,12 @@ fn powerline(app: &App, width: u16, m: Metrics) -> Line<'static> {
 
     let mut right = Vec::new();
     // Model name and the current mode both live in the bottom-right corner now.
-    right.push(Segment::new(short_model(&app.model, m), t.accent).bold());
-    right.push(Segment::new(app.mode.label().to_string(), mode_colour(app.mode, t)).bold());
+    // The header carries the model and the mode; only a screen too small for
+    // one keeps them down here.
+    if m.tiny {
+        right.push(Segment::new(short_model(&app.model, m), t.accent).bold());
+        right.push(Segment::new(app.mode.label().to_string(), mode_colour(app.mode, t)).bold());
+    }
     // One segment for the web UI, carrying the port it landed on, so it stays
     // answerable without scrolling back to the banner — several sessions at
     // once each get a different one. It used to be two ("web", "ui :7717").

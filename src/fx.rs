@@ -201,6 +201,36 @@ pub fn step_flash(success: Color, t: f32) -> Color {
     theme::mix(Color::Rgb(255, 255, 255), success, 0.35 + 0.65 * e)
 }
 
+/// The working bar: a bright crest that sweeps along a short track while a
+/// turn runs, trailing off in shaded blocks — `░▒▓█▓▒░`. Returns each cell's
+/// glyph and brightness (0..1), derived from elapsed time alone like every
+/// other animation here, so it keeps pace however often the screen redraws.
+///
+/// This one runs for the whole turn: it is the "koda is working" signal the
+/// status row exists to give, and it stops the instant the turn ends.
+pub fn wave(cells: usize, elapsed: Duration, fine: bool) -> Vec<(&'static str, f32)> {
+    const PERIOD: f32 = 1.6;
+    const HALF: f32 = 3.5;
+    let ramp: [&str; 5] = if fine {
+        [" ", "░", "▒", "▓", "█"]
+    } else {
+        [" ", ".", ":", "=", "#"]
+    };
+    let span = cells as f32 + 2.0 * HALF;
+    let phase = (elapsed.as_secs_f32() % PERIOD) / PERIOD;
+    let head = anim::ease_in_out_sine(phase) * span - HALF;
+    (0..cells)
+        .map(|i| {
+            let d = ((i as f32) - head).abs();
+            let k = (1.0 - d / HALF).clamp(0.0, 1.0);
+            // A faint floor so the track reads as a track between sweeps.
+            let k = k.max(0.12);
+            let idx = ((k * 4.0).round() as usize).clamp(1, 4);
+            (ramp[idx], k)
+        })
+        .collect()
+}
+
 /// Which characters of `candidate` a fuzzy `pattern` lands on, as char
 /// indices — the alignment `fuzzy::score` actually ranked, so the letters lit
 /// in a list are the ones that earned its place. Empty when it does not match.
@@ -248,6 +278,25 @@ mod tests {
         for d in [MODE_SHIFT, TOAST_LIFE, GAUGE_EASE, STEP_FLASH, PLAN_LINGER] {
             assert!(d < Duration::from_secs(5), "{d:?}");
         }
+    }
+
+    #[test]
+    fn the_wave_is_a_fixed_width_track_with_one_crest() {
+        for ms in [0u64, 200, 800, 1500] {
+            let w = wave(10, Duration::from_millis(ms), true);
+            assert_eq!(w.len(), 10, "never changes width");
+            assert!(w
+                .iter()
+                .all(|(g, _)| unicode_width::UnicodeWidthStr::width(*g) == 1));
+        }
+        let mid = wave(10, Duration::from_millis(800), true);
+        assert!(
+            mid.iter().any(|(g, _)| *g == "█"),
+            "a crest mid-sweep: {mid:?}"
+        );
+        assert!(wave(10, Duration::ZERO, false)
+            .iter()
+            .all(|(g, _)| g.is_ascii()));
     }
 
     #[test]

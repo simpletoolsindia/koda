@@ -557,6 +557,8 @@ pub struct Glyphs {
     pub gauge_empty: char,
     /// Whether eighth-block characters are available for sub-cell gauges.
     pub fine_blocks: bool,
+    /// The typing cursor at the end of a streaming reply.
+    pub caret: &'static str,
     pub ok: &'static str,
     pub fail: &'static str,
     pub warning: &'static str,
@@ -596,6 +598,7 @@ pub const UNICODE: Glyphs = Glyphs {
     dot: "▪",
     gauge_empty: '░',
     fine_blocks: true,
+    caret: "▋",
     ok: "✔",
     fail: "✘",
     warning: "⚠",
@@ -637,6 +640,7 @@ pub const ASCII: Glyphs = Glyphs {
     dot: "*",
     gauge_empty: '-',
     fine_blocks: false,
+    caret: "_",
     ok: "+",
     fail: "x",
     warning: "!",
