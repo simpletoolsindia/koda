@@ -64,9 +64,16 @@ pub enum Event {
     /// happened while the agent is doing its most visible work: writing a file.
     /// `bytes` is the arguments so far, which is roughly the file taking shape.
     ToolDraft {
+        /// Which call in the response, for a model that drafts several at once.
+        index: usize,
         name: String,
         target: String,
         bytes: usize,
+        /// The file content decoded from the arguments since the last report —
+        /// a delta, so the UI can show the file taking shape as it is written
+        /// instead of nothing until the call completes. Empty for tools whose
+        /// arguments are not a body of text.
+        text: String,
         /// 0 = this agent, 1 = inside a delegated subagent.
         depth: u8,
     },
@@ -271,6 +278,8 @@ struct StepAcc {
     /// so a status update costs one event per few hundred bytes rather than one
     /// per token, and the target is scanned for once rather than every time.
     drafted: BTreeMap<usize, (usize, String)>,
+    /// index -> incremental decoder for the body a draft is writing.
+    scans: BTreeMap<usize, DraftScan>,
     /// What the server said the call cost, when it says. Preferred over koda's
     /// own estimate, which is bytes divided by four.
     usage: Option<(usize, usize)>,
@@ -2536,6 +2545,7 @@ impl Agent {
             text_calls,
             starved,
             drafted: _,
+            scans: _,
             usage,
         } = acc;
         if starved {
@@ -6119,6 +6129,156 @@ const DECLARATION_KEYWORDS: &[&str] = &[
 /// is a channel send of two short strings.
 const DRAFT_STEP: usize = 128;
 
+/// Which argument of a tool is the body worth showing while it streams.
+fn draft_body_keys(name: &str) -> &'static [&'static str] {
+    match name {
+        "write_file" => &["content"],
+        // `new` alone, or each `edits[].new`: what the file will say.
+        "edit_file" => &["new"],
+        _ => &[],
+    }
+}
+
+/// Decodes one string value out of tool-call JSON that is still arriving.
+///
+/// It follows the structure — objects, arrays, which key a string belongs to,
+/// escapes — rather than searching for `"content":`, because the file being
+/// written can itself contain `"content":` (escaped as `\"content\":`, which a
+/// substring search would happily match). `feed` resumes where it stopped, so
+/// the whole call is scanned once however many times it is fed.
+#[derive(Default)]
+struct DraftScan {
+    /// Bytes of the argument buffer already consumed.
+    pos: usize,
+    stack: Vec<u8>,
+    in_str: bool,
+    is_key: bool,
+    escape: bool,
+    /// Hex digits of a `\u` escape read so far.
+    uni: Option<String>,
+    /// A high surrogate waiting for its low half.
+    high: Option<u16>,
+    expect_key: bool,
+    key: String,
+    last_key: String,
+    capture: bool,
+    captured_any: bool,
+    /// Decoded body text not yet reported.
+    out: String,
+}
+
+impl DraftScan {
+    fn feed(&mut self, raw: &str, wanted: &[&str]) {
+        let Some(rest) = raw.get(self.pos..) else {
+            return;
+        };
+        for c in rest.chars() {
+            self.pos += c.len_utf8();
+            self.step(c, wanted);
+        }
+    }
+
+    fn emit(&mut self, c: char) {
+        if self.is_key {
+            self.key.push(c);
+        } else if self.capture {
+            self.out.push(c);
+        }
+    }
+
+    fn emit_unit(&mut self, v: u16) {
+        match v {
+            0xD800..=0xDBFF => self.high = Some(v),
+            0xDC00..=0xDFFF => {
+                if let Some(h) = self.high.take() {
+                    let code = 0x10000 + ((u32::from(h) - 0xD800) << 10) + (u32::from(v) - 0xDC00);
+                    if let Some(c) = char::from_u32(code) {
+                        self.emit(c);
+                    }
+                }
+            }
+            _ => {
+                if let Some(c) = char::from_u32(u32::from(v)) {
+                    self.emit(c);
+                }
+            }
+        }
+    }
+
+    fn step(&mut self, c: char, wanted: &[&str]) {
+        if self.in_str {
+            if let Some(hex) = &mut self.uni {
+                if c.is_ascii_hexdigit() {
+                    hex.push(c);
+                    if hex.len() == 4 {
+                        let v = u16::from_str_radix(hex, 16).unwrap_or(0xFFFD);
+                        self.uni = None;
+                        self.emit_unit(v);
+                    }
+                    return;
+                }
+                self.uni = None;
+            }
+            if self.escape {
+                self.escape = false;
+                match c {
+                    'u' => self.uni = Some(String::new()),
+                    'n' => self.emit('\n'),
+                    't' => self.emit('\t'),
+                    'r' | 'b' | 'f' => {}
+                    other => self.emit(other),
+                }
+                return;
+            }
+            match c {
+                '\\' => self.escape = true,
+                '"' => {
+                    self.in_str = false;
+                    if self.is_key {
+                        self.last_key = std::mem::take(&mut self.key);
+                        self.is_key = false;
+                    } else if self.capture {
+                        self.capture = false;
+                        self.captured_any = true;
+                    }
+                }
+                other => self.emit(other),
+            }
+            return;
+        }
+        match c {
+            '{' => {
+                self.stack.push(b'{');
+                self.expect_key = true;
+            }
+            '[' => {
+                self.stack.push(b'[');
+                self.expect_key = false;
+            }
+            '}' | ']' => {
+                self.stack.pop();
+                self.expect_key = false;
+            }
+            ',' => self.expect_key = self.stack.last() == Some(&b'{'),
+            ':' => self.expect_key = false,
+            '"' => {
+                self.in_str = true;
+                self.is_key = self.expect_key && self.stack.last() == Some(&b'{');
+                if self.is_key {
+                    self.key.clear();
+                } else {
+                    self.capture = wanted.contains(&self.last_key.as_str());
+                    // Several edits in one call: keep their bodies apart.
+                    if self.capture && self.captured_any {
+                        self.out.push_str("\n\n");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// What a half-written tool call is about, from JSON that is still arriving.
 ///
 /// The interesting key comes first in practice (`{"path":"src/x.rs","content":
@@ -6587,6 +6747,12 @@ fn absorb(
                 slot.1 = n;
             }
             slot.2.push_str(&args);
+            // Decode the body as it arrives — only the new bytes, so a long
+            // file costs one pass in total, not one per report.
+            let wanted = draft_body_keys(&slot.1);
+            if !wanted.is_empty() {
+                acc.scans.entry(index).or_default().feed(&slot.2, wanted);
+            }
             // Tell the UI something is being written. Throttled by size: the
             // point is a number that visibly moves, not one that is exact.
             let (seen, target) = acc.drafted.entry(index).or_default();
@@ -6601,10 +6767,17 @@ fn absorb(
                 if target.is_empty() {
                     *target = draft_target(&slot.2).unwrap_or_default();
                 }
+                let text = acc
+                    .scans
+                    .get_mut(&index)
+                    .map(|sc| std::mem::take(&mut sc.out))
+                    .unwrap_or_default();
                 let _ = tx.send(Event::ToolDraft {
+                    index,
                     name: slot.1.clone(),
                     target: target.clone(),
                     bytes: slot.2.len(),
+                    text,
                     depth,
                 });
             }
@@ -8066,6 +8239,83 @@ mod tests {
 
     /// The whole point: a long write must move a number on screen. It must not
     /// send one event per token doing it.
+    #[test]
+    fn the_draft_decoder_reads_the_body_however_it_is_split() {
+        let json =
+            r#"{"path":"a.py","content":"def f():\n    s = \"content\": 1\n    return \"é😀\"\n"}"#;
+        let whole = {
+            let mut sc = DraftScan::default();
+            sc.feed(json, &["content"]);
+            sc.out
+        };
+        assert_eq!(
+            whole,
+            "def f():\n    s = \"content\": 1\n    return \"é😀\"\n"
+        );
+        // Fed a byte... well, a char at a time, as a slow stream would.
+        let mut sc = DraftScan::default();
+        let mut buf = String::new();
+        let mut got = String::new();
+        for c in json.chars() {
+            buf.push(c);
+            sc.feed(&buf, &["content"]);
+            got.push_str(&std::mem::take(&mut sc.out));
+        }
+        assert_eq!(got, whole, "chunking must not change the result");
+    }
+
+    /// The path is not the body, and a key-like string inside the body is text.
+    #[test]
+    fn the_draft_decoder_only_takes_the_wanted_value() {
+        let mut sc = DraftScan::default();
+        sc.feed(r#"{"path":"new","old":"x = 1","new":"x = 2"}"#, &["new"]);
+        assert_eq!(sc.out, "x = 2");
+        let mut sc = DraftScan::default();
+        sc.feed(
+            r#"{"path":"p","edits":[{"old":"a","new":"A"},{"old":"b","new":"B"}]}"#,
+            &["new"],
+        );
+        assert_eq!(sc.out, "A\n\nB", "several edits, kept apart");
+    }
+
+    /// The draft events carry the file as it is written, in order.
+    #[test]
+    fn a_streaming_write_carries_its_text() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StepAcc::default();
+        let body: String = (0..400).map(|i| format!("line {i}\\n")).collect();
+        let json = format!(r#"{{"path":"src/big.rs","content":"{body}"}}"#);
+        for chunk in json.as_bytes().chunks(40) {
+            absorb(
+                StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("c1".into()),
+                    name: Some("write_file".into()),
+                    args: String::from_utf8(chunk.to_vec()).unwrap(),
+                },
+                &mut acc,
+                &tx,
+                false,
+                0,
+            );
+        }
+        let mut text = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::ToolDraft { text: t, .. } = ev {
+                text.push_str(&t);
+            }
+        }
+        assert!(
+            text.starts_with("line 0\nline 1\n"),
+            "{}",
+            &text[..40.min(text.len())]
+        );
+        assert!(
+            text.lines().count() > 300,
+            "most of the file has been shown by the last report"
+        );
+    }
+
     #[test]
     fn a_streaming_write_reports_progress_without_flooding() {
         let (tx, mut rx) = mpsc::unbounded_channel();

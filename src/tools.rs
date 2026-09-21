@@ -2019,7 +2019,7 @@ fn near_misses(ctx: &ToolCtx, missing: &Path) -> Vec<String> {
 }
 
 /// Language tag for a path, used to pick a syntax highlighter.
-fn lang_of(p: &Path) -> String {
+pub(crate) fn lang_of(p: &Path) -> String {
     p.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")

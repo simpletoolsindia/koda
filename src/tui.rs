@@ -1012,6 +1012,8 @@ impl App {
                 // written.
                 self.transcript.finish_reveal();
                 self.transcript.cursor = false;
+                // The call is whole now: its real card replaces the draft.
+                self.transcript.clear_drafts();
                 // Surface what the agent is doing right now in the status row.
                 // Inside a delegated subagent (depth>0) say so, so the user can
                 // see the child is working — e.g. "↳ subagent: reading cart.py".
@@ -1035,11 +1037,20 @@ impl App {
                 self.follow = true;
             }
             Event::ToolDraft {
+                index,
                 name,
                 target,
                 bytes,
+                text,
                 depth,
             } => {
+                // The file itself, as it is written, in the transcript: a long
+                // write used to show nothing there until the whole call had
+                // arrived, which on a local model reads as a hang.
+                if depth == 0 {
+                    self.transcript.draft(index, &name, &target, &text);
+                    self.follow = true;
+                }
                 // The call has not been made yet, so there is no card to update
                 // -- this is the status row's job. Reads as "writing
                 // src/context.rs · 12.4 KB", climbing, which is the difference
@@ -1106,6 +1117,9 @@ impl App {
                 preview,
                 reply,
             } => {
+                // The approval dialog shows the full change; a half-drawn
+                // draft behind it would only be a second, stale copy.
+                self.transcript.clear_drafts();
                 self.pending = Some(Pending {
                     name,
                     args_pretty,
@@ -1185,6 +1199,7 @@ impl App {
             }
             Event::Error(msg) => {
                 self.transcript.cursor = false;
+                self.transcript.clear_drafts();
                 self.transcript.error(msg);
                 self.follow = true;
             }
@@ -1218,6 +1233,7 @@ impl App {
                 // A turn that has ended must not leave half a sentence hidden.
                 self.transcript.finish_reveal();
                 self.transcript.cursor = false;
+                self.transcript.clear_drafts();
                 let turn_took = self.turn_started.map(|t| t.elapsed()).unwrap_or_default();
                 let wrote = self.wrote_this_turn;
                 let worked = self.wrote_this_turn

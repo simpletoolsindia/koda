@@ -150,6 +150,44 @@ version": these are the changes visible on every frame.
   Gone the moment a tool starts or the turn ends.
 - **Your messages** carry an accent bar down their left edge.
 
+## 2.8 A file on screen while it is being written
+
+A `write_file` of a few hundred lines streams for a minute or more on a local
+model, and the transcript used to show nothing until the whole call had
+arrived — only the status row's "writing · 1.0k tok". People read that as a
+hang.
+
+Now the agent decodes the body out of the tool-call JSON *as it streams*
+(`DraftScan`: follows objects, arrays, keys and escapes, so a file that itself
+contains `"content":` cannot fool it, and resumes where it stopped, so a long
+file is scanned once) and sends the new text with each draft report. The
+transcript shows a live card:
+
+```
+  ╭─ ⣽  WRITE   src/inventory.py  113 lines · 976 tokens · 9.9s  writing
+  │       … 101 lines above
+  │  111  def cli():
+  │  112      """Command-line interface for the inventory manager."""
+  │  113      inventory = Inventory.load▋
+  ╰───
+```
+
+The newest 12 lines, numbered and highlighted, a caret where the writing is,
+and a live line and token count; past 12 lines the card stops growing, so the
+screen holds still. Edits show the replacement text (`new`, or each
+`edits[].new`). When the call completes the real card — the diff — takes its
+place; the approval dialog, an error or the end of the turn also clear it.
+Some models send the body before the path, so the name can read "new file"
+until the path arrives.
+
+This is the approach pi describes ("displaying a diff streaming in as the
+agent rewrites a file" by progressively parsing partial tool-call JSON) and
+the one other agent UIs moved to after the same complaint.
+
+A server that buffers a whole tool call and flushes it at once gives nothing
+to show; there the status row's `generating · quiet 40s` is still the honest
+signal.
+
 ## 3. Clutter removed (the skill's clutter audit, counted)
 
 | Before | Count | After |

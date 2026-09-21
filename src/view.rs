@@ -62,6 +62,16 @@ pub enum Item {
     /// Already-laid-out lines, e.g. a framed panel. Rendered verbatim so exact
     /// alignment survives; re-wrapping a frame would tear it apart.
     Raw(Vec<Line<'static>>),
+    /// A file being written or edited, shown as its content streams in —
+    /// before the call is complete and long before it runs. Replaced by the
+    /// real tool card when the call starts.
+    Draft {
+        index: usize,
+        name: String,
+        target: String,
+        text: String,
+        started: Instant,
+    },
 }
 
 struct Block {
@@ -516,6 +526,75 @@ impl Transcript {
         });
     }
 
+    /// More of a file the model is writing has arrived: show it.
+    ///
+    /// One live card per call, at the tail. Only file writes and edits get
+    /// one — for anything else the status row's "running …" says enough.
+    pub fn draft(&mut self, index: usize, name: &str, target: &str, text: &str) {
+        if !matches!(name, "write_file" | "edit_file") {
+            return;
+        }
+        let last = self.blocks.len().saturating_sub(1);
+        if let Some(Block {
+            item:
+                Item::Draft {
+                    index: i,
+                    target: tg,
+                    text: body,
+                    ..
+                },
+            ..
+        }) = self.blocks.last_mut()
+        {
+            if *i == index {
+                if tg.is_empty() {
+                    *tg = target.to_string();
+                }
+                body.push_str(text);
+                self.dirty_from = self.dirty_from.min(last);
+                return;
+            }
+        }
+        self.close_reasoning();
+        self.cursor = false;
+        self.push(Item::Draft {
+            index,
+            name: name.to_string(),
+            target: target.to_string(),
+            text: text.to_string(),
+            started: Instant::now(),
+        });
+    }
+
+    /// The call is complete (or the turn is over): its real card takes the
+    /// draft's place.
+    pub fn clear_drafts(&mut self) {
+        let Some(first) = self
+            .blocks
+            .iter()
+            .position(|b| matches!(b.item, Item::Draft { .. }))
+        else {
+            return;
+        };
+        for b in &self.blocks[first..] {
+            if matches!(b.item, Item::Draft { .. }) {
+                self.retained -= b.cache.as_ref().map(|c| c.2.len()).unwrap_or(0);
+            }
+        }
+        self.blocks
+            .retain(|b| !matches!(b.item, Item::Draft { .. }));
+        // Everything from the first draft on is re-offset; the running total
+        // falls back to where the first draft began, so a relayout that finds
+        // nothing left to lay out still reports the right height.
+        self.total = match first.checked_sub(1).and_then(|i| self.blocks.get(i)) {
+            Some(prev) => prev.offset + prev.height,
+            None => 0,
+        };
+        self.dirty_from = self.dirty_from.min(first);
+        self.animating = None;
+        self.stream = None;
+    }
+
     /// A running tool reported how much it has read or written so far.
     pub fn tool_progress(&mut self, id: &str, done: usize, total: Option<usize>) {
         for (i, b) in self.blocks.iter_mut().enumerate().rev() {
@@ -968,7 +1047,7 @@ fn raw_hash(lines: &[Line<'static>]) -> usize {
 }
 
 fn is_running(item: &Item) -> bool {
-    matches!(item, Item::Tool { ok: None, .. }) || tool_flash(item).is_some()
+    matches!(item, Item::Tool { ok: None, .. } | Item::Draft { .. }) || tool_flash(item).is_some()
 }
 
 /// Whether the UI may animate at all (`/motion`, reduced-motion env, non-tty).
@@ -1003,6 +1082,8 @@ fn signature(item: &Item, show_reasoning: bool, tick: usize) -> u64 {
         // Two different panels can easily have the same number of lines, so the
         // key has to describe the content or one will render as the other.
         Item::Raw(lines) => (raw_hash(lines), 64),
+        // It grows as the file streams, and its spinner and caret move.
+        Item::Draft { text, target, .. } => (text.len() + target.len() + tick % 10 * 4096, 128),
         Item::Todos(items) => (
             // Statuses are part of what is drawn, so they belong in the key --
             // keyed on the done count alone, a step going from pending to
@@ -1188,13 +1269,16 @@ fn stream_render(
 fn shown_prefix(text: &str, cut: Option<usize>) -> &str {
     // One scan, not two: `chars().count()` on every frame is O(reply) on its
     // own, and the boundary walk below already reports "past the end".
-    match cut {
+    let shown = match cut {
         Some(n) => match text.char_indices().nth(n) {
             Some((i, _)) => &text[..i],
             None => text,
         },
         None => text,
-    }
+    };
+    // Trailing newlines are not content: a reply ending "…command:\n\n"
+    // before a tool call drew two blank rows on top of the block's own gap.
+    shown.trim_end()
 }
 
 // Nine inputs, each of them genuinely needed to draw one block, and all of them
@@ -1305,6 +1389,13 @@ fn render_item(
         }
 
         Item::Raw(lines) => lines.clone(),
+        Item::Draft {
+            name,
+            target,
+            text,
+            started,
+            ..
+        } => render_draft(name, target, text, *started, width, t, g, tick),
 
         Item::Notice(text) => md::wrap_spans(
             vec![
@@ -1464,6 +1555,101 @@ fn tool_identity(name: &str, g: &Glyphs) -> (&'static str, String) {
         other if crate::mcp::is_mcp_tool(other) => ("MCP", g.branch_arrow.to_string()),
         _ => ("Tool", g.ok.to_string()),
     }
+}
+
+/// How many of a draft's latest lines to show. Enough to follow the code
+/// taking shape; fixed, so the card stops growing and the screen holds still
+/// once the file is longer than this.
+const DRAFT_LINES: usize = 12;
+
+/// A file as the model writes it: the header names it and counts what has
+/// arrived, and the body is its newest lines, numbered and highlighted, with
+/// a caret where the writing is. Everything above is summarised in one row.
+#[allow(clippy::too_many_arguments)]
+fn render_draft(
+    name: &str,
+    target: &str,
+    text: &str,
+    started: Instant,
+    width: usize,
+    t: &Theme,
+    g: &Glyphs,
+    tick: usize,
+) -> Vec<Line<'static>> {
+    let (title, _) = tool_identity(name, g);
+    let avail = width.saturating_sub(2).max(20);
+    let lines: Vec<&str> = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').collect()
+    };
+    let n = lines.len();
+    let tokens = crate::tools::approx_tokens(text.len());
+    let mut meta = Vec::new();
+    if n > 0 {
+        meta.push(plural(n, "line", "lines"));
+        meta.push(crate::tools::human_tokens(tokens));
+    }
+    if started.elapsed().as_millis() > 400 {
+        meta.push(human_ms(started.elapsed()));
+    }
+    let spinner = (g.spinner[tick % g.spinner.len()].to_string(), t.warning);
+    // Some models send the body before the path, so the name can arrive last.
+    let what = if target.is_empty() {
+        "new file".to_string()
+    } else {
+        target.to_string()
+    };
+    let mut head = panel::status_line_badged(
+        Some(spinner),
+        title,
+        Some((what, t.info)),
+        None,
+        &meta,
+        t,
+        g,
+    );
+    head.push(Span::styled(
+        format!("  {}", running_verb(name)),
+        t.fg(t.warning),
+    ));
+
+    let lang = crate::tools::lang_of(std::path::Path::new(target));
+    let first = n.saturating_sub(DRAFT_LINES);
+    let gutter = (n.max(1)).to_string().len();
+    let mut body: Vec<Line<'static>> = Vec::new();
+    if first > 0 {
+        body.push(Line::from(Span::styled(
+            format!("{:>gutter$}  {} {first} lines above", "", g.ellipsis),
+            t.dim(),
+        )));
+    }
+    let caret_on = (tick / 6) % 2 == 0;
+    for (k, line) in lines[first..].iter().enumerate() {
+        let no = first + k + 1;
+        let mut row = vec![Span::styled(format!("{no:>gutter$}  "), t.dim())];
+        row.extend(md::highlight(line, &lang, t));
+        if first + k + 1 == n {
+            row.push(Span::styled(
+                g.caret.to_string(),
+                t.fg(if caret_on { t.accent } else { t.muted }),
+            ));
+        }
+        body.push(Line::from(row));
+    }
+    if n == 0 {
+        body.push(Line::from(Span::styled(
+            format!("waiting for the first line{}", g.caret),
+            t.dim(),
+        )));
+    }
+    indent_all(
+        panel::railed(head, body, None, avail, panel::Frame::Done, t, g),
+        2,
+        t,
+        g,
+        0,
+    )
 }
 
 /// "search \"q\" (6 results)" under a SEARCH label says "search" twice: drop
@@ -2586,6 +2772,21 @@ mod tests {
         );
     }
 
+    /// Nor do trailing ones: a reply that ends in blank lines before a tool
+    /// card is one gap, not three.
+    #[test]
+    fn a_reply_ends_at_its_last_word() {
+        let mut t = tr();
+        t.user("q".into());
+        t.assistant_delta("Running the tests:\n\n\n");
+        t.relayout(80);
+        let mut clean = tr();
+        clean.user("q".into());
+        clean.assistant_delta("Running the tests:");
+        clean.relayout(80);
+        assert_eq!(text(&mut t), text(&mut clean));
+    }
+
     /// Leading newlines on a real reply are dropped; the text is kept.
     #[test]
     fn a_reply_starts_at_its_first_word() {
@@ -2650,6 +2851,61 @@ mod tests {
         );
         assert!(!fetch.contains("web_fetch"), "{fetch}");
         assert!(fetch.contains("404 Not Found"), "{fetch}");
+    }
+
+    /// A file being written is on screen while it is written: the header
+    /// names it and counts lines, the body shows its newest lines, and once
+    /// it is longer than the card the card stops growing.
+    #[test]
+    fn a_file_shows_as_it_is_written() {
+        let mut t = tr();
+        t.user("write it".into());
+        t.draft(0, "write_file", "src/app.py", "def main():\n");
+        t.relayout(80);
+        let early = text(&mut t);
+        assert!(
+            early.contains("WRITE") && early.contains("src/app.py"),
+            "{early}"
+        );
+        assert!(early.contains("def main():"), "{early}");
+
+        let mut body = String::new();
+        for i in 0..40 {
+            body.push_str(&format!("    step_{i}()\n"));
+        }
+        t.draft(0, "write_file", "src/app.py", &body);
+        t.relayout(80);
+        let later = text(&mut t);
+        assert!(
+            later.contains("step_39()"),
+            "the newest line is shown: {later}"
+        );
+        assert!(!later.contains("step_2()"), "old lines scroll off: {later}");
+        assert!(later.contains("lines above"), "{later}");
+        assert!(later.contains("42 lines"), "live count: {later}");
+        let h = t.total_lines();
+        t.draft(0, "write_file", "src/app.py", "    more()\n");
+        t.relayout(80);
+        assert_eq!(t.total_lines(), h, "a long file no longer grows the card");
+    }
+
+    /// When the call is whole, the draft goes and the layout is exactly what
+    /// it would have been without it.
+    #[test]
+    fn clearing_a_draft_leaves_no_trace() {
+        let mut t = tr();
+        t.user("q".into());
+        t.relayout(80);
+        let before = (t.total_lines(), t.block_count());
+        t.draft(0, "edit_file", "a.rs", "fn x() {}");
+        t.relayout(80);
+        assert!(t.total_lines() > before.0);
+        t.clear_drafts();
+        t.relayout(80);
+        assert_eq!((t.total_lines(), t.block_count()), before);
+        // And a draft is only for files: a search has nothing to stream.
+        t.draft(1, "web_search", "q", "");
+        assert_eq!(t.block_count(), before.1);
     }
 
     /// A width change throws away every wrap, including the kept prefix.
