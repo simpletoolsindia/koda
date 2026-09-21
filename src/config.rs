@@ -450,6 +450,9 @@ pub struct Config {
     /// Tool cards wear an emoji per tool, animated while it runs. Off, or on
     /// an ASCII terminal, they keep the plain glyphs.
     pub tool_emoji: bool,
+    /// Every git command the model runs waits for the user's yes, even in
+    /// full-auto. On by default.
+    pub confirm_git: bool,
 
     /// Prefill the model's prompt cache in the background at startup.
     ///
@@ -812,6 +815,7 @@ impl Default for Config {
             codegraph_refresh_ms: 15_000,
             graph_context_tokens: 600,
             tool_emoji: true,
+            confirm_git: true,
             web_search: false,
             search_backend: default_backend(),
             searx_url: String::new(),
@@ -1355,6 +1359,11 @@ graph_context_tokens = 600
 # An emoji per tool on its card, animated while it runs (🌍 fetching, 🔍
 # searching, ⏳ running…). false keeps the plain glyphs. Toggle with /emoji.
 tool_emoji = true
+# Hold every git command the model runs for your yes — even in full-auto, and
+# "always allow" cannot pre-approve it. git rewrites history and pushes to
+# other people. Headless (-p) runs have nobody to ask, so there git is treated
+# like any other command (allowed with --yolo, refused without).
+confirm_git = true
 
 # Consult a language server (rust-analyzer, pyright, gopls, ...) for questions
 # the regex code graph cannot answer precisely: real definitions, real

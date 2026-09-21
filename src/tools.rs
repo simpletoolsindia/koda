@@ -873,6 +873,36 @@ pub fn deferred_summary(enabled: impl Fn(&str) -> bool) -> String {
 /// the commands whose damage cannot be undone by `/undo`, git, or a rebuild —
 /// so they are worth one keypress even in full-auto, and the reason is shown to
 /// the user rather than a bare "are you sure".
+/// Whether a shell command line runs `git` anywhere in it — after `cd … &&`,
+/// `sudo`, `env`, variable assignments, `;`, `|` or a subshell, and as
+/// `git`, `/usr/bin/git` or `command git`. Used to hold every git command for
+/// the user's confirmation, whatever the auto-approve setting: git rewrites
+/// history, pushes to other people and discards work, and its safe-looking
+/// subcommands take options that do all three.
+pub fn runs_git(command: &str) -> bool {
+    command
+        .split(['&', ';', '|', '\n', '(', ')', '`'])
+        .flat_map(|seg| seg.split("$("))
+        .any(|seg| {
+            let mut words = seg.split_whitespace().peekable();
+            while let Some(w) = words.peek() {
+                let is_prefix =
+                    matches!(
+                        *w,
+                        "sudo" | "env" | "command" | "exec" | "nohup" | "time" | "xargs"
+                    ) || (w.contains('=') && !w.starts_with('-') && !w.starts_with('='));
+                if !is_prefix {
+                    break;
+                }
+                words.next();
+            }
+            words.next().is_some_and(|prog| {
+                let prog = prog.trim_matches(|c| c == '"' || c == '\'');
+                prog == "git" || prog.ends_with("/git") || prog == "git.exe"
+            })
+        })
+}
+
 pub fn destructive_reason(command: &str, root: &Path) -> Option<&'static str> {
     // Compare on a normalised form: collapsed whitespace, no quotes, so
     // `rm  -r -f  "/"` reads the same as `rm -rf /`.
@@ -4604,6 +4634,38 @@ pub const CREATOR_CONTACT: &str = "support@simpletools.in";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every way a command line can reach git is caught; things that only
+    /// mention it are not.
+    #[test]
+    fn git_is_found_wherever_it_runs() {
+        for c in [
+            "git status",
+            "git push --force origin main",
+            "cd repo && git commit -am wip",
+            "npm test; git checkout -- .",
+            "echo hi | git apply",
+            "sudo git reset --hard",
+            "GIT_DIR=x git log",
+            "env FOO=1 git stash",
+            "/usr/bin/git clean -fdx",
+            "(cd sub && git pull)",
+            "echo $(git rev-parse HEAD)",
+            "command git branch -D x",
+        ] {
+            assert!(runs_git(c), "should be held: {c}");
+        }
+        for c in [
+            "echo git",
+            "cat .gitignore",
+            "rg 'git push' src",
+            "cargo test",
+            "gitk-free-command",
+            "python3 -m pytest",
+        ] {
+            assert!(!runs_git(c), "should not be held: {c}");
+        }
+    }
 
     /// agent-browser binary lookup: user configured path wins, then system PATH,
     /// then common install directories. If a configured path is wrong, it does not

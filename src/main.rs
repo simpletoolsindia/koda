@@ -539,6 +539,14 @@ async fn headless(
     let cancel = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
     let auto = cfg.auto_approve;
+    // Nobody is there to confirm a git command, so headless does not hold
+    // them: git follows the same rule as every other command here (allowed
+    // with --yolo, refused without). The interactive hold stays on in the TUI.
+    let cfg = {
+        let mut c = (*cfg).clone();
+        c.confirm_git = false;
+        Arc::new(c)
+    };
     let mut agent = Agent::new(cfg, root, cancel, notify)?;
     if let Some(name) = name {
         agent.set_session_name(name);

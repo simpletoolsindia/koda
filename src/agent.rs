@@ -3007,7 +3007,9 @@ impl Agent {
             let command = tools::expand_custom_command(&ct.command, &ct.args, &args);
             // Route through the same approval + run path as run_command.
             let run_args = serde_json::json!({ "command": command });
-            if ct.mutating && !self.approve("run_command", &run_args, tx).await {
+            // A custom tool marked read-only still asks when it runs git.
+            let asks = ct.mutating || (self.cfg.confirm_git && tools::runs_git(&command));
+            if asks && !self.approve("run_command", &run_args, tx).await {
                 return tools::Outcome {
                     ok: false,
                     content: "ERROR: the user denied this action.".into(),
@@ -5927,13 +5929,18 @@ impl Agent {
         // auto-approve is there to skip the routine, not to make `rm -rf ~`
         // silent. `always` cannot pre-approve these either, since it is granted
         // per tool, not per command.
-        let destructive = (name == "run_command" && self.cfg.confirm_destructive)
-            .then(|| {
-                args.get("command")
-                    .and_then(|c| c.as_str())
-                    .and_then(|c| tools::destructive_reason(c, &self.ctx.root))
-            })
+        let command = (name == "run_command")
+            .then(|| args.get("command").and_then(|c| c.as_str()))
             .flatten();
+        let destructive = command
+            .filter(|_| self.cfg.confirm_destructive)
+            .and_then(|c| tools::destructive_reason(c, &self.ctx.root))
+            // git is held the same way: every git command, every time.
+            .or_else(|| {
+                command
+                    .filter(|c| self.cfg.confirm_git && tools::runs_git(c))
+                    .map(|_| "runs git")
+            });
         if destructive.is_none()
             && (!tools::call_is_mutating(name, args)
                 || self.auto_approve
