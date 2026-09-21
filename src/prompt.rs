@@ -938,12 +938,20 @@ mod tests {
     #[test]
     fn the_preamble_does_not_change_with_the_clock() {
         let cfg = Config::default();
-        let root = Path::new("/tmp");
+        // A directory of its own. The prompt lists the project root, and with
+        // `/tmp` as the root that listing changed whenever a test running
+        // alongside created or removed its scratch directory there -- so the
+        // two builds differed, and this failed a few runs in a hundred.
+        let dir = std::env::temp_dir().join(format!("koda-prompt-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.py"), "print('hi')\n").unwrap();
+        let root = dir.as_path();
         let first = build(&cfg, root, false, Mode::Execute);
         // Two builds a notional minute apart must be byte-identical. Building
         // twice in a row is the same test the old code failed roughly once a
         // minute, so the assertion is on the content, not on timing.
         let again = build(&cfg, root, false, Mode::Execute);
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(first, again, "the preamble is not stable between builds");
 
         // No time of day anywhere in it. `\d\d:\d\d` is what the old line

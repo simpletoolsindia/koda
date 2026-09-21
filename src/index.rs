@@ -1177,15 +1177,8 @@ fn normalise(path: &str) -> String {
 /// would be a lot of plumbing to move four numbers. The cost on the indexing
 /// side is one relaxed store per file, which is nothing beside reading it.
 pub mod progress {
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
 
-    pub(super) static GRAPH_BUSY: AtomicBool = AtomicBool::new(false);
-    pub(super) static INDEX_BUSY: AtomicBool = AtomicBool::new(false);
-    pub(super) static FILES: AtomicUsize = AtomicUsize::new(0);
-    pub(super) static CHUNKS: AtomicUsize = AtomicUsize::new(0);
-    pub(super) static STARTED_MS: AtomicU64 = AtomicU64::new(0);
-    /// When the last pass finished, so the result can be held on screen.
-    pub(super) static FINISHED_MS: AtomicU64 = AtomicU64::new(0);
     /// How long "index ready" stays up after the work is done.
     ///
     /// Warm, the whole pass is ~30 ms and the TUI paints every ~75 ms, so
@@ -1193,9 +1186,23 @@ pub mod progress {
     /// drawn at all — the feature exists and nobody can see it. Long enough to
     /// read, short enough that it is gone before it is in the way.
     const LINGER_MS: u64 = 1_600;
-    /// 0 none · 1 loading cache · 2 building · 3 sweeping for changes
-    pub(super) static PHASE: AtomicU8 = AtomicU8::new(0);
-    use std::sync::atomic::AtomicU8;
+
+    /// The indexers' progress. One global instance is what the app reports;
+    /// a test builds its own, so indexing done by the tests running alongside
+    /// cannot move the counters under it.
+    pub struct State {
+        graph_busy: AtomicBool,
+        index_busy: AtomicBool,
+        files: AtomicUsize,
+        chunks: AtomicUsize,
+        started_ms: AtomicU64,
+        /// When the last pass finished, so the result can be held on screen.
+        finished_ms: AtomicU64,
+        /// 0 none · 1 loading cache · 2 building · 3 sweeping for changes
+        phase: AtomicU8,
+    }
+
+    static GLOBAL: State = State::new();
 
     /// What the indexers are doing right now.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1216,70 +1223,108 @@ pub mod progress {
             .unwrap_or(0)
     }
 
-    pub fn begin(phase: u8) {
-        PHASE.store(phase, Relaxed);
-        FILES.store(0, Relaxed);
-        if STARTED_MS.load(Relaxed) == 0 {
-            STARTED_MS.store(now_ms(), Relaxed);
+    impl State {
+        pub const fn new() -> Self {
+            Self {
+                graph_busy: AtomicBool::new(false),
+                index_busy: AtomicBool::new(false),
+                files: AtomicUsize::new(0),
+                chunks: AtomicUsize::new(0),
+                started_ms: AtomicU64::new(0),
+                finished_ms: AtomicU64::new(0),
+                phase: AtomicU8::new(0),
+            }
+        }
+
+        pub fn begin(&self, phase: u8) {
+            self.phase.store(phase, Relaxed);
+            self.files.store(0, Relaxed);
+            if self.started_ms.load(Relaxed) == 0 {
+                self.started_ms.store(now_ms(), Relaxed);
+            }
+        }
+
+        pub fn file(&self) {
+            self.files.fetch_add(1, Relaxed);
+        }
+
+        pub fn done(&self, chunks: usize) {
+            self.chunks.store(chunks, Relaxed);
+            self.phase.store(0, Relaxed);
+            self.finished_ms.store(now_ms(), Relaxed);
+        }
+
+        pub fn set_graph_busy(&self, on: bool) {
+            self.graph_busy.store(on, Relaxed);
+        }
+
+        pub fn set_index_busy(&self, on: bool) {
+            self.index_busy.store(on, Relaxed);
+        }
+
+        /// Pretend the linger has elapsed. Tests should not sleep for 1.6s to
+        /// watch a label disappear.
+        #[cfg(test)]
+        pub fn expire(&self) {
+            self.finished_ms.store(1, Relaxed);
+        }
+
+        pub fn status(&self) -> Status {
+            let index = self.index_busy.load(Relaxed);
+            let graph = self.graph_busy.load(Relaxed);
+            let chunks = self.chunks.load(Relaxed);
+            // Hold the result briefly after the work ends, so a warm start
+            // that takes less than one frame still says what it did.
+            if !index && !graph {
+                let done_at = self.finished_ms.load(Relaxed);
+                let recent = done_at > 0 && now_ms().saturating_sub(done_at) < LINGER_MS;
+                return Status {
+                    working: recent,
+                    what: if recent { "index ready" } else { "" },
+                    files: 0,
+                    chunks,
+                };
+            }
+            Status {
+                working: index || graph,
+                what: match (index, self.phase.load(Relaxed)) {
+                    (true, 1) => "reading the index cache",
+                    (true, 2) => "indexing",
+                    (true, 3) => "checking for changes",
+                    (true, _) => "indexing",
+                    // The symbol graph is the other half, and finishes first
+                    // on every tree big enough for the difference to show.
+                    _ if graph => "mapping symbols",
+                    _ => "",
+                },
+                files: self.files.load(Relaxed),
+                chunks,
+            }
         }
     }
 
+    pub fn begin(phase: u8) {
+        GLOBAL.begin(phase);
+    }
+
     pub(crate) fn file() {
-        FILES.fetch_add(1, Relaxed);
+        GLOBAL.file();
     }
 
     pub fn done(chunks: usize) {
-        CHUNKS.store(chunks, Relaxed);
-        PHASE.store(0, Relaxed);
-        FINISHED_MS.store(now_ms(), Relaxed);
+        GLOBAL.done(chunks);
     }
 
     /// Called by whichever thread owns each half of the work.
     pub fn set_graph_busy(on: bool) {
-        GRAPH_BUSY.store(on, Relaxed);
+        GLOBAL.set_graph_busy(on);
     }
     pub fn set_index_busy(on: bool) {
-        INDEX_BUSY.store(on, Relaxed);
-    }
-
-    /// Pretend the linger has elapsed. Tests should not sleep for 1.6s to
-    /// watch a label disappear.
-    #[cfg(test)]
-    pub fn expire_for_test() {
-        FINISHED_MS.store(1, Relaxed);
+        GLOBAL.set_index_busy(on);
     }
 
     pub fn status() -> Status {
-        let index = INDEX_BUSY.load(Relaxed);
-        let graph = GRAPH_BUSY.load(Relaxed);
-        let chunks = CHUNKS.load(Relaxed);
-        // Hold the result briefly after the work ends, so a warm start that
-        // takes less than one frame still says what it did.
-        if !index && !graph {
-            let done_at = FINISHED_MS.load(Relaxed);
-            let recent = done_at > 0 && now_ms().saturating_sub(done_at) < LINGER_MS;
-            return Status {
-                working: recent,
-                what: if recent { "index ready" } else { "" },
-                files: 0,
-                chunks,
-            };
-        }
-        Status {
-            working: index || graph,
-            what: match (index, PHASE.load(Relaxed)) {
-                (true, 1) => "reading the index cache",
-                (true, 2) => "indexing",
-                (true, 3) => "checking for changes",
-                (true, _) => "indexing",
-                // The symbol graph is the other half, and finishes first on
-                // every tree big enough for the difference to show.
-                _ if graph => "mapping symbols",
-                _ => "",
-            },
-            files: FILES.load(Relaxed),
-            chunks: CHUNKS.load(Relaxed),
-        }
+        GLOBAL.status()
     }
 }
 
@@ -1891,54 +1936,56 @@ mod tests {
     /// verified the first time and is not a way to keep it working.
     #[test]
     fn progress_reports_what_the_indexers_are_doing() {
-        use super::progress;
+        // A private instance: the global one is moved by every test that
+        // indexes a project, and those run alongside this one.
+        let progress = super::progress::State::new();
 
         // Nothing running, and nothing recently finished: the row is empty.
-        progress::set_index_busy(false);
-        progress::set_graph_busy(false);
-        progress::done(0);
-        progress::expire_for_test();
-        let idle = progress::status();
+        progress.set_index_busy(false);
+        progress.set_graph_busy(false);
+        progress.done(0);
+        progress.expire();
+        let idle = progress.status();
         assert!(!idle.working);
         assert_eq!(idle.what, "");
 
         // The symbol graph is the other half, and is named separately because
         // it finishes first and would otherwise look like a stalled index.
-        progress::set_graph_busy(true);
-        assert_eq!(progress::status().what, "mapping symbols");
-        progress::set_graph_busy(false);
+        progress.set_graph_busy(true);
+        assert_eq!(progress.status().what, "mapping symbols");
+        progress.set_graph_busy(false);
 
         // Each index phase reads as what it is, and the file counter climbs.
-        progress::set_index_busy(true);
+        progress.set_index_busy(true);
         for (phase, want) in [
             (1u8, "reading the index cache"),
             (2, "indexing"),
             (3, "checking for changes"),
         ] {
-            progress::begin(phase);
-            let st = progress::status();
+            progress.begin(phase);
+            let st = progress.status();
             assert!(st.working, "phase {phase} should read as working");
             assert_eq!(st.what, want);
             assert_eq!(st.files, 0, "each phase starts its own count");
-            progress::file();
-            progress::file();
-            assert_eq!(progress::status().files, 2);
+            progress.file();
+            progress.file();
+            assert_eq!(progress.status().files, 2);
         }
 
         // Finishing publishes the chunk count and holds it briefly. Warm, the
         // whole pass is ~30ms against a ~75ms frame, so without the linger the
         // indicator lands between two frames and is never drawn — which is
         // exactly how this shipped the first time.
-        progress::done(1799);
-        progress::set_index_busy(false);
-        let end = progress::status();
+        progress.done(1799);
+        progress.set_index_busy(false);
+        let end = progress.status();
         assert!(end.working, "the result must survive at least one frame");
         assert_eq!(end.what, "index ready");
         assert_eq!(end.chunks, 1799);
 
         // …and then get out of the way.
-        progress::expire_for_test();
-        let after = progress::status();
+        progress.expire();
+        let after = progress.status();
         assert!(!after.working, "the row must clear once it has been seen");
         assert_eq!(after.what, "");
     }
