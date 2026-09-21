@@ -129,6 +129,41 @@ jobs:
           "$prefix/bin/koda" --version | grep -q '0.1.0'
           echo "prebuilt installed and runs"
 
+  # --------------------------------------------------------------------------
+  # Other Linux distributions, in containers: the prebuilt binary must run on
+  # more than the Ubuntu it was built on, and the installer must work with
+  # each one's shell and tools.
+  # --------------------------------------------------------------------------
+  distros:
+    name: Install on ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12
+            prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git >/dev/null
+          - image: ubuntu:22.04
+            prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git >/dev/null
+          - image: fedora:41
+            prep: dnf install -y -q curl git tar gzip findutils >/dev/null
+          - image: archlinux:latest
+            prep: pacman -Sy --noconfirm --quiet curl git tar gzip >/dev/null
+    steps:
+      - name: Prepare
+        run: ${{ matrix.prep }}
+      - uses: actions/checkout@v4
+      - name: Install a prebuilt release
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd --version 2>&1 | head -1 || true
+          prefix="$(mktemp -d)/koda"
+          cd "$(mktemp -d)"
+          KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
+          "$prefix/bin/koda" --version
+
   windows:
     name: Install on Windows
     runs-on: windows-latest
