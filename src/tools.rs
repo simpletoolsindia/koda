@@ -3025,6 +3025,154 @@ fn augmented_path() -> Option<std::ffi::OsString> {
     std::env::join_paths(dirs_in).ok()
 }
 
+/// Run the child in a session of its own, with no controlling terminal.
+///
+/// `stdin` is already closed, but `sudo`, `ssh` and git's credential prompt do
+/// not read stdin: they open `/dev/tty` — the terminal koda is drawing on —
+/// write their prompt straight onto the screen and wait for keys koda is
+/// reading. The TUI was left scrambled and the command hung. Without a
+/// controlling terminal there is no `/dev/tty` to open, so they fail at once
+/// ("a terminal is required to read the password") and say so on stderr,
+/// where koda shows it and the model can act on it.
+#[cfg(unix)]
+fn detach_from_terminal(cmd: &mut tokio::process::Command) {
+    // SAFETY: `setsid` is async-signal-safe and touches no memory; it is the
+    // one call made between fork and exec, which is exactly what `pre_exec`
+    // permits. Its failure (already a session leader) is harmless.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_from_terminal(_cmd: &mut tokio::process::Command) {}
+
+/// What a password prompt that could not be answered looks like, and what to
+/// tell the model to do instead.
+fn password_hint(stderr: &str) -> Option<&'static str> {
+    let e = stderr.to_ascii_lowercase();
+    let wants = e.contains("a terminal is required to read the password")
+        || e.contains("a password is required")
+        || e.contains("sudo: no tty present")
+        || e.contains("terminal prompts disabled")
+        || e.contains("permission denied (publickey,password")
+        || e.contains("could not read username")
+        || e.contains("could not read password");
+    wants.then_some(
+        "This command asked for a password or login, which koda cannot type. \
+         Do not retry it. Tell the user the exact command, and ask them to run it \
+         themselves in another terminal (or to set up passwordless access), then \
+         continue once they have.",
+    )
+}
+
+/// Turn what a program wrote for a terminal into the text a person reads.
+///
+/// Programs that ignore `TERM=dumb` still draw progress with control
+/// sequences — `ollama pull` sends `ESC[1G` (cursor to column 1) and `ESC[K`
+/// (erase line) hundreds of times a second. Passed through, the terminal
+/// *executed* them inside koda's screen: the cursor jumped, the screen no
+/// longer matched what koda believed it had drawn, and fragments of old lines
+/// were left behind. This interprets the few that matter the way a terminal
+/// would — carriage return and cursor-to-column-1 restart the line,
+/// cursor-up takes the line above back, backspace deletes — drops every other
+/// escape and control character, and folds runs of identical lines into one.
+pub fn clean_output(raw: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => lines.push(std::mem::take(&mut cur)),
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    continue;
+                }
+                cur.clear();
+            }
+            '\u{8}' => {
+                cur.pop();
+            }
+            '\t' => cur.push_str("    "),
+            '\u{1b}' | '\u{9b}' => {
+                let csi = c == '\u{9b}' || chars.peek() == Some(&'[');
+                if c == '\u{1b}' {
+                    match chars.next() {
+                        Some('[') => {}
+                        // OSC: to BEL or ST.
+                        Some(']') => {
+                            while let Some(x) = chars.next() {
+                                if x == '\u{7}'
+                                    || (x == '\u{1b}' && chars.next_if_eq(&'\\').is_some())
+                                {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        // A two-character escape (ESC 7, ESC =, …).
+                        _ => continue,
+                    }
+                }
+                if csi {
+                    let mut param = String::new();
+                    let mut fin = None;
+                    for x in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&x) {
+                            fin = Some(x);
+                            break;
+                        }
+                        param.push(x);
+                    }
+                    match fin {
+                        // Cursor to column 1: the line is being redrawn.
+                        Some('G') if param.is_empty() || param == "1" || param == "0" => {
+                            cur.clear()
+                        }
+                        // Cursor up: the line above is being redrawn.
+                        Some('A') | Some('F') => {
+                            let n: usize = param.parse().unwrap_or(1).max(1);
+                            cur.clear();
+                            for _ in 0..n {
+                                lines.pop();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {}
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    // Fold runs of identical lines.
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let mut j = i + 1;
+        while j < lines.len() && lines[j] == lines[i] {
+            j += 1;
+        }
+        out.push(lines[i].trim_end().to_string());
+        if j - i > 2 {
+            out.push(format!(
+                "… the line above repeated {} more times",
+                j - i - 1
+            ));
+        } else if j - i == 2 {
+            out.push(lines[i].trim_end().to_string());
+        }
+        i = j;
+    }
+    out.join("\n")
+}
+
 async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
     let cmd = match arg_str(args, "command") {
         Ok(c) => c,
@@ -3055,10 +3203,15 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         .env("TERM", "dumb")
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
+        // Never wait on a credential prompt nobody can answer.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env_remove("SUDO_ASKPASS")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    detach_from_terminal(&mut cmd_builder);
 
     if let Some(path) = augmented_path() {
         cmd_builder.env("PATH", path);
@@ -3115,6 +3268,8 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         }
     };
     let (stdout, stderr) = (taken(&out_buf), taken(&err_buf));
+    // What a terminal would have shown, not the control codes that draw it.
+    let (stdout, stderr) = (clean_output(&stdout), clean_output(&stderr));
     // With pipefail, a producer cut off by `| head` exits 141 (SIGPIPE): the
     // pipeline did what it was asked, so that is not a failure.
     let sigpipe = code == 141;
@@ -3141,6 +3296,11 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
     }
     if stdout.trim().is_empty() && stderr.trim().is_empty() {
         body.push_str("(no output)\n");
+    }
+    if code != 0 {
+        if let Some(hint) = password_hint(&stderr) {
+            let _ = write!(body, "\n{hint}\n");
+        }
     }
     Outcome {
         ok: code == 0 || sigpipe,
@@ -4634,6 +4794,67 @@ pub const CREATOR_CONTACT: &str = "support@simpletools.in";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// From a real session: `ollama pull` drew its spinner with ESC[1G and
+    /// ESC[K, and the raw codes scrambled koda's screen. What survives is what
+    /// a terminal would have left showing.
+    #[test]
+    fn terminal_control_codes_become_plain_text() {
+        let raw = "\u{1b}[?2026h\u{1b}[?25l\u{1b}[1Gpulling manifest \u{280b} \u{1b}[K\u{1b}[?25h\u{1b}[?2026l\
+\u{1b}[?2026h\u{1b}[1Gpulling manifest \u{2819} \u{1b}[K\u{1b}[1Gpulling manifest done\u{1b}[K\nsuccess\n";
+        assert_eq!(clean_output(raw), "pulling manifest done\nsuccess");
+        // Carriage-return progress, backspace, OSC titles, colours.
+        assert_eq!(clean_output("10%\r50%\r100%\n"), "100%");
+        assert_eq!(clean_output("ab\u{8}c"), "ac");
+        assert_eq!(
+            clean_output("\u{1b}]0;title\u{7}\u{1b}[31mred\u{1b}[0m"),
+            "red"
+        );
+        // Cursor-up redraws of a multi-line progress block.
+        assert_eq!(
+            clean_output("layer 1: 10%\nlayer 2: 5%\n\u{1b}[2Alayer 1: done\nlayer 2: done\n"),
+            "layer 1: done\nlayer 2: done"
+        );
+        // Nothing control-like survives, and repeats fold.
+        let spam = "waiting\n".repeat(50);
+        assert_eq!(
+            clean_output(&spam),
+            "waiting\n… the line above repeated 49 more times"
+        );
+        assert!(clean_output("x\u{7}\u{0}y")
+            .chars()
+            .all(|c| !c.is_control() || c == '\n'));
+        // Plain output is untouched.
+        assert_eq!(clean_output("a\n\nb"), "a\n\nb");
+    }
+
+    #[test]
+    fn a_password_prompt_is_explained_not_retried() {
+        assert!(password_hint(
+            "sudo: a terminal is required to read the password; either use the -S option"
+        )
+        .is_some());
+        assert!(password_hint(
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        )
+        .is_some());
+        assert!(password_hint("error: file not found").is_none());
+    }
+
+    /// A child has no controlling terminal: `/dev/tty` cannot be opened, so a
+    /// password prompt can never reach the screen koda is drawing on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commands_cannot_reach_the_terminal() {
+        let dir = fixture("tty");
+        let c = ctx(&dir);
+        let out = run_command(
+            &serde_json::json!({"command": "(echo hi > /dev/tty) 2>/dev/null && echo reached || echo detached"}),
+            &c,
+        )
+        .await;
+        assert!(out.content.contains("detached"), "{}", out.content);
+    }
 
     /// Every way a command line can reach git is caught; things that only
     /// mention it are not.

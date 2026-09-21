@@ -1030,6 +1030,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "libc",
  "pdf-extract",
  "quick-xml 0.36.2",
  "ratatui",

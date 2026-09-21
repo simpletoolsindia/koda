@@ -73,6 +73,11 @@ tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-go = { version = "0.25", optional = true }
 
+# `setsid` for commands koda runs, so a program that opens the terminal
+# directly (sudo, ssh and git asking for a password) cannot draw over the TUI.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["docs", "pdf", "treesitter"]
 docs = ["dep:calamine", "dep:zip", "dep:quick-xml"]

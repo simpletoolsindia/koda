@@ -365,6 +365,7 @@ impl Transcript {
     }
 
     pub fn assistant_delta(&mut self, chunk: &str) {
+        let chunk = &*strip_controls(chunk);
         self.close_reasoning();
         let last = self.blocks.len().saturating_sub(1);
         if let Some(Block {
@@ -456,6 +457,7 @@ impl Transcript {
     }
 
     pub fn reasoning_delta(&mut self, chunk: &str) {
+        let chunk = &*strip_controls(chunk);
         let last = self.blocks.len().saturating_sub(1);
         if let Some(Block {
             item: Item::Reasoning { text, elapsed, .. },
@@ -531,6 +533,7 @@ impl Transcript {
     /// One live card per call, at the tail. Only file writes and edits get
     /// one — for anything else the status row's "running …" says enough.
     pub fn draft(&mut self, index: usize, name: &str, target: &str, text: &str) {
+        let text = &*strip_controls(text);
         if !matches!(name, "write_file" | "edit_file") {
             return;
         }
@@ -861,6 +864,15 @@ impl Transcript {
                             cut,
                         )
                     }
+                };
+                // Nothing drawn may carry a control character: the terminal
+                // would run it instead of showing it. The streaming tail is
+                // cleaned as its text arrives instead — scanning it on every
+                // frame would make a long reply quadratic.
+                let lines = if i == last_i && is_streamed(&b.item) {
+                    lines
+                } else {
+                    screen_safe(lines)
                 };
                 // Retention accounting: the old lines (if any) go, the new
                 // ones stay, so the budget below sees the truth.
@@ -1704,6 +1716,78 @@ fn render_draft(
     )
 }
 
+/// The last line of defence for the screen: every span drawn in the
+/// transcript, with any control character removed.
+///
+/// A file read, a model's reply or a tool's output can carry ESC sequences,
+/// carriage returns or backspaces. In a span they are not text — the terminal
+/// executes them in the middle of koda's frame, moves the cursor, and leaves
+/// the screen out of step with what ratatui believes it drew, which is how
+/// stray fragments ended up littered down the left edge. `run_command`
+/// already cleans what it captures; this covers everything else, and costs a
+/// byte scan per span when there is nothing to do.
+/// Text that streams in and is cleaned on arrival (`strip_controls`).
+fn is_streamed(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::Assistant(_) | Item::Reasoning { .. } | Item::Draft { .. }
+    )
+}
+
+/// Control characters out of a chunk of streamed text, keeping its newlines:
+/// escape sequences and their parameters, carriage returns, bells. Cheap when
+/// there are none, which is nearly always.
+pub fn strip_controls(chunk: &str) -> std::borrow::Cow<'_, str> {
+    if !chunk
+        .chars()
+        .any(|c| (c.is_control() && c != '\n') || c == '\u{9b}')
+    {
+        return std::borrow::Cow::Borrowed(chunk);
+    }
+    let mut out = String::with_capacity(chunk.len());
+    let mut it = chunk.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            '\u{1b}' => match it.next() {
+                Some('[') => {
+                    for x in it.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&x) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(x) = it.next() {
+                        if x == '\u{7}' || (x == '\u{1b}' && it.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c if c.is_control() || c == '\u{9b}' => {}
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn screen_safe(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    for line in &mut lines {
+        for span in &mut line.spans {
+            if span.content.bytes().any(|b| b < 0x20 || b == 0x7f)
+                || span.content.contains(['\u{9b}', '\u{85}'])
+            {
+                let clean = crate::tools::clean_output(&span.content).replace('\n', " ");
+                span.content = clean.into();
+            }
+        }
+    }
+    lines
+}
+
 /// "search \"q\" (6 results)" under a SEARCH label says "search" twice: drop
 /// the summary's leading verb when it is the label's own ("fetched" under
 /// FETCH, "searching" under SEARCH).
@@ -1901,10 +1985,22 @@ fn render_tool(
             }
             let head =
                 panel::status_line_badged(Some(icon), title, None, badge.clone(), &meta, t, g);
-            let mut body = vec![Line::from(vec![
-                Span::styled("$ ".to_string(), t.dim()),
-                Span::styled(command.clone(), t.emphasis(t.text)),
-            ])];
+            // One row per line of the command, each inside the rail. A
+            // multi-line command in a single span carried its newlines onto
+            // the screen, which broke the rail and drew outside the card.
+            let mut body: Vec<Line<'static>> = Vec::new();
+            for (i, cl) in command.lines().enumerate() {
+                for (j, piece) in md::hard_wrap(cl.trim_end(), avail.saturating_sub(6))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let lead = if i == 0 && j == 0 { "$ " } else { "  " };
+                    body.push(Line::from(vec![
+                        Span::styled(lead.to_string(), t.dim()),
+                        Span::styled(piece, t.emphasis(t.text)),
+                    ]));
+                }
+            }
             let out = if stdout.is_empty() { stderr } else { stdout };
             let stream_style = if stdout.is_empty() && !stderr.is_empty() {
                 t.fg(t.warning)
@@ -2777,6 +2873,43 @@ mod tests {
             one.relayout(40);
             assert_eq!(shot(&mut inc), shot(&mut one), "diverged at reveal {chars}");
         }
+    }
+
+    /// Whatever a file or a reply contains, nothing drawn carries a control
+    /// character, and a multi-line command stays inside its card.
+    #[test]
+    fn nothing_drawn_can_move_the_cursor() {
+        let mut t = tr();
+        t.user("q".into());
+        t.assistant_delta("colour \u{1b}[31mred\u{1b}[0m and a \rreturn");
+        t.tool_start("1".into(), "run_command".into(), "$ a".into(), 0);
+        t.tool_end(
+            "1",
+            true,
+            "ok".into(),
+            String::new(),
+            crate::tools::ToolView::Run {
+                command: "pkill x\nsleep 1\ncd /tmp && ls".into(),
+                stdout: "\u{1b}[1Gpulling\u{1b}[K".into(),
+                stderr: String::new(),
+                code: 0,
+            },
+        );
+        t.relayout(80);
+        for l in t.window(0, 200) {
+            for s in &l.spans {
+                assert!(
+                    !s.content.chars().any(|c| c.is_control()),
+                    "control character in {:?}",
+                    s.content
+                );
+            }
+        }
+        let screen = text(&mut t);
+        assert!(
+            screen.contains("$ pkill x") && screen.contains("sleep 1"),
+            "{screen}"
+        );
     }
 
     /// Every tool emoji is two columns on every terminal: a default-emoji

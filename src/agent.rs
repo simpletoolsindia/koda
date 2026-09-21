@@ -7140,7 +7140,17 @@ pub fn label_for(name: &str, args: &Value) -> String {
         ),
         "find_files" => format!("find {}", s("glob")),
         "search" => format!("search /{}/", s("pattern")),
-        "run_command" => format!("$ {}", s("command")),
+        // One line: a multi-line command's rows joined with a visible mark,
+        // rather than run together ("2>/dev/nullsleep 1cd …").
+        "run_command" => format!(
+            "$ {}",
+            s("command")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ⏎ ")
+        ),
         "codegraph" => {
             let q = if s("query").is_empty() {
                 "overview"
