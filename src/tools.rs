@@ -1684,9 +1684,17 @@ pub fn preview(name: &str, args: &Value, ctx: &ToolCtx) -> Option<String> {
                     arg_bool(args, "replace_all"),
                 ));
             }
+            // Same LF view of a CRLF file as `edit_file` edits, so the preview
+            // shows the change that will actually be made.
+            let content = if is_crlf(&content) {
+                content.replace("\r\n", "\n")
+            } else {
+                content
+            };
             let mut replaced = content.clone();
             for (old_s, new_s, all) in &edits {
-                if let Ok((updated, _)) = apply_edit(&replaced, old_s, new_s, *all) {
+                let (old_s, new_s) = (old_s.replace("\r\n", "\n"), new_s.replace("\r\n", "\n"));
+                if let Ok((updated, _)) = apply_edit(&replaced, &old_s, &new_s, *all) {
                     replaced = updated;
                 }
             }
@@ -1797,9 +1805,20 @@ fn run_sync(name: &str, args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let path = arg_str(args, "path")?;
     let full = resolve(ctx, &path)?;
+    // A model that has listed a directory still misremembers where a file sat:
+    // the right name under a sibling directory, a parent it made up, the wrong
+    // extension. "no such file" alone makes it guess again, so say where files
+    // with that name actually are. Only say: reading one in its place would
+    // hand a model checking whether a copy exists yet (a port, a new module
+    // mirroring an old one) the original, under the name it asked about.
     let meta = match std::fs::metadata(&full) {
         Ok(m) => m,
-        Err(_) => return Ok(Outcome::err(format!("no such file: {path}"))),
+        Err(_) => {
+            return Ok(Outcome::err(format!(
+                "no such file: {path}{}",
+                did_you_mean(ctx, &full)
+            )))
+        }
     };
     if meta.is_dir() {
         return Ok(Outcome::err(format!("{path} is a directory; use list_dir")));
@@ -1849,7 +1868,10 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     };
 
     let offset = arg_usize(args, "offset").unwrap_or(1).max(1);
-    let limit = arg_usize(args, "limit").unwrap_or(usize::MAX);
+    // `limit: 0` is a model saying "no limit", not asking for zero lines.
+    let limit = arg_usize(args, "limit")
+        .filter(|&n| n > 0)
+        .unwrap_or(usize::MAX);
     // Counting is a scan; collecting every line of a large file into a Vec is a
     // scan plus an allocation per page read, and a model paging through a file
     // does this on every call.
@@ -1918,6 +1940,84 @@ fn read_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     }))
 }
 
+/// `\ndid you mean …` naming workspace files a model most likely meant by
+/// `missing`, a path that does not exist; empty when nothing is close.
+fn did_you_mean(ctx: &ToolCtx, missing: &Path) -> String {
+    match near_misses(ctx, missing).as_slice() {
+        [] => String::new(),
+        [one] => format!("\ndid you mean: {one}"),
+        many => format!("\ndid you mean one of:\n  {}", many.join("\n  ")),
+    }
+}
+
+/// Workspace files a model most likely meant by `missing`, best first: files
+/// with the same name, then the same stem with another extension; within each,
+/// the ones sharing more of the requested directories.
+fn near_misses(ctx: &ToolCtx, missing: &Path) -> Vec<String> {
+    const SCAN_CAP: usize = 20_000;
+    const SHOWN: usize = 5;
+    let Some(name) = missing
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+    else {
+        return Vec::new();
+    };
+    let stem = missing
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let wanted_dirs: Vec<String> = missing
+        .strip_prefix(&ctx.root)
+        .unwrap_or(missing)
+        .parent()
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // (same stem only, directories not shared, path)
+    let mut hits: Vec<(bool, usize, PathBuf)> = Vec::new();
+    for e in walker(&ctx.root, None).flatten().take(SCAN_CAP) {
+        if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let p = e.path();
+        let cand_name = p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        let exact = cand_name.as_deref() == Some(name.as_str());
+        let same_stem = !stem.is_empty()
+            && p.file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .as_deref()
+                == Some(stem.as_str());
+        if !exact && !same_stem {
+            continue;
+        }
+        let rel_parent = p.strip_prefix(&ctx.root).unwrap_or(p).parent();
+        let shared = rel_parent
+            .map(|d| {
+                d.components()
+                    .filter(|c| {
+                        let c = c.as_os_str().to_string_lossy().to_lowercase();
+                        wanted_dirs.contains(&c)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        hits.push((
+            !exact,
+            wanted_dirs.len().saturating_sub(shared),
+            p.to_path_buf(),
+        ));
+    }
+    hits.sort();
+    hits.into_iter()
+        .take(SHOWN)
+        .map(|(_, _, p)| rel(ctx, &p))
+        .collect()
+}
+
 /// Language tag for a path, used to pick a syntax highlighter.
 fn lang_of(p: &Path) -> String {
     p.extension()
@@ -1948,8 +2048,25 @@ fn list_dir(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         .unwrap_or(".")
         .to_string();
     let full = resolve(ctx, &path)?;
+    if full.is_file() {
+        return Ok(Outcome::err(format!(
+            "{path} is a file, not a directory; use read_file"
+        )));
+    }
     if !full.is_dir() {
-        return Ok(Outcome::err(format!("not a directory: {path}")));
+        // Point at the deepest part of the path that does exist, so the next
+        // call lists that instead of guessing another name.
+        let parent = full.ancestors().skip(1).find(|a| a.is_dir());
+        let hint = parent
+            .map(|a| {
+                let r = rel(ctx, a);
+                format!(
+                    "; the nearest existing directory is {}",
+                    if r.is_empty() { "." } else { &r }
+                )
+            })
+            .unwrap_or_default();
+        return Ok(Outcome::err(format!("no such directory: {path}{hint}")));
     }
     let depth = arg_usize(args, "depth").unwrap_or(1).clamp(1, 8);
     let mut entries: Vec<(bool, String, u64)> = Vec::new();
@@ -1972,7 +2089,15 @@ fn list_dir(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     }
     entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let count = entries.len();
-    let mut out = format!("{}/\n", rel(ctx, &full));
+    // The root's relative path is empty, and "/" on its own reads as the
+    // filesystem root — which sent models off to read absolute paths.
+    let shown = rel(ctx, &full);
+    let shown = if shown.is_empty() {
+        "."
+    } else {
+        shown.as_str()
+    };
+    let mut out = format!("{shown}/\n");
     // Tree connectors: the shape of the listing is the information.
     for (i, (is_dir, name, size)) in entries.iter().enumerate() {
         let connector = if i + 1 == entries.len() {
@@ -2039,7 +2164,8 @@ fn glob_hit(m: &globset::GlobMatcher, relative: &Path) -> bool {
 }
 
 fn find_files(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
-    let pattern = arg_str(args, "glob")?;
+    // `pattern` is what `search` calls its argument, and models carry it over.
+    let pattern = arg_str(args, "glob").or_else(|_| arg_str(args, "pattern"))?;
     let base = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     let root = resolve(ctx, base)?;
     let limit = arg_usize(args, "limit").unwrap_or(200).min(2000);
@@ -2342,12 +2468,17 @@ fn write_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     let verb = if existed { "overwrote" } else { "created" };
     let diff = unified_diff(&old, &content, &rel(ctx, &full));
     let (added, removed) = diff_stats(&diff);
+    // A new file's diff is the content the model just wrote, every line of it
+    // prefixed with `+` — echoed back, then resent with every later request.
+    // The user still sees it (the view below); the model only needs to know it
+    // landed. An overwrite keeps its diff: what changed is news to the model.
+    let body = if existed {
+        format!("\n{}", truncate(&diff, 4000))
+    } else {
+        String::new()
+    };
     Ok(Outcome::ok(
-        format!(
-            "{verb} {} ({lines} lines)\n{}",
-            rel(ctx, &full),
-            truncate(&diff, 4000)
-        ),
+        format!("{verb} {} ({lines} lines){body}", rel(ctx, &full)),
         format!(
             "{verb} {} ({lines} lines, {})",
             rel(ctx, &full),
@@ -2379,11 +2510,16 @@ const STREAM_CHUNK: usize = 64 * 1024;
 /// which shows up as a diff of the whole file and a repository full of mixed
 /// endings. The file's own convention wins; a new file keeps what the model
 /// wrote.
+/// Whether most of `text`'s line breaks are CRLF. Majority rules: one stray
+/// CRLF in an LF file should not convert the file.
+fn is_crlf(text: &str) -> bool {
+    let crlf = text.matches("\r\n").count();
+    let lf_only = text.matches('\n').count() - crlf;
+    crlf > 0 && crlf > lf_only
+}
+
 fn match_line_endings(existing: &str, content: String) -> String {
-    let crlf = existing.matches("\r\n").count();
-    // Majority rules: one stray CRLF in an LF file should not convert the file.
-    let lf_only = existing.matches('\n').count() - crlf;
-    if crlf == 0 || crlf <= lf_only {
+    if !is_crlf(existing) {
         return content;
     }
     if content.contains("\r\n") {
@@ -2504,7 +2640,13 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
 
     let original = match std::fs::read_to_string(&full) {
         Ok(c) => c,
-        Err(_) => return Ok(Outcome::err(format!("cannot read {path}"))),
+        Err(_) if !full.exists() => {
+            return Ok(Outcome::err(format!(
+                "no such file: {path}; use write_file to create it{}",
+                did_you_mean(ctx, &full)
+            )));
+        }
+        Err(e) => return Ok(Outcome::err(format!("cannot read {path}: {e}"))),
     };
 
     // Collect the edits: either a single {old,new,replace_all} or a list under
@@ -2554,10 +2696,24 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     // Apply each edit to the working copy, matching exactly first and falling
     // back to a whitespace-tolerant match so a slightly mis-indented `old` (the
     // most common small-model mistake) still lands instead of failing outright.
-    let mut content = original.clone();
+    // Models write `\n` whatever the file uses, so in a CRLF file no `old`
+    // spanning a line break could ever match. Edit an LF copy; the write below
+    // puts the file's own line endings back.
+    let crlf = is_crlf(&original);
+    let base = if crlf {
+        original.replace("\r\n", "\n")
+    } else {
+        original.clone()
+    };
+    let mut content = base.clone();
     let mut total_reps = 0usize;
     for (i, (old_s, new_s, replace_all)) in edits.iter().enumerate() {
-        match apply_edit(&content, old_s, new_s, *replace_all) {
+        let (old_s, new_s) = if crlf {
+            (old_s.replace("\r\n", "\n"), new_s.replace("\r\n", "\n"))
+        } else {
+            (old_s.clone(), new_s.clone())
+        };
+        match apply_edit(&content, &old_s, &new_s, *replace_all) {
             Ok((updated, reps)) => {
                 content = updated;
                 total_reps += reps;
@@ -2573,7 +2729,7 @@ fn edit_file(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         }
     }
 
-    if content == original {
+    if content == base {
         return Ok(Outcome::err(format!(
             "{path}: no change (old and new are identical)"
         )));
@@ -2652,10 +2808,59 @@ fn apply_edit(
         );
     }
 
-    bail!(
-        "`old` text not found. Re-read the file and copy the exact text, including indentation \
-         and surrounding lines"
-    )
+    match closest_region(content, old_s) {
+        Some(region) => bail!(
+            "`old` text not found. The closest lines in the file are below; copy `old` from \
+             them exactly (without the line numbers) rather than re-reading the whole file:\n{region}"
+        ),
+        None => bail!(
+            "`old` text not found. Re-read the file and copy the exact text, including \
+             indentation and surrounding lines"
+        ),
+    }
+}
+
+/// The part of `content` that best lines up with `needle`, numbered like
+/// `read_file` output, for an edit whose `old` text did not match. Most misses
+/// are one stale or misremembered line inside an otherwise right block; showing
+/// that block lets the model fix `old` without paying for a full re-read.
+/// `None` when no line of `needle` appears in the file at all.
+fn closest_region(content: &str, needle: &str) -> Option<String> {
+    const CONTEXT: usize = 2;
+    const MAX_LINES: usize = 40;
+    let want: Vec<&str> = needle.lines().map(str::trim).collect();
+    let lines: Vec<&str> = content.lines().collect();
+    if want.is_empty() || lines.is_empty() {
+        return None;
+    }
+    // For every alignment of `needle` against the file, count lines that agree
+    // (ignoring blank ones, which agree with everything).
+    let mut best = (0usize, 0usize);
+    let span = want.len();
+    for start in 0..lines.len() {
+        let hits = (0..span)
+            .filter(|&k| {
+                let w = want[k];
+                !w.is_empty() && lines.get(start + k).is_some_and(|l| l.trim() == w)
+            })
+            .count();
+        if hits > best.0 {
+            best = (hits, start);
+        }
+    }
+    if best.0 == 0 {
+        return None;
+    }
+    let from = best.1.saturating_sub(CONTEXT);
+    let to = (best.1 + span + CONTEXT)
+        .min(lines.len())
+        .min(from + MAX_LINES);
+    let width = to.to_string().len().max(3);
+    let mut out = String::new();
+    for (i, line) in lines[from..to].iter().enumerate() {
+        let _ = writeln!(out, "{:>width$}| {line}", from + i + 1, width = width);
+    }
+    Some(out)
 }
 
 /// Find the byte span of the first contiguous line-run in `content` that equals
@@ -4197,7 +4402,6 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
         .and_then(|t| t.as_str())
         .unwrap_or("");
     let text = sanitize_text(text_val);
-    let body = truncate(text.trim(), cap);
 
     let elements_block = if let Some(idx) = snapshot_idx {
         if let Some(snap) = results
@@ -4207,6 +4411,11 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
             .and_then(|s| s.as_str())
         {
             if !snap.trim().is_empty() {
+                // A documentation page can list thousands of links here, and
+                // this block used to sit outside the cap: one page came back at
+                // 90KB against a 24KB limit. Half the cap for elements, and the
+                // page text gets whatever they leave.
+                let snap = truncate(snap, cap / 2);
                 format!("\n\nInteractive Elements:\n{snap}\n(Target elements using @e1, @e2... or CSS selectors)")
             } else {
                 String::new()
@@ -4217,6 +4426,11 @@ fn browse(args: &Value, ctx: &ToolCtx) -> Result<Outcome> {
     } else {
         String::new()
     };
+
+    let body = truncate(
+        text.trim(),
+        cap.saturating_sub(elements_block.len()).max(cap / 2),
+    );
 
     let tabs_block = if let Some(tabs) = results
         .get(get_tabs_idx)
@@ -5620,6 +5834,90 @@ mod tests {
     }
 
     #[test]
+    fn apply_edit_miss_shows_the_closest_lines() {
+        let content = "fn a() {}\n\nfn device() -> Device {\n    // on this Mac\n    cpu()\n}\n";
+        let old = "fn device() -> Device {\n    // on this machine\n    cpu()\n}";
+        let err = apply_edit(content, old, "x", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("  4|     // on this Mac"), "{err}");
+        assert!(err.contains("  3| fn device()"), "{err}");
+        // Nothing in common: fall back to the plain advice.
+        let err = apply_edit(content, "zzz", "x", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Re-read the file"), "{err}");
+    }
+
+    #[test]
+    fn edit_file_matches_lf_text_in_a_crlf_file_and_keeps_crlf() {
+        let dir = std::env::temp_dir().join("koda-edit-crlf");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w.rs"), "fn a() {}\r\nfn b() {}\r\nfn c() {}\r\n").unwrap();
+        let out = edit_file(
+            &json!({"path": "w.rs", "old": "fn a() {}\nfn b() {}", "new": "fn a() {}\nfn b2() {}"}),
+            &ctx(&dir),
+        )
+        .unwrap();
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("w.rs")).unwrap(),
+            "fn a() {}\r\nfn b2() {}\r\nfn c() {}\r\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_file_does_not_echo_a_new_file_back_to_the_model() {
+        let dir = fixture("write-echo");
+        let c = ctx(&dir);
+        let out = write_file(&json!({"path": "n.txt", "content": "alpha\nbeta\n"}), &c).unwrap();
+        assert_eq!(out.content, "created n.txt (2 lines)");
+        // An overwrite still reports what changed.
+        let out = write_file(&json!({"path": "n.txt", "content": "alpha\ngamma\n"}), &c).unwrap();
+        assert!(
+            out.content.contains("-beta") && out.content.contains("+gamma"),
+            "{}",
+            out.content
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_treats_limit_zero_as_no_limit() {
+        let dir = fixture("read-limit-zero");
+        let out = read_file(&json!({"path": "src/main.rs", "limit": 0}), &ctx(&dir)).unwrap();
+        assert!(out.content.contains("fn main"), "{}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_files_accepts_pattern_for_glob() {
+        let dir = fixture("find-pattern");
+        let out = find_files(&json!({"pattern": "**/*.rs"}), &ctx(&dir)).unwrap();
+        assert!(out.content.contains("src/main.rs"), "{}", out.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn edit_file_on_a_missing_path_suggests_the_real_one() {
+        let dir = fixture("edit-near-miss");
+        let out = edit_file(
+            &json!({"path": "lib.rs", "old": "a", "new": "b"}),
+            &ctx(&dir),
+        )
+        .unwrap();
+        assert!(!out.ok);
+        assert!(
+            out.content.contains("did you mean: src/lib.rs"),
+            "{}",
+            out.content
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn apply_edit_reports_missing_text_clearly() {
         let err = apply_edit("hello\n", "nonexistent", "x", false)
             .unwrap_err()
@@ -5777,6 +6075,91 @@ mod tests {
 
         let missing = read_file(&json!({"path": "nope.rs"}), &c).unwrap();
         assert!(!missing.ok);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The failures seen in real sessions: the right file name under a sibling
+    /// directory (`engine/src/session.rs` for `studio/src/session.rs`), and the
+    /// right stem with the wrong extension.
+    #[test]
+    fn read_file_names_the_file_a_misremembered_path_meant() {
+        let dir = std::env::temp_dir().join("koda-read-near-miss");
+        std::fs::remove_dir_all(&dir).ok();
+        for d in [
+            "native/studio/src",
+            "native/engine/src",
+            "scripts",
+            "a",
+            "b",
+        ] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("native/studio/src/session.rs"), "// session\n").unwrap();
+        std::fs::write(dir.join("native/engine/src/lib.rs"), "\n").unwrap();
+        std::fs::write(dir.join("scripts/fetch-runtime.ps1"), "\n").unwrap();
+        std::fs::write(dir.join("a/mod.rs"), "\n").unwrap();
+        std::fs::write(dir.join("b/mod.rs"), "\n").unwrap();
+        let c = ctx(&dir);
+
+        // One file has that name: name it, but never read it in its place —
+        // the missing path may be a copy that does not exist yet.
+        let out = read_file(&json!({"path": "native/engine/src/session.rs"}), &c).unwrap();
+        assert!(!out.ok);
+        assert!(!out.content.contains("// session"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("did you mean: native/studio/src/session.rs"),
+            "{}",
+            out.content
+        );
+
+        // Same stem, other extension: suggest, never silently substitute.
+        let out = read_file(&json!({"path": "native/scripts/fetch-runtime.js"}), &c).unwrap();
+        assert!(!out.ok);
+        assert!(
+            out.content.contains("scripts/fetch-runtime.ps1"),
+            "{}",
+            out.content
+        );
+
+        // Several files with the name: list them, the closer directory first.
+        let out = read_file(&json!({"path": "b/x/mod.rs"}), &c).unwrap();
+        assert!(!out.ok);
+        let (a, b) = (out.content.find("a/mod.rs"), out.content.find("b/mod.rs"));
+        assert!(b.is_some() && a.is_some() && b < a, "{}", out.content);
+
+        // Nothing like it anywhere: the plain error.
+        let out = read_file(&json!({"path": "nothing.txt"}), &c).unwrap();
+        assert!(
+            out.content.ends_with("no such file: nothing.txt"),
+            "{}",
+            out.content
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_dir_says_what_is_wrong_with_the_path() {
+        let dir = fixture("list-bad-path");
+        let c = ctx(&dir);
+        let out = list_dir(&json!({"path": "src/main.rs"}), &c).unwrap();
+        assert!(out.content.contains("is a file"), "{}", out.content);
+        let out = list_dir(&json!({"path": "src/nope/deeper"}), &c).unwrap();
+        assert!(
+            out.content.contains(
+                "no such directory: src/nope/deeper; the nearest existing directory is src"
+            ),
+            "{}",
+            out.content
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_dir_names_the_root_as_dot() {
+        let dir = fixture("list-root");
+        let out = list_dir(&json!({}), &ctx(&dir)).unwrap();
+        assert!(out.content.starts_with("./\n"), "{}", out.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 

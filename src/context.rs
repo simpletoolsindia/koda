@@ -209,6 +209,91 @@ impl Block {
     }
 }
 
+/// Curation that keeps its answer while the answer still fits.
+///
+/// `curate` is a pure function of the history, and its ladder is counted back
+/// from the newest step — so every new step moves every older result to a new
+/// rung and rewrites it. Each request then differs from the last near the very
+/// start, and a server that caches by prefix (llama.cpp, vLLM, every hosted
+/// API) re-reads the whole window on every step once the history has outgrown
+/// the budget: the expensive case, made the permanent one.
+///
+/// So the curated view is frozen. Later steps send it unchanged with only the
+/// new messages appended, and it is recomputed only when that no longer fits —
+/// down to `HEADROOM` of the budget, so the recompute buys several steps of
+/// cache hits rather than one.
+#[derive(Default)]
+pub struct Curator {
+    frozen: Option<Frozen>,
+}
+
+struct Frozen {
+    budget: usize,
+    /// How many history messages `view` stands for, and their fingerprint, so
+    /// a history rewritten underneath (compaction, a cancelled step) is noticed.
+    covered: usize,
+    fingerprint: u64,
+    view: Vec<Message>,
+}
+
+/// Fraction of the budget a recompute curates down to.
+const HEADROOM: (usize, usize) = (3, 4);
+
+impl Curator {
+    /// The view of `history` to send this step, fitted to `budget` tokens.
+    pub fn view(&mut self, history: &[Message], budget: usize) -> (Vec<Message>, Report) {
+        let before = total(history);
+        if before <= budget {
+            self.frozen = None;
+            return curate(history, budget);
+        }
+        if let Some(f) = &self.frozen {
+            if f.budget == budget
+                && history.len() >= f.covered
+                && fingerprint(&history[..f.covered]) == f.fingerprint
+            {
+                let mut view = f.view.clone();
+                view.extend_from_slice(&history[f.covered..]);
+                let after = total(&view);
+                if after <= budget {
+                    let report = Report {
+                        before,
+                        after,
+                        ..Report::default()
+                    };
+                    return (view, report);
+                }
+            }
+        }
+        let target = (budget * HEADROOM.0 / HEADROOM.1).max(1);
+        let (view, report) = curate(history, target);
+        self.frozen = Some(Frozen {
+            budget,
+            covered: history.len(),
+            fingerprint: fingerprint(history),
+            view: view.clone(),
+        });
+        (view, report)
+    }
+}
+
+fn fingerprint(msgs: &[Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in msgs {
+        (m.role as u8).hash(&mut h);
+        m.content.hash(&mut h);
+        m.tool_call_id.hash(&mut h);
+        if let Some(calls) = &m.tool_calls {
+            for c in calls {
+                c.id.hash(&mut h);
+                c.function.arguments.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
 fn blocks(history: &[Message]) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     for m in history {
@@ -450,6 +535,81 @@ mod tests {
             ),
             Message::tool(id, "edit_file", "edited"),
         ]
+    }
+
+    /// How many leading messages two consecutive requests share: what a
+    /// prefix cache can reuse.
+    fn shared_prefix(a: &[Message], b: &[Message]) -> usize {
+        a.iter()
+            .zip(b)
+            .take_while(|(x, y)| {
+                x.content == y.content && x.tool_call_id == y.tool_call_id && x.role == y.role
+            })
+            .count()
+    }
+
+    fn session(steps: usize) -> Vec<Message> {
+        let mut h = vec![Message::user("port the engine to windows")];
+        for i in 0..steps {
+            h.extend(read(
+                &format!("r{i}"),
+                &format!("src/f{i}.rs"),
+                &big(&format!("f{i}")),
+            ));
+        }
+        h
+    }
+
+    #[test]
+    fn curator_keeps_the_prefix_stable_across_steps_once_over_budget() {
+        let budget = 12_000;
+        let full = session(40);
+        // Tokens a prefix cache could not reuse, summed over every request.
+        let (mut cached, mut stateless) = (0usize, 0usize);
+        let mut curator = Curator::default();
+        let (mut prev_c, mut prev_s): (Vec<Message>, Vec<Message>) = (vec![], vec![]);
+        for n in (21..full.len()).step_by(2) {
+            let h = &full[..n];
+            let (v, _) = curator.view(h, budget);
+            let (s, _) = curate(h, budget);
+            assert!(total(&v) <= budget, "over budget at {n}");
+            assert_well_formed(&v);
+            cached += total(&v[shared_prefix(&prev_c, &v)..]);
+            stateless += total(&s[shared_prefix(&prev_s, &s)..]);
+            prev_c = v;
+            prev_s = s;
+        }
+        println!("uncached tokens: frozen {cached}, recomputed {stateless}");
+        // Measured: ~40% less here, where every step adds a sixth of the budget;
+        // ~55% with steps a quarter that size.
+        assert!(
+            cached * 10 < stateless * 7,
+            "frozen {cached} vs recomputed {stateless}"
+        );
+    }
+
+    #[test]
+    fn curator_recomputes_when_the_history_is_rewritten() {
+        let budget = 12_000;
+        let mut h = session(20);
+        let mut curator = Curator::default();
+        let (first, _) = curator.view(&h, budget);
+        // Replace an early message, as compaction would.
+        h[1] = Message::user("summary of everything so far");
+        let (second, _) = curator.view(&h, budget);
+        // Not the stale frozen view: a fresh curation of the rewritten history.
+        let (fresh, _) = curate(&h, budget * HEADROOM.0 / HEADROOM.1);
+        let contents = |v: &[Message]| v.iter().map(|m| m.content.clone()).collect::<Vec<_>>();
+        assert_eq!(contents(&second), contents(&fresh));
+        assert_ne!(contents(&first), contents(&second));
+    }
+
+    #[test]
+    fn curator_passes_a_small_history_through_untouched() {
+        let h = session(1);
+        let (v, report) = Curator::default().view(&h, 100_000);
+        assert_eq!(v.len(), h.len());
+        assert!(!report.changed());
     }
 
     fn big(tag: &str) -> String {

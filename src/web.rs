@@ -65,9 +65,31 @@ pub async fn search_duckduckgo(query: &str, limit: usize) -> Result<Vec<Hit>> {
 
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        tel_warn!("web", "ddg search rejected", "status" => status.as_u16());
-        bail!("DuckDuckGo replied {status}");
+    // When it suspects a bot, the HTML endpoint answers 202 with a challenge
+    // page instead of results. That parses to zero hits, which read to the
+    // model as "nothing on the web about this". The lite endpoint still serves
+    // results then, so ask it instead.
+    let challenged = status.as_u16() == 202 || body.contains("anomaly-modal");
+    if challenged || !status.is_success() {
+        tel_warn!("web", "ddg html search rejected", "status" => status.as_u16());
+        let resp = http
+            .post("https://lite.duckduckgo.com/lite/")
+            .form(&[("q", query), ("kl", "us-en")])
+            .send()
+            .await
+            .context("searching DuckDuckGo")?;
+        let lite_status = resp.status();
+        let lite = resp.text().await.unwrap_or_default();
+        if lite_status.as_u16() == 202 || lite.contains("anomaly-modal") {
+            bail!(
+                "DuckDuckGo is rate-limiting searches from this machine. Wait a minute, or set \
+                 `searx_url` to a SearXNG instance"
+            );
+        }
+        if !lite_status.is_success() {
+            bail!("DuckDuckGo replied {status} (lite endpoint: {lite_status})");
+        }
+        return Ok(parse_ddg_lite(&lite, limit));
     }
 
     let hits = parse_ddg_html(&body, limit);
@@ -107,6 +129,49 @@ fn parse_ddg_html(html: &str, limit: usize) -> Vec<Hit> {
         let snippet = chunk
             .split_once("result__snippet")
             .and_then(|(_, rest)| between(rest, ">", "</a>"))
+            .map(|s| strip_tags(&s))
+            .unwrap_or_default();
+        hits.push(Hit {
+            title,
+            url,
+            snippet,
+            engine: "duckduckgo".into(),
+        });
+    }
+    hits
+}
+
+/// Scrape DuckDuckGo's lite endpoint: a table where each result is an anchor
+/// with class 'result-link' (its href already the real URL) followed by a
+/// 'result-snippet' cell.
+fn parse_ddg_lite(html: &str, limit: usize) -> Vec<Hit> {
+    const LINK: &str = "class='result-link'";
+    let starts: Vec<usize> = html.match_indices(LINK).map(|(i, _)| i).collect();
+    let mut hits = Vec::new();
+    for (n, &at) in starts.iter().enumerate() {
+        if hits.len() >= limit {
+            break;
+        }
+        let tag = html[..at].rfind("<a").map(|t| &html[t..at]).unwrap_or("");
+        let Some(href) = attr_after(tag, "href=\"") else {
+            continue;
+        };
+        let url = decode_ddg_url(&href);
+        // Sponsored rows link through duckduckgo.com itself.
+        if !url.starts_with("http") || url.contains("duckduckgo.com/") {
+            continue;
+        }
+        // Everything up to the next result belongs to this one.
+        let row = &html[at..starts.get(n + 1).copied().unwrap_or(html.len())];
+        let title = between(row, ">", "</a>")
+            .map(|s| strip_tags(&s))
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        let snippet = row
+            .split_once("result-snippet")
+            .and_then(|(_, rest)| between(rest, ">", "</td>"))
             .map(|s| strip_tags(&s))
             .unwrap_or_default();
         hits.push(Hit {
@@ -729,6 +794,33 @@ mod tests {
         assert_eq!(decode_ddg_url(href), "https://ratatui.rs/docs");
         // A protocol-relative bare link.
         assert_eq!(decode_ddg_url("//example.com/x"), "https://example.com/x");
+    }
+
+    #[test]
+    fn parses_duckduckgo_lite_results_and_skips_ads() {
+        let html = concat!(
+            "<a rel=\"nofollow\" href=\"https://duckduckgo.com/y.js?ad=1\" class='result-link'>Ad</a>",
+            "<td class='result-snippet'>buy now</td>",
+            "<a rel=\"nofollow\" href=\"https://docs.rs/regex/\" class='result-link'>regex - <b>Rust</b></a>",
+            "</td></tr><tr><td class='result-snippet'>The <b>regex</b> crate &amp; more</td>",
+            "<a rel=\"nofollow\" href=\"https://github.com/rust-lang/regex\" class='result-link'>GitHub</a>",
+        );
+        let hits = parse_ddg_lite(html, 10);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].url, "https://docs.rs/regex/");
+        assert_eq!(hits[0].title, "regex - Rust");
+        assert_eq!(hits[0].snippet, "The regex crate & more");
+        // No snippet of its own: must not borrow a neighbour's.
+        assert_eq!(hits[1].snippet, "");
+        assert_eq!(parse_ddg_lite(html, 1).len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_duckduckgo_search_returns_hits() {
+        let hits = search_duckduckgo("rust regex crate", 5).await.unwrap();
+        assert!(!hits.is_empty());
+        println!("{hits:#?}");
     }
 
     #[test]

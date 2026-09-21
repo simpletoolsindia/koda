@@ -350,6 +350,8 @@ pub struct Agent {
     /// hidden reasoning); we nudge once with a concrete hint, then stop cleanly
     /// instead of looping. Reset at the start of each top-level turn.
     empty_replies: u32,
+    /// Keeps the curated view stable between steps so the prompt cache holds.
+    curator: crate::context::Curator,
     /// Whether this turn has written source, and whether it has run anything
     /// that could have checked it.
     ///
@@ -688,6 +690,7 @@ impl Agent {
             last_failure: None,
             last_failure_kind: None,
             empty_replies: 0,
+            curator: Default::default(),
             wrote_source: false,
             ran_check: false,
             last_check_ok: None,
@@ -956,6 +959,7 @@ impl Agent {
             last_failure: None,
             last_failure_kind: None,
             empty_replies: 0,
+            curator: Default::default(),
             wrote_source: false,
             ran_check: false,
             last_check_ok: None,
@@ -1659,10 +1663,12 @@ impl Agent {
             // the next request is rejected — so if we break early (cancel, or
             // the repeated-failure breaker) we backfill the rest afterward.
             let mut answered: HashSet<String> = HashSet::new();
-            // Files already written by an earlier call in THIS step. A model
-            // that batches two writes/edits to the same path would have the
-            // second clobber or mis-match the first (its `old` was computed
-            // against the pre-batch content); warn instead of silently corrupt.
+            // Files already written by an earlier call in THIS step. Calls run
+            // in order, so a later `edit_file` sees the earlier change and is
+            // anchored by its `old` text: it either still matches or fails with
+            // "not found". Refusing it cost a turn and a re-read for nothing.
+            // A later `write_file`, though, replaces the whole file and would
+            // silently drop the earlier change — that one is still refused.
             let mut written_this_step: HashSet<String> = HashSet::new();
             for call in &result.calls {
                 if self.cancelled() {
@@ -1671,21 +1677,21 @@ impl Agent {
                 // Guard same-file conflicts within a batch.
                 if matches!(call.function.name.as_str(), "write_file" | "edit_file") {
                     if let Some(p) = call.args().get("path").and_then(|p| p.as_str()) {
-                        let key = p.to_string();
-                        if !written_this_step.insert(key) {
+                        let key = p.trim().trim_start_matches("./").to_string();
+                        let first = written_this_step.insert(key);
+                        if !first && call.function.name == "write_file" {
                             self.history.push(Message::tool(
                                 &call.id,
                                 &call.function.name,
                                 format!(
-                                    "ERROR: {p} was already modified earlier in this same step. \
-                                     Editing it again now would race the previous change. Re-read \
-                                     {p} and make one combined edit (use edit_file's `edits` array \
-                                     for several changes to one file).",
+                                    "ERROR: {p} was already modified earlier in this same step, \
+                                     and write_file would overwrite that change. Use edit_file \
+                                     for further changes to {p}.",
                                 ),
                             ));
                             answered.insert(call.id.clone());
                             let _ = tx.send(Event::Notice(format!(
-                                "skipped a second edit to {p} in one step — ask for one combined edit"
+                                "skipped a write_file that would overwrite this step's earlier change to {p}"
                             )));
                             continue;
                         }
@@ -2416,7 +2422,8 @@ impl Agent {
         // stubbed and old ones squeezed before anything is dropped, so a short
         // context costs detail rather than the task. `self.history` keeps the
         // full record either way.
-        let (curated, report) = crate::context::curate(&self.history, self.send_budget());
+        let budget = self.send_budget();
+        let (curated, report) = self.curator.view(&self.history, budget);
         if report.changed() {
             crate::tel_info!(
                 "context",
@@ -5178,11 +5185,24 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
+        let context = args
+            .get("context")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim();
         let task = args
             .get("task")
             .and_then(|t| t.as_str())
             .unwrap_or("")
             .trim();
+        // Models regularly put the whole brief in `context` and leave `task`
+        // out. The brief is all the subagent needs, so run it rather than spend
+        // a turn on the error.
+        let (task, extra) = if task.is_empty() {
+            (context, "")
+        } else {
+            (task, context)
+        };
         if task.is_empty() {
             return tools::Outcome {
                 ok: false,
@@ -5191,11 +5211,6 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
-        let extra = args
-            .get("context")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .trim();
         let role = args
             .get("role")
             .and_then(|r| r.as_str())
