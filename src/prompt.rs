@@ -64,6 +64,10 @@ Be terse. No preamble, no narration, no restating the task. When done, stop and 
 /// The built-in base system prompt, exposed so the settings editor can
 /// pre-populate its textarea when the user has no custom prompt yet — editing
 /// from the real text is far easier than starting from a blank field.
+/// How many of the newest notes ride in the system prompt; older ones are
+/// recalled per request when they are relevant.
+pub const PROMPT_NOTES: usize = 6;
+
 pub fn base_prompt() -> &'static str {
     BASE
 }
@@ -235,10 +239,9 @@ pub fn build_with_skills(
     }
     p.push_str(&crate::skills::catalogue(skills));
     if cfg.memory {
-        // One note per ~1k of window, between four and twenty: enough to be
-        // useful on a small model without crowding out the request.
-        let notes = (cfg.context_tokens / 1_000).clamp(4, 20);
-        p.push_str(&memory.brief(notes));
+        // Only the newest few: the rest are recalled per request, the ones
+        // that bear on it (`memstore`), instead of all of them every time.
+        p.push_str(&memory.brief(PROMPT_NOTES));
         if !memory.is_empty() {
             p.push_str(
                 "Use `remember` when you discover another durable fact about this project.\n",

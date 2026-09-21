@@ -163,6 +163,8 @@ pub enum Command {
     UpdateConfig(Box<crate::config::Config>),
     /// Self-improvement: review/accept/reject learned rule candidates (`/learn`).
     Learn(LearnAction),
+    /// `/memory` forgot one: drop its line from the notes and the prompt.
+    ForgetMemory(String),
     /// Add a durable project note (the web control rail's memory editor). Goes
     /// through the agent so the live system prompt picks it up immediately.
     RememberNote(String),
@@ -332,6 +334,10 @@ pub struct Agent {
     /// rank the graph again.
     map_cache: std::sync::Mutex<Option<(MapKey, String)>>,
     memory: crate::memory::Memory,
+    /// The searchable store behind memory (`memstore`): typed, recalled per
+    /// request. `None` when memory is off or the file could not be opened —
+    /// then `memory.md` alone carries on as before.
+    mem: Option<Arc<std::sync::Mutex<crate::memstore::Store>>>,
     learning: crate::learning::Learning,
     /// Whether the project-idiom miner (Phase 3) has run this session. It reads
     /// the code graph once it's ready and turns load-bearing internal symbols
@@ -483,6 +489,25 @@ impl Agent {
             crate::memory::Memory::load(&root)
         } else {
             crate::memory::Memory::default()
+        };
+        let mem = if cfg.memory {
+            match crate::memstore::Store::open(&memstore_path(&root)) {
+                Ok(store) => {
+                    // The notes of the plain-file memory come across once.
+                    if let Ok(n) = store.import_legacy(&memory.notes) {
+                        if n > 0 {
+                            crate::tel_info!("memory", "imported notes", "n" => n);
+                        }
+                    }
+                    Some(Arc::new(std::sync::Mutex::new(store)))
+                }
+                Err(e) => {
+                    crate::tel_warn!("memory", "store unavailable", "detail" => format!("{e:#}"));
+                    None
+                }
+            }
+        } else {
+            None
         };
         let learning = if cfg.learning {
             crate::learning::Learning::load(&root)
@@ -698,6 +723,7 @@ impl Agent {
             graph: graph.clone(),
             map_cache: std::sync::Mutex::new(None),
             memory,
+            mem,
             learning,
             mined_idioms: false,
             // Created on first persist: an eagerly-created file would be left
@@ -981,6 +1007,7 @@ impl Agent {
             graph: self.graph.clone(),
             map_cache: std::sync::Mutex::new(None),
             memory: self.memory.clone(),
+            mem: self.mem.clone(),
             learning: crate::learning::Learning::default(),
             mined_idioms: true,
             session: None,
@@ -1267,6 +1294,12 @@ impl Agent {
             }
             Command::ListSkills => {
                 let _ = tx.send(Event::Skills(self.skill_list()));
+            }
+            Command::ForgetMemory(line) => {
+                if self.memory.forget(&line) > 0 {
+                    let _ = self.memory.save(&self.ctx.root);
+                }
+                self.rebuild_system();
             }
             Command::ReloadSkills => {
                 let n = self.reload_skills();
@@ -3117,7 +3150,7 @@ impl Agent {
             }
             "delegate" => self.delegate(&args, tx).await,
             "ask_user" => self.ask_user(&args, tx).await,
-            "remember" => self.remember(&args),
+            "remember" => self.remember(&args).await,
             "codegraph" => self.query_graph(&args).await,
             "lsp" => self.query_lsp(&args).await,
             "mcp" => self.query_mcp(&args).await,
@@ -3660,6 +3693,73 @@ impl Agent {
         }
     }
 
+    /// The memories that bear on this request: keyword recall always, plus
+    /// meaning when an embedding model is available. The newest few notes are
+    /// in the system prompt already and are not repeated. Off in fast mode.
+    async fn recall_for(&self, input: &str) -> Option<String> {
+        if !self.cfg.memory || self.cfg.fast || self.depth > 0 {
+            return None;
+        }
+        let store = self.mem.clone()?;
+        // Meaning, when it can be had quickly; words either way.
+        let mut query_vec: Option<(String, Vec<f32>)> = None;
+        if let Some(model) = self.resolve_embed_model().await {
+            // Fill in memories written before there was a model, a batch a turn.
+            let missing = store
+                .lock()
+                .ok()
+                .and_then(|s| s.unembedded(&model, 16).ok())
+                .unwrap_or_default();
+            let mut texts: Vec<String> = vec![input.to_string()];
+            texts.extend(missing.iter().map(|(_, t)| t.clone()));
+            if let Ok(Ok(vs)) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.client.embeddings(&model, &texts),
+            )
+            .await
+            {
+                let mut it = vs.into_iter();
+                if let Some(q) = it.next() {
+                    query_vec = Some((model.clone(), q));
+                }
+                if let Ok(s) = store.lock() {
+                    for ((id, _), v) in missing.iter().zip(it) {
+                        let _ = s.set_embedding(*id, &model, &v);
+                    }
+                }
+            }
+        }
+        let got = {
+            let s = store.lock().ok()?;
+            s.recall(
+                input,
+                RECALL_MAX,
+                query_vec.as_ref().map(|(m, v)| (m.as_str(), v.as_slice())),
+            )
+            .ok()?
+        };
+        let shown: std::collections::HashSet<&String> = self
+            .memory
+            .notes
+            .iter()
+            .rev()
+            .take(crate::prompt::PROMPT_NOTES)
+            .collect();
+        let lines: Vec<String> = got
+            .iter()
+            .map(|e| e.line())
+            .filter(|l| !shown.contains(l))
+            .collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let mut out = String::from("Memories from earlier work that bear on this request:\n");
+        for l in lines {
+            out.push_str(&format!("- {l}\n"));
+        }
+        Some(out)
+    }
+
     /// A short, task-ranked map of the code a request is about — attached only
     /// when the request names a file or symbol of this project, so a question
     /// about the weather does not pay for one. Off in fast mode, whose whole
@@ -3849,6 +3949,9 @@ impl Agent {
         // read, and after the vision relay had been paid for) whenever a
         // document was mentioned alongside it.
         doc_blocks.append(&mut ocr_blocks);
+        if let Some(recalled) = self.recall_for(input).await {
+            doc_blocks.push(recalled);
+        }
         if let Some(map) = self.code_map_for(input) {
             doc_blocks.push(map);
         }
@@ -4128,7 +4231,7 @@ impl Agent {
         }
     }
 
-    fn remember(&mut self, args: &Value) -> tools::Outcome {
+    async fn remember(&mut self, args: &Value) -> tools::Outcome {
         if !self.cfg.memory {
             return tools::Outcome {
                 ok: false,
@@ -4138,15 +4241,24 @@ impl Agent {
             };
         }
         if let Some(drop) = args.get("forget").and_then(|f| f.as_str()) {
-            let n = self.memory.forget(drop);
+            let mut n = self.memory.forget(drop);
+            if let Some(store) = &self.mem {
+                if let Ok(lines) = store.lock().map(|s| s.forget(drop)) {
+                    let lines = lines.unwrap_or_default();
+                    for l in &lines {
+                        self.memory.forget(l);
+                    }
+                    n = n.max(lines.len());
+                }
+            }
             let _ = self.memory.save(&self.ctx.root);
             self.rebuild_system();
             return tools::Outcome {
                 ok: n > 0,
                 content: if n > 0 {
-                    format!("Forgot {n} note(s) matching `{drop}`.")
+                    format!("Forgot {n} memory(ies) matching `{drop}`.")
                 } else {
-                    format!("ERROR: no note matched `{drop}`.")
+                    format!("ERROR: no memory matched `{drop}`.")
                 },
                 summary: format!("forget {drop}"),
                 view: tools::ToolView::Plain,
@@ -4156,7 +4268,8 @@ impl Agent {
             .get("note")
             .and_then(|n| n.as_str())
             .unwrap_or("")
-            .trim();
+            .trim()
+            .to_string();
         if note.is_empty() {
             return tools::Outcome {
                 ok: false,
@@ -4165,21 +4278,84 @@ impl Agent {
                 view: tools::ToolView::Plain,
             };
         }
-        let added = self.memory.remember(note);
-        if added {
+        let get = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let kind = crate::memstore::Kind::parse(&get("kind"));
+        let why = get("why");
+        let subject = get("subject");
+        let source = format!("turn {}", self.turn_seq);
+
+        // The store first: it decides what this replaces.
+        let mut line = note.clone();
+        let mut replaced: Vec<String> = Vec::new();
+        let mut stored: Option<i64> = None;
+        if let Some(store) = &self.mem {
+            if let Ok(store) = store.lock() {
+                match store.add(kind, &note, &why, &subject, &source) {
+                    Ok(a) => {
+                        replaced = a.replaced;
+                        stored = a.new.then_some(a.id);
+                        line = crate::memstore::Entry {
+                            id: a.id,
+                            kind,
+                            text: note.clone(),
+                            why: why.clone(),
+                            subject: subject.clone(),
+                            source: source.clone(),
+                            created: 0,
+                            uses: 0,
+                        }
+                        .line();
+                    }
+                    Err(e) => {
+                        crate::tel_warn!("memory", "store write failed", "detail" => format!("{e:#}"))
+                    }
+                }
+            }
+        }
+        // The readable copy follows it, replacements included.
+        for old in &replaced {
+            self.memory.forget(old);
+        }
+        let added = self.memory.remember(&line);
+        if added || !replaced.is_empty() {
             if let Err(e) = self.memory.save(&self.ctx.root) {
                 crate::tel_warn!("memory", "save failed", "detail" => e);
             }
             self.rebuild_system();
         }
+        // With an embedding model, the memory is findable by meaning too.
+        if let (Some(id), Some(model)) = (stored, self.resolve_embed_model().await) {
+            if let Ok(Ok(v)) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.client.embeddings(&model, &[line.clone()]),
+            )
+            .await
+            {
+                if let (Some(vec), Some(store)) = (v.into_iter().next(), &self.mem) {
+                    if let Ok(store) = store.lock() {
+                        let _ = store.set_embedding(id, &model, &vec);
+                    }
+                }
+            }
+        }
+        let mut content = if added || stored.is_some() {
+            format!("Remembered: {line}")
+        } else {
+            "Already remembered.".to_string()
+        };
+        if !replaced.is_empty() {
+            content.push_str(&format!("\nReplaced: {}", replaced.join("; ")));
+        }
         tools::Outcome {
             ok: true,
-            content: if added {
-                "Noted. It will be in your instructions next session.".into()
-            } else {
-                "Already recorded.".into()
-            },
-            summary: format!("remember: {}", note.chars().take(60).collect::<String>()),
+            content,
+            summary: format!("remember: {}", tools::first_line(&note)),
             view: tools::ToolView::Plain,
         }
     }
@@ -7028,6 +7204,15 @@ pub fn label_for(name: &str, args: &Value) -> String {
         },
     }
 }
+
+/// Where a project's memory store lives: with its sessions and index, outside
+/// the project, so it never shows in `git status`.
+pub fn memstore_path(root: &std::path::Path) -> std::path::PathBuf {
+    crate::config::project_state_dir(root, "memory").join("memory.db")
+}
+
+/// Memories recalled into one request, at most.
+const RECALL_MAX: usize = 6;
 
 /// (graph generation, request hash, budget): what a cached code map is for.
 type MapKey = (u64, u64, usize);

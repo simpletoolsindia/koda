@@ -62,6 +62,10 @@ sha2 = "0.10"
 # definition ranges, methods with their owners, and no fake definitions from
 # comments. Five grammars cover most of what koda is pointed at; everything
 # else keeps the lexical extractor. Measured cost is in docs/spec-treesitter.md.
+# Agent memory (src/memstore.rs): one SQLite file per project, with FTS5 for
+# keyword recall. Bundled so there is no system library to find; see
+# docs/research-agent-memory.md for why this rather than a memory framework.
+rusqlite = { version = "0.40", features = ["bundled"] }
 tree-sitter = { version = "0.27", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }

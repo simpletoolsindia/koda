@@ -337,13 +337,23 @@ fn build_specs() -> Vec<Spec> {
             name: "remember",
             desc: "Record something about this project that will still be true next session: \
                    the test command, where a subsystem lives, a convention you had to \
-                   discover. Only durable facts — not what you are doing right now. Say \
-                   `forget` with a phrase to drop a note that turned out wrong.",
+                   discover, a decision and why it was made, how the user likes things done. \
+                   Only durable things — not what you are doing right now. Memories are \
+                   recalled into later requests they bear on. Give `subject` when this \
+                   replaces an older memory about the same thing. Say `forget` with a phrase \
+                   to drop one that turned out wrong.",
             params: json!({
                 "type": "object",
                 "properties": {
                     "note": str_prop("One sentence, stated as a fact."),
-                    "forget": str_prop("Instead of adding, remove notes containing this text.")
+                    "kind": {
+                        "type": "string",
+                        "enum": ["fact", "decision", "preference", "procedure"],
+                        "description": "What it is (default fact). A decision should say `why`."
+                    },
+                    "why": str_prop("For a decision: the reason, in a few words."),
+                    "subject": str_prop("What it is about, a few words (\"test command\", \"db engine\"). A newer memory with the same subject and kind replaces the older."),
+                    "forget": str_prop("Instead of adding, remove memories containing this text.")
                 }
             }),
             mutating: false,

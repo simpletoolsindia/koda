@@ -258,6 +258,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/theme", "switch palette"),
     ("/emoji", "toggle the per-tool emoji on tool cards"),
+    (
+        "/memory",
+        "browse what koda remembers here; enter forgets one",
+    ),
     ("/url", "change the API base URL"),
     ("/clear", "drop the conversation context"),
     ("/compact", "summarize context to free tokens"),
@@ -356,6 +360,8 @@ enum ChoiceKind {
     Reason,
     Provider,
     Theme,
+    /// `/memory`: choosing one forgets it.
+    Memory,
 }
 
 /// State for an in-flight `ask_user` question. When `options` is non-empty the
@@ -2237,6 +2243,19 @@ impl App {
                         self.theme_before = None;
                         self.theme_cmd(&val);
                     }
+                    ChoiceKind::Memory => {
+                        let id: i64 = val.parse().unwrap_or(-1);
+                        let path = crate::agent::memstore_path(&self.root);
+                        match crate::memstore::Store::open(&path).and_then(|s| s.forget_id(id)) {
+                            Ok(Some(line)) => {
+                                // The agent drops it from memory.md and the prompt.
+                                self.send(Command::ForgetMemory(line.clone()));
+                                self.flash(format!("forgot: {line}"), fx::Tone::Info);
+                            }
+                            Ok(None) => self.note("that memory was already gone"),
+                            Err(e) => self.transcript.error(format!("could not forget it: {e:#}")),
+                        }
+                    }
                 }
             }
         }
@@ -2267,6 +2286,44 @@ impl App {
         self.choices = Some(crate::picker::Picker::new(
             ChoiceKind::Provider,
             "select provider",
+            items,
+        ));
+    }
+
+    /// Everything remembered about this project, newest first, to browse and
+    /// prune. Enter forgets the highlighted one; Esc just closes.
+    fn open_memory_picker(&mut self) {
+        let path = crate::agent::memstore_path(&self.root);
+        let entries = match crate::memstore::Store::open(&path).and_then(|s| s.active()) {
+            Ok(e) => e,
+            Err(e) => {
+                self.transcript
+                    .error(format!("could not open memory: {e:#}"));
+                return;
+            }
+        };
+        if entries.is_empty() {
+            self.note("nothing remembered in this project yet — koda adds to it with `remember`");
+            return;
+        }
+        let items = entries
+            .iter()
+            .map(|e| {
+                let mut detail = e.kind.as_str().to_string();
+                if e.uses > 0 {
+                    detail.push_str(&format!(" · recalled {}×", e.uses));
+                }
+                if !e.source.is_empty() {
+                    detail.push_str(&format!(" · {}", e.source));
+                }
+                crate::picker::Item::new(e.id.to_string())
+                    .label(e.line())
+                    .detail(detail)
+            })
+            .collect();
+        self.choices = Some(crate::picker::Picker::new(
+            ChoiceKind::Memory,
+            format!("memory — {} remembered · enter forgets one", entries.len()),
             items,
         ));
     }
@@ -3195,6 +3252,7 @@ impl App {
                 _ => self.note("usage: /reason [off|low|medium|high]"),
             },
             "theme" => self.theme_cmd(&arg),
+            "memory" | "memories" => self.open_memory_picker(),
             "emoji" => {
                 self.cfg.tool_emoji = !self.cfg.tool_emoji;
                 let _ = crate::config::save(&self.cfg);

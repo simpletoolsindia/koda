@@ -21,6 +21,7 @@ mod lsp;
 mod mcp;
 mod md;
 mod memory;
+mod memstore;
 mod panel;
 mod picker;
 mod prompt;

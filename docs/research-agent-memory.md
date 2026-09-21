@@ -1,6 +1,12 @@
 # Agent memory: which Rust library, and what to build with it
 
-Status: research + recommendation. Nothing here has landed.
+Status: **landed** (`src/memstore.rs`). Built as recommended below, with two
+changes found in live testing: the text index stems words (Porter), because
+"print" has to find "printed"; and filler words are never search terms,
+because stemmed, "one" is "on" and matched everything. Vectors are stored as
+blobs and compared in Rust — a project's memories number in the hundreds, so
+`sqlite-vec` was not needed. `/memory` browses and forgets; the store lives
+beside the project's sessions and index, outside the project.
 
 ## What koda has today
 
@@ -65,9 +71,10 @@ memories_vec   — sqlite-vec over embeddings      (semantic recall, when an emb
 6. **Migration** — existing `memory.md` notes import as `fact` entries on
    first run.
 
-Cost: `rusqlite` with the bundled SQLite adds roughly 1–1.5 MB to the binary;
-`sqlite-vec` is small and only needed for the semantic half (it can sit
-behind a feature flag like `treesitter`).
+Cost, measured: `rusqlite` with the bundled SQLite (3.53) took the release
+binary from 16.2 MB to 18.0 MB (+1.8 MB — more than the 1–1.5 MB estimated
+here before building). `sqlite-vec` turned out unnecessary (see the status
+note at the top).
 
 [rd]: https://arxiv.org/pdf/2605.10870
 [survey]: https://arxiv.org/pdf/2606.30306
