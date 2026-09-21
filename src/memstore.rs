@@ -670,4 +670,202 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn kinds_parse_by_name_and_alias_and_default_to_fact() {
+        for k in [
+            Kind::Fact,
+            Kind::Decision,
+            Kind::Preference,
+            Kind::Procedure,
+        ] {
+            assert_eq!(Kind::parse(k.as_str()), k);
+            assert_eq!(
+                Kind::parse(&format!("  {}  ", k.as_str().to_uppercase())),
+                k
+            );
+        }
+        assert_eq!(Kind::parse("pref"), Kind::Preference);
+        assert_eq!(Kind::parse("how-to"), Kind::Procedure);
+        assert_eq!(Kind::parse("howto"), Kind::Procedure);
+        assert_eq!(Kind::parse("rumour"), Kind::Fact);
+        assert_eq!(Kind::parse(""), Kind::Fact);
+    }
+
+    #[test]
+    fn a_line_shows_kind_and_reason() {
+        let e = |kind, why: &str| Entry {
+            id: 1,
+            kind,
+            text: "Use tabs".into(),
+            why: why.into(),
+            subject: String::new(),
+            source: String::new(),
+            created: 0,
+            uses: 0,
+        };
+        assert_eq!(e(Kind::Fact, "").line(), "Use tabs");
+        assert_eq!(e(Kind::Fact, "gofmt").line(), "Use tabs — because gofmt");
+        assert_eq!(e(Kind::Procedure, "").line(), "[procedure] Use tabs");
+    }
+
+    /// A subject is shared across kinds, but a decision about the database
+    /// does not make a fact about it untrue.
+    #[test]
+    fn superseding_stays_within_a_kind() {
+        let s = store();
+        s.add(
+            Kind::Fact,
+            "The database is Postgres 15",
+            "",
+            "database",
+            "",
+        )
+        .unwrap();
+        let d = s
+            .add(
+                Kind::Decision,
+                "Move to Postgres 16",
+                "security fixes",
+                "database",
+                "",
+            )
+            .unwrap();
+        assert!(d.replaced.is_empty(), "{:?}", d.replaced);
+        assert_eq!(s.active().unwrap().len(), 2);
+        // An empty subject never supersedes anything.
+        s.add(Kind::Fact, "Unrelated one", "", "", "").unwrap();
+        s.add(Kind::Fact, "Unrelated two", "", "", "").unwrap();
+        assert_eq!(s.active().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn active_is_newest_first_and_text_is_trimmed() {
+        let s = store();
+        s.add(Kind::Fact, "  first memory  ", "", "", "").unwrap();
+        s.add(Kind::Fact, "second memory", "", "", "").unwrap();
+        let active: Vec<String> = s.active().unwrap().into_iter().map(|e| e.text).collect();
+        assert_eq!(active, vec!["second memory", "first memory"]);
+    }
+
+    #[test]
+    fn recall_honours_k_and_counts_uses() {
+        let s = store();
+        for i in 0..5 {
+            s.add(
+                Kind::Fact,
+                &format!("Deploy target number {i} is staging"),
+                "",
+                "",
+                "",
+            )
+            .unwrap();
+        }
+        let got = s.recall("deploy staging", 2, None).unwrap();
+        assert_eq!(got.len(), 2);
+        let used: i64 = s
+            .active()
+            .unwrap()
+            .iter()
+            .filter(|e| got.iter().any(|g| g.id == e.id))
+            .map(|e| e.uses)
+            .sum();
+        assert_eq!(used, 2, "each recalled memory counts one use");
+        assert!(s.recall("deploy", 0, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_request_of_only_filler_recalls_nothing() {
+        let s = store();
+        s.add(Kind::Fact, "Show the price with two decimals", "", "", "")
+            .unwrap();
+        assert!(s.recall("", 5, None).unwrap().is_empty());
+        assert!(s
+            .recall("can you show me one more", 5, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_superseded_memory_is_not_recalled_by_meaning_either() {
+        let s = store();
+        let old = s.add(Kind::Fact, "Port is 8080", "", "port", "").unwrap();
+        s.set_embedding(old.id, "m", &[1.0, 0.0]).unwrap();
+        let new = s.add(Kind::Fact, "Port is 9090", "", "port", "").unwrap();
+        s.set_embedding(new.id, "m", &[0.0, 1.0]).unwrap();
+        let got = s.recall("xyzzy", 5, Some(("m", &[1.0, 0.0]))).unwrap();
+        assert!(got.iter().all(|e| e.id != old.id), "{got:?}");
+    }
+
+    #[test]
+    fn weak_or_mismatched_vectors_do_not_count() {
+        let s = store();
+        let a = s.add(Kind::Fact, "Alpha memory", "", "", "").unwrap();
+        s.set_embedding(a.id, "m", &[1.0, 0.0, 0.0]).unwrap();
+        // Orthogonal: similarity 0, under the threshold.
+        assert!(s
+            .recall("zzz", 5, Some(("m", &[0.0, 1.0, 0.0])))
+            .unwrap()
+            .is_empty());
+        // A different dimension (the embedding model changed size).
+        assert!(s
+            .recall("zzz", 5, Some(("m", &[1.0, 0.0])))
+            .unwrap()
+            .is_empty());
+        assert_eq!(cosine(&[], &[]), 0.0);
+        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+        assert!((cosine(&[2.0, 0.0], &[5.0, 0.0]) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vectors_survive_the_blob_round_trip() {
+        let v = vec![0.0, -1.5, 3.25, f32::MIN_POSITIVE, 1e9];
+        assert_eq!(from_blob(&to_blob(&v)), v);
+        assert!(
+            from_blob(&[1, 2, 3]).is_empty(),
+            "a torn blob is not a vector"
+        );
+    }
+
+    #[test]
+    fn forget_by_id_and_by_nothing() {
+        let s = store();
+        let a = s
+            .add(
+                Kind::Decision,
+                "Use rustls",
+                "no OpenSSL on Windows",
+                "",
+                "",
+            )
+            .unwrap();
+        assert_eq!(
+            s.forget_id(a.id).unwrap().as_deref(),
+            Some("[decision] Use rustls — because no OpenSSL on Windows")
+        );
+        assert_eq!(s.forget_id(a.id).unwrap(), None, "already gone");
+        s.add(Kind::Fact, "Keep me", "", "", "").unwrap();
+        assert!(s.forget("   ").unwrap().is_empty(), "blank forgets nothing");
+        assert_eq!(s.active().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_forgotten_memory_leaves_the_text_index_too() {
+        let s = store();
+        s.add(Kind::Fact, "The kiosk password rotates weekly", "", "", "")
+            .unwrap();
+        s.forget("kiosk").unwrap();
+        assert!(s.recall("kiosk password", 5, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn filler_words_are_not_terms() {
+        let t = terms("How do I run the tests in one line?");
+        assert!(
+            t.contains(&"run".to_string()) && t.contains(&"tests".to_string()),
+            "{t:?}"
+        );
+        for filler in ["how", "the", "one", "line"] {
+            assert!(!t.contains(&filler.to_string()), "{filler} in {t:?}");
+        }
+    }
 }

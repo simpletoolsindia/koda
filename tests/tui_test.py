@@ -276,8 +276,11 @@ check("full-auto flagged in the status bar", t.saw("FULL-AUTO"), t)
 t.send("replace hello with goodbye in demo.txt\r")
 t.read(8.0, until="replaced hello with goodbye")
 check("user message echoed", t.saw("replace hello with goodbye in demo.txt"), t)
-check("read view titles and names the file", t.saw("Read") and t.saw("demo.txt"), t)
-check("edit view titles and names the file", t.saw("Edit") and t.saw("demo.txt"), t)
+# The card's verb is a badge: `READ`, `EDIT` (plain `Read` in older layouts).
+check("read view titles and names the file",
+      (t.saw("READ") or t.saw("Read")) and t.saw("demo.txt"), t)
+check("edit view titles and names the file",
+      (t.saw("EDIT") or t.saw("Edit")) and t.saw("demo.txt"), t)
 check("edit view shows diff stats", t.saw("+1") and t.saw("-1"), t)
 check("assistant reply streamed", t.saw("replaced hello with goodbye"), t)
 check("inline code styled in reply", t.saw("demo.txt"), t)

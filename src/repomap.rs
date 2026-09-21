@@ -508,4 +508,35 @@ mod tests {
             vec!["apply", "discount", "cart", "total"]
         );
     }
+    #[test]
+    fn an_empty_project_maps_to_nothing_without_panicking() {
+        let dir = std::env::temp_dir().join(format!("koda-repomap-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = crate::graph::scan(&dir);
+        let a = anchors(&g, "fix the checkout total");
+        assert!(!a.strong());
+        assert!(rank(&g, &a).is_empty());
+        assert!(render(&dir, &g, &a, 600).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A general question names nothing here, so the request is not anchored
+    /// -- which is what keeps the map off requests it would not help.
+    #[test]
+    fn a_general_question_is_not_anchored() {
+        let (dir, g) = project("t5");
+        let a = anchors(&g, "what is the capital of France?");
+        assert!(!a.strong(), "{a:?}");
+        let named = anchors(&g, "why does `Cart` round down? see cart.py");
+        assert!(named.strong());
+        assert!(named.files.contains("shop/cart.py"), "{named:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filler_and_short_words_are_not_anchor_words() {
+        let words = split_words("how do I fix the UI of the checkoutFlow in a file?");
+        assert_eq!(words, vec!["checkout", "flow"]);
+    }
 }

@@ -915,9 +915,11 @@ vibrant `neon` palette, because the fills need colours that can be predicted —
 `/theme` switches live, and with no argument shows a swatch of each palette so
 you can pick by eye. The default (`theme = "auto"`) resolves to the vibrant
 `neon` palette, because the block fills that give the transcript its shape need
-colours that can be predicted. The full set: `dark`, `neon`, `ansi`,
+colours that can be predicted. The full set — dark: `dark`, `neon`, `ansi`,
 `catppuccin-mocha`, `tokyo-night`, `gruvbox-dark`, `nord`, `dracula`,
-`rose-pine`, `solarized-light`, `mono`. `ansi` uses your terminal's own 16
+`rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark`,
+`ayu-mirage`, `night-owl`; light: `solarized-light`, `catppuccin-latte`,
+`rose-pine-dawn`, `everforest-light`; and `mono`. `ansi` uses your terminal's own 16
 colours and drops the fills for a rule instead.
 
 `NO_COLOR=1` or `TERM=dumb` forces monochrome (`mono`) — hierarchy then comes
@@ -1026,6 +1028,16 @@ streaming chunks.
 cargo test          # unit tests
 bash tests/e2e.sh   # end-to-end against a mock server, including the TUI
 ```
+
+For a JUnit XML report (what CI dashboards and IDEs read), run the suite under
+[cargo-nextest](https://nexte.st):
+
+```sh
+cargo nextest run --profile ci    # report: target/nextest/ci/junit.xml
+```
+
+CI does this on Linux, macOS and Windows, and publishes each report as a check
+on the commit.
 
 `tests/mock_server.py` is a scripted OpenAI-compatible SSE server covering both
 tool protocols, the fallback path, empty and reasoning-only replies, delegation,

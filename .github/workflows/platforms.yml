@@ -4,6 +4,10 @@ name: Platforms
 # compiles for Windows and macOS, not that it works there. This runs the whole
 # suite on each, so path, shell and terminal code that only breaks off Linux
 # is caught where it breaks.
+#
+# Tests run under cargo-nextest with the `ci` profile (.config/nextest.toml),
+# which writes a JUnit XML report: published as a check on the commit, per
+# test and per platform, and kept as a downloadable artifact.
 on:
   push:
     branches: [main, master]
@@ -13,6 +17,10 @@ on:
 concurrency:
   group: platforms-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write # the JUnit report is published as a check run
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,10 +32,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
       - name: Test
-        run: cargo test --all
+        run: cargo nextest run --profile ci
+
+      - name: Keep the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+      - name: Publish the JUnit report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Tests (${{ matrix.os }})
+          include_passed: false
+          detailed_summary: true

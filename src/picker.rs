@@ -228,4 +228,104 @@ mod tests {
         assert!(p.selected().is_none());
         assert_eq!(p.key(k(KeyCode::Enter)), Outcome::Idle);
     }
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn page_home_and_emacs_keys_move_within_bounds() {
+        let items: Vec<Item> = (0..25).map(|i| Item::new(format!("m{i:02}"))).collect();
+        let mut p = Picker::new(0u8, "t", items);
+        assert_eq!(p.sel, 0, "no current value opens at the top");
+        assert_eq!(p.key(k(KeyCode::Up)), Outcome::Idle, "already at the top");
+        p.key(k(KeyCode::PageDown));
+        assert_eq!(p.sel, 10);
+        p.key(k(KeyCode::PageDown));
+        p.key(k(KeyCode::PageDown));
+        assert_eq!(p.sel, 24, "page down stops at the end");
+        p.key(k(KeyCode::PageUp));
+        assert_eq!(p.sel, 14);
+        p.key(k(KeyCode::Home));
+        assert_eq!(p.sel, 0);
+        p.key(ctrl('n'));
+        p.key(ctrl('n'));
+        assert_eq!(p.sel, 2);
+        p.key(ctrl('p'));
+        assert_eq!(p.sel, 1);
+    }
+
+    #[test]
+    fn ctrl_u_clears_the_filter_and_ctrl_letters_do_not_type() {
+        let mut p = picker();
+        for c in "qwen".chars() {
+            p.key(k(KeyCode::Char(c)));
+        }
+        p.key(ctrl('x'));
+        assert_eq!(p.filter, "qwen", "a control chord is not text");
+        p.key(ctrl('u'));
+        assert_eq!(p.filter, "");
+        assert_eq!(p.visible().len(), 4);
+        assert_eq!(p.sel, 0);
+    }
+
+    #[test]
+    fn the_value_matches_as_well_as_the_label() {
+        let mut p = Picker::new(
+            0u8,
+            "t",
+            vec![
+                Item::new("ollama").label("Local Ollama"),
+                Item::new("openai").label("OpenAI API"),
+            ],
+        );
+        for c in "oll".chars() {
+            p.key(k(KeyCode::Char(c)));
+        }
+        assert_eq!(p.selected().unwrap().value, "ollama");
+        assert_eq!(p.key(k(KeyCode::Enter)), Outcome::Chosen("ollama".into()));
+    }
+
+    #[test]
+    fn narrowing_the_filter_reports_a_move() {
+        let mut p = picker();
+        // Opens on llama; typing `g` jumps to gemma, which a preview must see.
+        assert_eq!(p.key(k(KeyCode::Char('g'))), Outcome::Moved);
+        assert_eq!(p.selected().unwrap().value, "gemma3:4b");
+        assert_eq!(
+            p.key(k(KeyCode::F(5))),
+            Outcome::Idle,
+            "unbound keys do nothing"
+        );
+    }
+
+    #[test]
+    fn an_empty_list_is_safe() {
+        let mut p: Picker<u8> = Picker::new(0, "t", vec![]);
+        for key in [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::End,
+            KeyCode::PageDown,
+            KeyCode::Enter,
+        ] {
+            assert_eq!(p.key(k(key)), Outcome::Idle);
+        }
+        assert!(p.selected().is_none());
+        assert_eq!(p.key(k(KeyCode::Esc)), Outcome::Cancelled);
+    }
+
+    #[test]
+    fn builders_set_what_they_say() {
+        let it = Item::new("v").label("L").detail("d").current(true);
+        assert_eq!(
+            (
+                it.value.as_str(),
+                it.label.as_str(),
+                it.detail.as_str(),
+                it.current
+            ),
+            ("v", "L", "d", true)
+        );
+        assert_eq!(Item::new("x").label, "x", "the label defaults to the value");
+    }
 }

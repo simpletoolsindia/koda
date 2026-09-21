@@ -7346,6 +7346,100 @@ fn absorb(
 
 #[cfg(test)]
 mod tests {
+    /// Every tool card's one-line label: what the call does, in the words a
+    /// person would use, never the wire name when there is something better.
+    #[test]
+    fn every_tool_gets_a_readable_label() {
+        use serde_json::json;
+        for (name, args, want) in [
+            ("read_file", json!({"path": "src/a.rs"}), "read src/a.rs"),
+            ("write_file", json!({"path": "b.py"}), "write b.py"),
+            ("edit_file", json!({"path": "c.go"}), "edit c.go"),
+            ("list_dir", json!({}), "list ."),
+            ("list_dir", json!({"path": "src"}), "list src"),
+            ("find_files", json!({"glob": "**/*.rs"}), "find **/*.rs"),
+            ("search", json!({"pattern": "todo!"}), "search /todo!/"),
+            (
+                "run_command",
+                json!({"command": "cd x\n\n  make  \n"}),
+                "$ cd x ⏎ make",
+            ),
+            ("codegraph", json!({}), "codegraph overview"),
+            (
+                "codegraph",
+                json!({"query": "symbol", "name": "Cart"}),
+                "codegraph symbol Cart",
+            ),
+            (
+                "codegraph",
+                json!({"query": "file", "path": "a.rs"}),
+                "codegraph file a.rs",
+            ),
+            (
+                "web_search",
+                json!({"query": "ratatui"}),
+                "search \"ratatui\"",
+            ),
+            (
+                "web_fetch",
+                json!({"url": "https://x.dev"}),
+                "fetch https://x.dev",
+            ),
+            (
+                "browse",
+                json!({"action": "open", "url": "https://x.dev"}),
+                "browse open https://x.dev",
+            ),
+            ("browse", json!({"action": "back"}), "browse back"),
+            ("view_image", json!({"path": "shot.png"}), "image shot.png"),
+            ("verify", json!({}), "this project"),
+            ("debug", json!({}), "debug"),
+            ("todo", json!({"items": []}), "plan"),
+            (
+                "lsp",
+                json!({"action": "hover", "file": "a.rs"}),
+                "lsp hover a.rs",
+            ),
+            (
+                "lsp",
+                json!({"action": "references", "name": "f"}),
+                "lsp references f",
+            ),
+            ("lsp", json!({}), "lsp lsp"),
+            ("mcp", json!({}), "mcp servers"),
+            ("about_creator", json!({}), "about the creator"),
+            ("remember", json!({"forget": "port"}), "forget port"),
+            (
+                "remember",
+                json!({"note": "tests use pytest"}),
+                "remember: tests use pytest",
+            ),
+            ("skill", json!({"name": "deploy"}), "skill deploy"),
+            (
+                "mcp__github__search_issues",
+                json!({}),
+                "github: search_issues",
+            ),
+            ("something_new", json!({}), "something_new"),
+        ] {
+            assert_eq!(label_for(name, &args), want, "{name} {args}");
+        }
+        // Long free text is cut, not wrapped across the card.
+        let long = "x".repeat(200);
+        assert_eq!(
+            label_for("delegate", &json!({"task": long}))
+                .chars()
+                .count(),
+            70
+        );
+        assert_eq!(
+            label_for("remember", &json!({"note": long}))
+                .chars()
+                .count(),
+            60
+        );
+    }
+
     /// The seven fetches run 1 made, respelling one mistake. The exact-signature
     /// guard saw seven different calls; the coarse one sees one problem.
     #[test]

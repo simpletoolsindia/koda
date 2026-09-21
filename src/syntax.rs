@@ -625,4 +625,108 @@ mod tests {
     fn uncovered_languages_fall_back() {
         assert!(parse("java", "A.java", "class A {}", &[]).is_none());
     }
+    #[test]
+    fn rust_items_of_every_kind() {
+        let rs = "pub struct Point { x: i32 }\nenum Shape { A, B }\ntrait Draw {\n    fn draw(&self);\n}\ntype Id = u64;\nconst MAX: usize = 3;\nstatic NAME: &str = \"k\";\nmod inner {\n    pub fn helper() {}\n}\nmacro_rules! square { ($x:expr) => { $x * $x }; }\nimpl<T> Stack<T> {\n    pub fn push(&mut self, _t: T) {}\n}\n";
+        let d = names("rust", "a.rs", rs);
+        for (name, kind) in [
+            ("Point", "struct"),
+            ("Shape", "enum"),
+            ("Draw", "trait"),
+            ("Id", "type"),
+            ("MAX", "const"),
+            ("NAME", "static"),
+            ("inner", "mod"),
+            ("helper", "fn"),
+            ("square", "macro"),
+            ("Stack::push", "method"),
+            ("Draw::draw", "method"),
+        ] {
+            assert!(has(&d, name, kind), "{name} ({kind}) missing from {d:?}");
+        }
+    }
+
+    #[test]
+    fn javascript_functions_classes_and_what_is_not_a_definition() {
+        let js = "function plain() {}\nfunction* gen() {}\nconst arrow = () => 1;\nconst fnExpr = function () {};\nlet notConst = 5;\nclass Widget {\n  constructor() {}\n  #secret() {}\n  render() {\n    const local = () => 2;\n  }\n}\n";
+        let d = names("javascript", "w.js", js);
+        for (name, kind) in [
+            ("plain", "fn"),
+            ("gen", "fn"),
+            ("arrow", "fn"),
+            ("fnExpr", "fn"),
+            ("Widget", "class"),
+            ("Widget::render", "method"),
+            ("Widget::secret", "method"),
+        ] {
+            assert!(has(&d, name, kind), "{name} ({kind}) missing from {d:?}");
+        }
+        let all: Vec<&str> = d.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!all.iter().any(|n| n.ends_with("constructor")), "{all:?}");
+        assert!(
+            !all.contains(&"notConst"),
+            "a plain `let` is not a definition"
+        );
+        assert!(
+            !all.contains(&"local"),
+            "a local inside a method is not top-level"
+        );
+    }
+
+    #[test]
+    fn tsx_parses_with_jsx_in_it() {
+        let tsx = "export function App(): JSX.Element {\n  return <div className=\"x\">{items.map(i => <Row key={i} />)}</div>;\n}\ntype Props = { n: number };\nenum Mode { On, Off }\n";
+        let d = names("typescript", "App.tsx", tsx);
+        assert!(has(&d, "App", "fn"), "{d:?}");
+        assert!(has(&d, "Props", "type"), "{d:?}");
+        assert!(has(&d, "Mode", "enum"), "{d:?}");
+    }
+
+    /// Code being edited is often broken; what still parses still counts.
+    #[test]
+    fn broken_code_keeps_the_definitions_that_parse() {
+        let rs = "fn fine() {}\n\nfn broken( {\n\nstruct After;\n";
+        let d = names("rust", "a.rs", rs);
+        assert!(has(&d, "fine", "fn"), "{d:?}");
+        let py = "def ok():\n    return 1\n\ndef bad(:\n    pass\n";
+        let d = names("python", "a.py", py);
+        assert!(has(&d, "ok", "fn"), "{d:?}");
+    }
+
+    #[test]
+    fn an_empty_file_defines_nothing() {
+        for (lang, path) in [
+            ("rust", "a.rs"),
+            ("python", "a.py"),
+            ("javascript", "a.js"),
+            ("typescript", "a.ts"),
+            ("go", "a.go"),
+        ] {
+            let p = parse(lang, path, "", &[]).expect(lang);
+            assert!(p.defs.is_empty() && p.imports.is_empty(), "{lang}");
+        }
+    }
+
+    #[test]
+    fn keywords_are_not_identifiers() {
+        let p = parse(
+            "python",
+            "a.py",
+            "def f(self):\n    return self.value\n",
+            &["self"],
+        )
+        .unwrap();
+        assert!(p.ids.contains("value"), "{:?}", p.ids);
+        assert!(!p.ids.contains("self"), "{:?}", p.ids);
+    }
+
+    #[test]
+    fn covered_languages_are_the_ones_with_grammars() {
+        for l in ["rust", "python", "javascript", "typescript", "go"] {
+            assert!(covers(l), "{l}");
+        }
+        for l in ["java", "c", "ruby", ""] {
+            assert!(!covers(l), "{l}");
+        }
+    }
 }

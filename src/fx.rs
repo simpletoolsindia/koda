@@ -348,4 +348,73 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a_pulse_runs_linearly_then_stops() {
+        let p = Pulse::new(Duration::from_millis(1000));
+        assert_eq!(p.t_at(Duration::ZERO), Some(0.0));
+        let half = p.t_at(Duration::from_millis(500)).unwrap();
+        assert!((half - 0.5).abs() < 1e-3, "{half}");
+        assert_eq!(p.t_at(Duration::from_millis(1000)), None);
+        assert_eq!(
+            Pulse::new(Duration::ZERO).t(),
+            None,
+            "a zero life is over at once"
+        );
+    }
+
+    #[test]
+    fn a_toast_arrives_lit_holds_and_fades() {
+        let (base, muted) = (Color::Rgb(0, 200, 0), Color::Rgb(90, 90, 90));
+        assert_ne!(toast_colour(base, muted, 0.0), base, "arrives lit");
+        assert_eq!(toast_colour(base, muted, 0.5), base, "holds its tone");
+        let late = toast_colour(base, muted, 0.99);
+        assert_ne!(late, base, "fades before it leaves");
+        let t = Toast::new("saved", Tone::Done);
+        assert!(t.live());
+        assert_eq!(
+            t.colour(base, muted, false),
+            Some(base),
+            "no motion: plain tone"
+        );
+    }
+
+    #[test]
+    fn a_tween_without_motion_jumps_and_with_motion_eases() {
+        let mut g = Tween::at(0.3);
+        assert_eq!(g.value(), 0.3);
+        assert!(!g.moving());
+        g.set(0.7, false);
+        assert_eq!(g.value(), 0.7);
+        assert!(!g.moving());
+        g.set(0.9, true);
+        assert!(g.moving());
+        let v = g.value();
+        assert!((0.7..=0.9).contains(&v), "{v}");
+        // Setting the same target again does not restart the ease.
+        let before = g.pulse.map(|p| p.started);
+        g.set(0.9, true);
+        assert_eq!(g.pulse.map(|p| p.started), before);
+    }
+
+    #[test]
+    fn a_step_flash_ends_on_the_success_colour() {
+        let ok = Color::Rgb(40, 180, 90);
+        assert_eq!(step_flash(ok, 1.0), ok);
+        assert_ne!(step_flash(ok, 0.0), ok, "starts lit");
+        assert_eq!(step_flash(ok, 7.0), ok, "t is clamped");
+        let (edge, title) = mode_shift(Color::Rgb(1, 2, 3), ok, 2.0);
+        assert_eq!((edge, title), (ok, ok), "t is clamped");
+    }
+
+    #[test]
+    fn the_wave_is_the_same_width_at_every_moment() {
+        for ms in [0u64, 137, 800, 1599, 5000] {
+            for fine in [true, false] {
+                let w = wave(12, Duration::from_millis(ms), fine);
+                assert_eq!(w.len(), 12);
+                assert!(w.iter().all(|(_, b)| (0.0..=1.0).contains(b)), "{w:?}");
+            }
+        }
+        assert!(wave(0, Duration::ZERO, true).is_empty());
+    }
 }

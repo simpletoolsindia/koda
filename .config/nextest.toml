@@ -1,0 +1,23 @@
+# Test runner settings for cargo-nextest (https://nexte.st).
+#
+#   cargo nextest run                 # local: quick, stops at the first failure
+#   cargo nextest run --profile ci    # CI: runs everything, writes JUnit XML
+#
+# The JUnit report lands in target/nextest/ci/junit.xml, the format CI
+# dashboards, GitHub checks and most IDEs read.
+
+[profile.default]
+# The live-network tests (web search, browse) can hang on a bad connection;
+# name them instead of waiting forever.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+fail-fast = false
+# A test that fails once and then passes is reported as flaky, not hidden.
+retries = 1
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
