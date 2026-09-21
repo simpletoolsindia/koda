@@ -6480,6 +6480,20 @@ pub fn label_for(name: &str, args: &Value) -> String {
         }
         "skill" => format!("skill {}", s("name")),
         "web_search" => format!("search \"{}\"", s("query")),
+        // The URL is the whole point of a fetch; without an arm here the card
+        // fell back to the wire name and read "FETCH web_fetch".
+        "web_fetch" => format!("fetch {}", s("url")),
+        "browse" => {
+            let target = [s("url"), s("query"), s("selector"), s("text")]
+                .into_iter()
+                .find(|v| !v.is_empty())
+                .unwrap_or("");
+            format!("browse {} {target}", s("action"))
+                .trim_end()
+                .to_string()
+        }
+        "view_image" => format!("image {}", s("path")),
+        "debug" => format!("debug {}", s("action")).trim_end().to_string(),
         "delegate" => {
             let task: String = s("task").chars().take(60).collect();
             format!("delegate: {task}")

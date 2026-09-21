@@ -1557,10 +1557,13 @@ fn render_tool(
 
     // Failures are the same shape for every tool: the header plus the message.
     if *ok == Some(false) {
+        // The whole target, not its first word: a query cut at the first space
+        // read `SEARCH "Laya` with the quote left open.
+        let target = truncate_cells(strip_verb(label, title), avail.saturating_sub(34));
         let head = panel::status_line_badged(
             Some(icon),
             title,
-            Some((first_word_target(label), t.text)),
+            Some((target, t.text)),
             badge.clone(),
             &timing,
             t,
@@ -1571,7 +1574,7 @@ fn render_tool(
             .take(if expanded { 40 } else { 6 })
             .flat_map(|l| {
                 md::hard_wrap(
-                    l.trim_end().trim_start_matches("ERROR: "),
+                    strip_failed_prefix(l.trim_end().trim_start_matches("ERROR: ")),
                     avail.saturating_sub(4),
                 )
             })
@@ -2044,8 +2047,33 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 /// The path or subject a label is about, for a failure header.
-fn first_word_target(label: &str) -> String {
-    label.split_whitespace().nth(1).unwrap_or(label).to_string()
+/// Clip to `max` display cells, ending in `…` when anything was cut.
+fn truncate_cells(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// "web search failed: DuckDuckGo is rate-limiting…" under a header that
+/// already reads `✘ SEARCH … failed` says "failed" twice: keep the reason.
+fn strip_failed_prefix(line: &str) -> &str {
+    match line.split_once(" failed: ") {
+        Some((head, rest)) if head.len() <= 24 && !head.contains(':') => rest,
+        _ => line,
+    }
 }
 
 /// Push a rendered block right, drawing a rail when it belongs to a subagent.
@@ -2585,6 +2613,43 @@ mod tests {
         raw.assistant_delta("    indented");
         raw.relayout(80);
         assert_eq!(text(&mut t), text(&mut raw));
+    }
+
+    /// From a real session: a failed search read `✘ SEARCH "Laya  failed`
+    /// (query cut at its first space, quote left open), a failed fetch read
+    /// `✘ FETCH web_fetch` (the wire name, not the URL), and both bodies
+    /// repeated "failed" under a header that already said it.
+    #[test]
+    fn a_failed_card_names_its_whole_target_once() {
+        use crate::tools::ToolView;
+        let fail = |name: &str, args: serde_json::Value, err: &str| {
+            let mut t = super::Transcript::new(crate::theme::ANSI, crate::theme::UNICODE);
+            let label = crate::agent::label_for(name, &args);
+            t.tool_start("1".into(), name.into(), label.clone(), 0);
+            t.tool_end("1", false, label, err.into(), ToolView::Plain);
+            t.relayout(100);
+            flat(&t.window(0, 20))
+        };
+        let search = fail(
+            "web_search",
+            serde_json::json!({"query": "Laya model llm"}),
+            "web search failed: DuckDuckGo is rate-limiting searches",
+        );
+        assert!(search.contains("\"Laya model llm\""), "{search}");
+        assert!(search.contains("DuckDuckGo is rate-limiting"), "{search}");
+        assert!(!search.contains("web search failed"), "{search}");
+
+        let fetch = fail(
+            "web_fetch",
+            serde_json::json!({"url": "https://en.wikipedia.org/wiki/Laya"}),
+            "web fetch failed: https://en.wikipedia.org/wiki/Laya replied 404 Not Found",
+        );
+        assert!(
+            fetch.contains("FETCH") && fetch.contains("https://en.wikipedia.org/wiki/Laya"),
+            "{fetch}"
+        );
+        assert!(!fetch.contains("web_fetch"), "{fetch}");
+        assert!(fetch.contains("404 Not Found"), "{fetch}");
     }
 
     /// A width change throws away every wrap, including the kept prefix.
