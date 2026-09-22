@@ -2366,6 +2366,31 @@ pub fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Whether `command` — a bare name, not a path — resolves on `PATH` only as a
+/// `.cmd`/`.bat` file rather than a real executable.
+///
+/// That is what `npx`, `npm`, `yarn`, `pnpm` and any npm-installed CLI
+/// (`pyright-langserver`, `typescript-language-server`, ...) actually are on
+/// a normal Windows install: a batch shim, invisible to anyone who just types
+/// the name. `CreateProcess` — what `Command::spawn` calls — can only launch
+/// a real executable, not a batch script, even given the shim's full
+/// resolved path, so every caller here needs the same check before deciding
+/// whether to spawn `command` directly or route it through the platform
+/// shell. Used by `mcp.rs` (stdio servers) and `lsp.rs` (language servers).
+#[cfg(windows)]
+pub fn is_windows_cmd_shim(command: &str) -> bool {
+    let p = std::path::Path::new(command);
+    p.extension().is_none()
+        && !p.is_absolute()
+        && std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| {
+                ["cmd", "bat"]
+                    .iter()
+                    .any(|ext| dir.join(format!("{command}.{ext}")).is_file())
+            })
+        })
+}
+
 fn executable(candidate: std::path::PathBuf) -> Option<std::path::PathBuf> {
     let meta = std::fs::metadata(&candidate).ok()?;
     #[cfg(unix)]
@@ -3234,9 +3259,28 @@ async fn run_command(args: &Value, ctx: &ToolCtx) -> Outcome {
         cmd.clone()
     };
     let mut cmd_builder = tokio::process::Command::new(&shell);
+    cmd_builder.arg(flag);
+    // `cmd.exe` and PowerShell each parse their own `/C` command line with
+    // rules that predate, and do not match, the MSVCRT convention every
+    // `.arg()` here is quoted for. A script the model wrote with normal
+    // quotes -- `py -m py_compile "hello.py"` -- got *that* quoting applied
+    // on top, so cmd.exe received literal backslash-quote characters and
+    // handed Python a filename of `"hello.py"`, quotes included. `raw_arg`
+    // is exactly the escape hatch for this: the text reaches the shell
+    // exactly as written, which is what every other platform already gets
+    // by not being double-quoted in the first place.
+    #[cfg(windows)]
+    {
+        // tokio::process::Command exposes `raw_arg` itself on Windows.
+        if flag == "/C" {
+            cmd_builder.raw_arg(&script);
+        } else {
+            cmd_builder.arg(&script);
+        }
+    }
+    #[cfg(not(windows))]
+    cmd_builder.arg(&script);
     cmd_builder
-        .arg(flag)
-        .arg(&script)
         .current_dir(&ctx.root)
         .env("KODA", "1")
         .env("TERM", "dumb")
@@ -3622,9 +3666,14 @@ pub fn ocr_image(path: &Path) -> Result<String> {
         .arg("quiet")
         .output()
         .map_err(|e| {
+            let install = if cfg!(windows) {
+                "`winget install --id UB-Mannheim.TesseractOCR -e`"
+            } else {
+                "`brew install tesseract`, `apt install tesseract-ocr`"
+            };
             anyhow!(
-                "tesseract not available ({e}). Install it (`brew install tesseract`, \
-                 `apt install tesseract-ocr`) to OCR images for non-vision models."
+                "tesseract not available ({e}). Install it ({install}) to OCR images for \
+                 non-vision models."
             )
         })?;
     if !output.status.success() {
@@ -4852,6 +4901,30 @@ pub const CREATOR_CONTACT: &str = "support@simpletools.in";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `npx`/`pyright-langserver`/`typescript-language-server` are `.cmd`
+    /// shims on a normal Windows Node/npm install — invisible to anyone
+    /// typing them, fatal to `Command::new` (see `is_windows_cmd_shim`).
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_shim_is_detected_and_a_real_exe_is_not() {
+        let dir = std::env::temp_dir().join(format!("koda-shim-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fake-npx.cmd"), "@echo off\r\n").unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{};{path}", dir.display()));
+
+        assert!(
+            is_windows_cmd_shim("fake-npx"),
+            "a name that only resolves as .cmd must be flagged"
+        );
+        // `cmd` itself only exists as cmd.exe -- a real executable, not a shim.
+        assert!(!is_windows_cmd_shim("cmd"));
+        // An absolute path is trusted as-is, even without an extension.
+        assert!(!is_windows_cmd_shim(dir.join("fake-npx").to_str().unwrap()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// From a real session: `ollama pull` drew its spinner with ESC[1G and
     /// ESC[K, and the raw codes scrambled koda's screen. What survives is what
@@ -6914,6 +6987,36 @@ prose, wrapping across the terminal width like any real reply would.\n\n";
         // …but a producer cut short by `head` is not a failure either.
         let cut = run_command(&json!({"command": "yes | head -n 2"}), &c).await;
         assert!(cut.ok, "{}", cut.content);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `cmd.exe`'s `/C` command line has its own parser, older than and
+    /// different from the MSVCRT convention `Command::arg` quotes every
+    /// argument for. Handing it a script that itself contains quotes --
+    /// `py -m py_compile "file.py"`, exactly what `verify` generates for a
+    /// loose Python file -- got quoted *again* on top, so cmd.exe hands the
+    /// child a filename with literal quote characters in it. A real session
+    /// hit this: `hello.py` compiled fine run directly, but failed through
+    /// `run_command` with `[Errno 22] Invalid argument: '"hello.py"'`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_quoted_argument_survives_cmd_exe_unmangled() {
+        let dir = fixture("quoting");
+        std::fs::write(dir.join("hello.py"), "print('hi')\n").unwrap();
+        let c = ctx(&dir);
+        let out = run_command(&json!({"command": "py -m py_compile \"hello.py\""}), &c).await;
+        assert!(out.ok, "{}", out.content);
+
+        // The same has to hold for a path with a space in it, quotes doing
+        // actual work rather than merely being present.
+        std::fs::create_dir_all(dir.join("my folder")).unwrap();
+        std::fs::write(dir.join("my folder/test file.py"), "print('hi')\n").unwrap();
+        let spaced = run_command(
+            &json!({"command": "py -m py_compile \"my folder/test file.py\""}),
+            &c,
+        )
+        .await;
+        assert!(spaced.ok, "{}", spaced.content);
         std::fs::remove_dir_all(&dir).ok();
     }
 

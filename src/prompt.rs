@@ -373,6 +373,21 @@ pub fn build(cfg: &Config, root: &Path, use_text_protocol: bool, mode: Mode) -> 
 
     let _ = write!(p, "\n\n{}", now_line());
     let _ = write!(p, "\nWorkspace: {}", root.display());
+    // Only said for cmd/PowerShell: a model guessing POSIX syntax there gets
+    // `run_command` wrong (retries with `&&`, `;`, `$?`, none of which was
+    // ever the problem) with no signal telling it which shell it is actually
+    // talking to. POSIX stays silent — that has always been the assumption.
+    match crate::verify::Dialect::of(&crate::config::posix_shell(&cfg.shell)) {
+        crate::verify::Dialect::Posix => {}
+        crate::verify::Dialect::Cmd => p.push_str(
+            "\nShell: Windows cmd.exe — chain with `&&`/`||`, vars are `%VAR%`, use \
+             `dir`/`del`/`type`/`copy`, not POSIX utilities unless installed.",
+        ),
+        crate::verify::Dialect::PowerShell => p.push_str(
+            "\nShell: PowerShell — chain with `;` or `if ($?) { }`, vars are `$env:VAR`, use \
+             cmdlets (`Get-ChildItem`, `Remove-Item`, ...), not POSIX syntax.",
+        ),
+    }
     if let Some(ctx) = environment(root) {
         let _ = write!(p, "\n{ctx}");
     }
@@ -530,29 +545,39 @@ fn python_toolchain() -> Option<String> {
     static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let out = std::process::Command::new("python3")
-                .args([
-                    "-c",
-                    "import sys; print(sys.version.split()[0]); print(sys.executable)",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
+            // The python.org Windows installer never provides a `python3` —
+            // only `python.exe` (and optionally `py.exe`) — so the POSIX
+            // naming convention this otherwise relies on finds nothing there
+            // and the agent silently loses this whole line. `python3` is
+            // still tried first, and is the only name tried anywhere else.
+            let candidates: &[&str] = if cfg!(windows) {
+                &["python3", "python"]
+            } else {
+                &["python3"]
+            };
+            let (bin, out) = candidates.iter().find_map(|bin| {
+                let out = std::process::Command::new(bin)
+                    .args([
+                        "-c",
+                        "import sys; print(sys.version.split()[0]); print(sys.executable)",
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .ok()?;
+                out.status.success().then_some((*bin, out))
+            })?;
             let text = String::from_utf8_lossy(&out.stdout).to_string();
             let mut lines = text.lines();
             let version = lines.next()?.trim().to_string();
             let exe = lines.next()?.trim().to_string();
-            Some(python_line(&version, &exe, pip_interpreter().as_deref()))
+            Some(python_line(bin, &version, &exe, pip_interpreter().as_deref()))
         })
         .clone()
 }
 
-fn python_line(version: &str, exe: &str, pip_python: Option<&str>) -> String {
-    let mut line = format!("Python: `python3` is {version} ({exe}).");
+fn python_line(bin: &str, version: &str, exe: &str, pip_python: Option<&str>) -> String {
+    let mut line = format!("Python: `{bin}` is {version} ({exe}).");
     let same = |a: &str, b: &str| {
         let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
         a == b || canon(a) == canon(b)
@@ -560,7 +585,7 @@ fn python_line(version: &str, exe: &str, pip_python: Option<&str>) -> String {
     if let Some(pip) = pip_python.filter(|p| !same(p, exe)) {
         let _ = write!(
             line,
-            " `pip` installs into a different interpreter ({pip}): use `python3 -m pip`, or a venv."
+            " `pip` installs into a different interpreter ({pip}): use `{bin} -m pip`, or a venv."
         );
     }
     line
@@ -698,6 +723,7 @@ mod tests {
     #[test]
     fn a_pip_for_another_python_is_called_out() {
         let split = super::python_line(
+            "python3",
             "3.14.7",
             "/opt/homebrew/bin/python3",
             Some("/Library/Developer/CommandLineTools/usr/bin/python3"),
@@ -706,9 +732,14 @@ mod tests {
         assert!(split.contains("different interpreter"), "{split}");
         assert!(split.contains("python3 -m pip"), "{split}");
 
-        let same = super::python_line("3.12.1", "/usr/bin/python3", Some("/usr/bin/python3"));
+        let same = super::python_line(
+            "python3",
+            "3.12.1",
+            "/usr/bin/python3",
+            Some("/usr/bin/python3"),
+        );
         assert!(!same.contains("different"), "{same}");
-        let none = super::python_line("3.12.1", "/usr/bin/python3", None);
+        let none = super::python_line("python3", "3.12.1", "/usr/bin/python3", None);
         assert!(!none.contains("different"), "{none}");
     }
 

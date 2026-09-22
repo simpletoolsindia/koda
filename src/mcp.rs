@@ -832,6 +832,32 @@ fn unwrap_rpc(msg: Value, method: &str) -> Result<Value> {
 
 // --- stdio ----------------------------------------------------------------
 
+/// Build the child-process command for an MCP server's `command`/`args`.
+///
+/// On Windows, `npx`, `npm`, `yarn` and `pnpm` from a normal Node install are
+/// `.cmd` batch shims, not `.exe`s — that is how the published stdio servers
+/// almost everyone copy-pastes (`command = "npx"`) are actually invoked. A
+/// user types `npx ...` and their shell finds `npx.cmd` for them, but
+/// `CreateProcess` runs executables, not batch scripts, so
+/// `Command::new("npx")` fails with "program not found" even though `npx`
+/// works fine typed by hand. This does the same PATH+extension lookup a
+/// terminal does and, only when the resolved file is a `.cmd`/`.bat`, routes
+/// the call through the platform shell (`cmd /C npx ...`) the way typing it
+/// would have. A real `.exe`, or an already-absolute path, is untouched.
+fn windows_shim_aware_command(command: &str, args: &[String]) -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        if crate::tools::is_windows_cmd_shim(command) {
+            let mut cmd = tokio::process::Command::new(crate::config::default_shell());
+            cmd.arg("/C").arg(command).args(args);
+            return cmd;
+        }
+    }
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(args);
+    cmd
+}
+
 struct StdioConn {
     child: Mutex<tokio::process::Child>,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
@@ -851,9 +877,8 @@ impl StdioConn {
                 root.join(p)
             }
         };
-        let mut cmd = tokio::process::Command::new(&cfg.command);
-        cmd.args(&cfg.args)
-            .current_dir(&cwd)
+        let mut cmd = windows_shim_aware_command(&cfg.command, &cfg.args);
+        cmd.current_dir(&cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

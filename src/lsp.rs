@@ -379,10 +379,29 @@ struct Client {
     state: Arc<(Mutex<Shared>, Condvar)>,
 }
 
+/// Build the child-process command for a language server.
+///
+/// `pyright-langserver` and `typescript-language-server` are npm-installed
+/// `.cmd` batch shims on a normal Windows install, same as `npx` — see
+/// `tools::is_windows_cmd_shim`. `rust-analyzer`, `gopls`, `clangd` and the
+/// rest are real executables there and are spawned exactly as before.
+fn spawn_command(command: &str, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    {
+        if crate::tools::is_windows_cmd_shim(command) {
+            let mut cmd = Command::new(crate::config::default_shell());
+            cmd.arg("/C").arg(command).args(args);
+            return cmd;
+        }
+    }
+    let mut cmd = Command::new(command);
+    cmd.args(args);
+    cmd
+}
+
 impl Client {
     fn spawn(def: &ServerDef, root: &Path) -> Result<Client> {
-        let mut child = Command::new(def.command)
-            .args(def.args)
+        let mut child = spawn_command(def.command, def.args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

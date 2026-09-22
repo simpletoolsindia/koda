@@ -48,6 +48,16 @@ function Ok($m)   { Write-Host "OK $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "! $m" -ForegroundColor Yellow }
 function Die($m)  { Write-Host "x $m" -ForegroundColor Red; exit 1 }
 
+# $Interactive's own checks (UserInteractive, Host.UI.RawUI) can say yes on a
+# host that still cannot prompt -- a script launched -NonInteractive with a
+# real console attached reports both as true, and Read-Host then throws
+# PSInvalidOperationException instead of returning. Every prompt goes through
+# here so that mismatch degrades to the same safe default $Interactive=false
+# already takes, instead of the installer dying mid-menu.
+function Read-HostSafe($prompt) {
+    try { Read-Host $prompt } catch { $null }
+}
+
 # Is this directory a koda checkout, rather than just some Rust project? Piped
 # through iex there is no $PSScriptRoot, so without the name check the one-liner
 # run inside any other crate would build that crate and install it as koda.
@@ -190,7 +200,7 @@ function Ensure-Rust {
     if (-not $Interactive) {
         Die "Install Rust from https://rustup.rs then re-run."
     }
-    $ans = Read-Host "  Install Rust now? [Y/n]"
+    $ans = Read-HostSafe "  Install Rust now? [Y/n]"
     if ($ans -match '^[Nn]') { Die "Install Rust from https://rustup.rs then re-run." }
     # Prefer winget when available; fall back to the official rustup-init.exe.
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -298,7 +308,7 @@ function Ensure-Tesseract {
         Warn "for offline image OCR, install tesseract:  $installer"
         return
     }
-    $ans = Read-Host "  Install tesseract now for offline image OCR? [Y/n]"
+    $ans = Read-HostSafe "  Install tesseract now for offline image OCR? [Y/n]"
     if ($ans -match '^[Nn]') {
         Info "skipping tesseract - 'ocr vision model' in /settings does OCR without it"
         return
@@ -370,7 +380,7 @@ function Uninstall {
         if ($Interactive) {
             # $(...) ends the variable name: "$exe?" parses as a variable
             # called "exe?", which is null, and the prompt loses the path.
-            $ans = Read-Host "  Remove $($exe)? [y/N]"
+            $ans = Read-HostSafe "  Remove $($exe)? [y/N]"
             # Require a positive yes rather than testing for "not no". Read-Host
             # returns $null when there is no console to read from, and
             # `$null -notmatch ...` does not evaluate to $true -- the guard did
@@ -395,7 +405,7 @@ function Uninstall {
            else { $null }
     if ($cfg -and (Test-Path $cfg)) {
         if ($Interactive) {
-            $ans = Read-Host "  Also delete your settings at $($cfg)? [y/N]"
+            $ans = Read-HostSafe "  Also delete your settings at $($cfg)? [y/N]"
             if ($ans -match '^[Yy]') { Remove-Item $cfg -Recurse -Force; Ok "removed $cfg" }
             else { Info "kept your settings at $cfg" }
             # (this one already required a positive match, so it was safe)
@@ -421,7 +431,7 @@ Write-Host "  2  Update to the latest  (download or rebuild)" -ForegroundColor G
 Write-Host "  3  Uninstall             (binary; asks about settings)" -ForegroundColor Green
 Write-Host "  4  Quit" -ForegroundColor Green
 Write-Host ""
-$choice = Read-Host "  choose [1]"
+$choice = Read-HostSafe "  choose [1]"
 if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
 Write-Host ""
 

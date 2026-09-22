@@ -255,6 +255,27 @@ pub struct Client {
     state: Arc<(Mutex<Shared>, Condvar)>,
 }
 
+/// Build the child-process command for a debug adapter.
+///
+/// Most adapters here (`python3`, `lldb-dap`, `dlv`) are real executables on
+/// Windows, but an npm-distributed one like `js-debug-adapter` is a `.cmd`
+/// batch shim there, same as `npx` — see `tools::is_windows_cmd_shim`. A
+/// shim's full resolved path still cannot be handed to `CreateProcess`
+/// directly, so this routes only that case through the platform shell.
+fn dap_command(command: &str, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    {
+        if crate::tools::is_windows_cmd_shim(command) {
+            let mut cmd = Command::new(crate::config::default_shell());
+            cmd.arg("/C").arg(command).args(args);
+            return cmd;
+        }
+    }
+    let mut cmd = Command::new(command);
+    cmd.args(args);
+    cmd
+}
+
 impl Client {
     /// Start an adapter and its reader thread.
     pub fn spawn(adapter: &Adapter, cwd: &Path) -> Result<Client> {
@@ -264,8 +285,7 @@ impl Client {
     /// Start any process that speaks DAP on stdio. Separate from [`spawn`] so a
     /// test can drive the real client against a stand-in adapter.
     pub fn spawn_cmd(command: &str, args: &[&str], cwd: &Path) -> Result<Client> {
-        let mut child = Command::new(command)
-            .args(args)
+        let mut child = dap_command(command, args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

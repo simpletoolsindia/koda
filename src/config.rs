@@ -1229,7 +1229,7 @@ impl Config {
         let path = config_path();
         std::fs::create_dir_all(config_dir())?;
         if !path.exists() {
-            std::fs::write(&path, DEFAULT_CONFIG_TEMPLATE)?;
+            std::fs::write(&path, default_config_text())?;
         }
         Ok(path)
     }
@@ -1248,6 +1248,23 @@ pub fn save(cfg: &Config) -> Result<PathBuf> {
     );
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
+}
+
+/// `DEFAULT_CONFIG_TEMPLATE` hardcodes `shell = "/bin/sh"`, which is correct
+/// on macOS/Linux but does not exist on Windows — every `run_command` there
+/// failed to even spawn ("os error 3") before the command text was read. Swap
+/// in the real platform default there; the template, and every other
+/// platform, is untouched.
+fn default_config_text() -> String {
+    if cfg!(windows) {
+        DEFAULT_CONFIG_TEMPLATE.replacen(
+            "shell = \"/bin/sh\"",
+            &format!("shell = '{}'", default_shell()),
+            1,
+        )
+    } else {
+        DEFAULT_CONFIG_TEMPLATE.to_string()
+    }
 }
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# koda configuration (~/.config/koda/config.toml)
