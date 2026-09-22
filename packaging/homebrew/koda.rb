@@ -22,23 +22,23 @@ class Koda < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/simpletoolsindia/koda/releases/download/v0.1.0/koda-0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "6842bb83adea657d261f4b9e4c07a429d1e13f0a16481cc19d130cc4f3d56e99"
+      url "https://github.com/simpletoolsindia/koda/releases/download/v1.0.0/koda-1.0.0-aarch64-apple-darwin.tar.gz"
+      sha256 "46f50b4eeaacf48e969f29e13a48362a8c179c1d7a234ae2b95434eec7b7ed16"
     end
     on_intel do
-      url "https://github.com/simpletoolsindia/koda/releases/download/v0.1.0/koda-0.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "b8e8f6e09eb197fd19c2f7ce25b9b7d86a1338b9535848a43700fee5827e0273"
+      url "https://github.com/simpletoolsindia/koda/releases/download/v1.0.0/koda-1.0.0-x86_64-apple-darwin.tar.gz"
+      sha256 "52f120d191ce585425faf81a4a7c06e13084cddab37c114b0bcbd9574571c059"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/simpletoolsindia/koda/releases/download/v0.1.0/koda-0.1.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "c7678312337f61b8f9ce6e571ff474ec4eb2d798252a5d8f2aade4ae71741e63"
+      url "https://github.com/simpletoolsindia/koda/releases/download/v1.0.0/koda-1.0.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "fb156e70094dca6c8c98febb39894aaf9ff06d48dc52aa05a22ea7aa33c82995"
     end
     on_intel do
-      url "https://github.com/simpletoolsindia/koda/releases/download/v0.1.0/koda-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "62ddce333f971c3f7c3e08a5ed0205c79dd2d55902c1fde83973df27bed2406b"
+      url "https://github.com/simpletoolsindia/koda/releases/download/v1.0.0/koda-1.0.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "976b9d2086987f7c4dd53335d4d1adcc78c647a4e9a38ef0aa1c09c6607b742e"
     end
   end
 

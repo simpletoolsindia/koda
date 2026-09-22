@@ -5,7 +5,7 @@
 # winget puts it in its own links directory and adds that to PATH, which is why
 # there is no installer to run and nothing to uninstall but a file.
 PackageIdentifier: SimpleToolsIndia.Koda
-PackageVersion: 0.1.0
+PackageVersion: 1.0.0
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
@@ -13,10 +13,10 @@ NestedInstallerFiles:
     PortableCommandAlias: koda
 Commands:
   - koda
-ReleaseDate: 2026-09-05
+ReleaseDate: 2026-09-22
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/simpletoolsindia/koda/releases/download/v0.1.0/koda-0.1.0-x86_64-pc-windows-msvc.zip
-    InstallerSha256: 3FBABEE4EEBD9856930362E680C58C1CA83D5F3227622F61AD606A777CC0EEB4
+    InstallerUrl: https://github.com/simpletoolsindia/koda/releases/download/v1.0.0/koda-1.0.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 1420DDC19790E6FCD59C43D64B38F8553BB94D06233CD018356AB616B5E28764
 ManifestType: installer
 ManifestVersion: 1.6.0

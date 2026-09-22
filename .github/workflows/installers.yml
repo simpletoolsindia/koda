@@ -125,8 +125,8 @@ jobs:
           set -euo pipefail
           prefix="$(mktemp -d)/koda"
           cd "$(mktemp -d)"
-          KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
-          "$prefix/bin/koda" --version | grep -q '0.1.0'
+          KODA_VERSION=1.0.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
+          "$prefix/bin/koda" --version | grep -q '1.0.0'
           echo "prebuilt installed and runs"
 
   # --------------------------------------------------------------------------
@@ -141,19 +141,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `prebuilt_runs`: whether v0.1.0's binary starts here. It was built on
-        # glibc 2.39, too new for Debian 12 and Ubuntu 22.04, so there the
-        # installer must notice and build from source instead -- which is
-        # what users there get today, so that path is tested end to end.
-        # Releases are now built on ubuntu-22.04; once one is published, pin
-        # it here and set these to true.
+        # `prebuilt_runs`: whether the pinned release's binary starts here.
+        # 1.0.0 is built on ubuntu-22.04 (glibc 2.35), so it runs on all of
+        # these. A distro it cannot run on gets `false`, and the job checks the
+        # installer's fallback to a source build instead.
         include:
           - image: debian:12
             prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git build-essential >/dev/null
-            prebuilt_runs: false
+            prebuilt_runs: true
           - image: ubuntu:22.04
             prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git build-essential >/dev/null
-            prebuilt_runs: false
+            prebuilt_runs: true
           - image: fedora:41
             prep: dnf install -y -q curl git tar gzip findutils >/dev/null
             prebuilt_runs: true
@@ -172,7 +170,7 @@ jobs:
           ldd --version 2>&1 | head -1 || true
           prefix="$(mktemp -d)/koda"
           cd "$(mktemp -d)"
-          KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
+          KODA_VERSION=1.0.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
           "$prefix/bin/koda" --version
 
       # The fallback: the download is refused as unable to run, and koda is
@@ -187,7 +185,7 @@ jobs:
           . "$HOME/.cargo/env"
           prefix="$(mktemp -d)/koda"
           cd "$(mktemp -d)"
-          KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh" 2>&1 | tee out.txt
+          KODA_VERSION=1.0.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh" 2>&1 | tee out.txt
           grep -q "does not run here" out.txt \
             || { echo "::error::expected the prebuilt binary to be refused here"; exit 1; }
           "$prefix/bin/koda" --version
@@ -217,13 +215,13 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         shell: pwsh
         run: |
-          $env:KODA_VERSION = "0.1.0"
+          $env:KODA_VERSION = "1.0.0"
           $prefix = Join-Path $env:RUNNER_TEMP "koda-pre"
           Set-Location $env:RUNNER_TEMP
           $sb = [scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\install.ps1"))
           & $sb -Prefix $prefix
           $v = & "$prefix\bin\koda.exe" --version
-          if ($v -notmatch "0\.1\.0") { throw "unexpected version: $v" }
+          if ($v -notmatch "1\.0\.0") { throw "unexpected version: $v" }
           Write-Host "prebuilt installed and runs: $v"
 
       - uses: dtolnay/rust-toolchain@stable

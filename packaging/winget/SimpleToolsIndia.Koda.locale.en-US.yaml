@@ -3,7 +3,7 @@
 # `Moniker: koda` is the line that makes `winget install koda` resolve to this
 # package rather than needing the full SimpleToolsIndia.Koda identifier.
 PackageIdentifier: SimpleToolsIndia.Koda
-PackageVersion: 0.1.0
+PackageVersion: 1.0.0
 PackageLocale: en-US
 Publisher: Simple Tools India
 PublisherUrl: https://github.com/simpletoolsindia
@@ -30,7 +30,7 @@ Tags:
   - local-llm
   - ollama
   - terminal
-ReleaseNotesUrl: https://github.com/simpletoolsindia/koda/releases/tag/v0.1.0
+ReleaseNotesUrl: https://github.com/simpletoolsindia/koda/releases/tag/v1.0.0
 Documentation:
   - DocumentLabel: Documentation
     DocumentUrl: https://simpletoolsindia.github.io/koda/
