@@ -737,6 +737,9 @@ pub struct App {
     /// When the opening titles started. None once they have played, been
     /// skipped, or were never wanted.
     intro_at: Option<Instant>,
+    /// What the intro's boot check ticks off: this launch's model, workspace
+    /// and mode, as the welcome card states them.
+    intro_facts: Vec<(&'static str, String)>,
     /// Emit DEC 2026 markers around each frame.
     sync_output: bool,
     /// Whether the mouse is currently captured (wheel scroll vs native select).
@@ -1658,6 +1661,11 @@ impl App {
             where_.push_str(&format!("  {branch_mark} {b}"));
         }
         let mode = format!("{} {} {}", self.mode.label(), g.sep, self.auto_tier.label());
+        self.intro_facts = vec![
+            ("model", cfg.model.clone()),
+            ("workspace", where_.clone()),
+            ("mode", mode.clone()),
+        ];
         // The name in the gradient, letter by letter.
         let name_spans = |spans: &mut Vec<Span<'static>>| {
             for (i, ch) in "koda".chars().enumerate() {
@@ -4538,11 +4546,14 @@ fn draw(f: &mut Frame, app: &mut App) {
             &app.theme,
             &app.glyphs,
             mark_art(&app.glyphs),
-            &crate::intro::subtitle(
-                env!("CARGO_PKG_VERSION"),
-                tagline(app.tip_seed),
-                &app.glyphs,
-            ),
+            &crate::intro::Titles {
+                subtitle: &crate::intro::subtitle(
+                    env!("CARGO_PKG_VERSION"),
+                    tagline(app.tip_seed),
+                    &app.glyphs,
+                ),
+                facts: &app.intro_facts,
+            },
             started.elapsed(),
         );
         if !drawn {
@@ -6694,6 +6705,7 @@ pub async fn run(
         log_version: 0,
         welcome_at: None,
         intro_at: None,
+        intro_facts: Vec::new(),
         // Emission is decoupled from config alone: a terminal that mishandles
         // DEC 2026 (Apple Terminal, screen) must get neither the faster cadence
         // nor the markers, or it tears *worse*. Both the draw wrapper below and
