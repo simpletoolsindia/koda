@@ -69,12 +69,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux builds on the oldest supported Ubuntu. A binary links the
+          # build machine's glibc, and one from ubuntu-latest (24.04, glibc
+          # 2.39) would not start on Debian 12 or Ubuntu 22.04 -- the installer
+          # found exactly that. 22.04's glibc 2.35 runs on those and newer.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             cross: false
             smoke: true
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             cross: true
             smoke: false
           # Both macOS targets build on Apple Silicon. macos-13 is the Intel
@@ -167,6 +171,15 @@ jobs:
       - name: Smoke test (Unix)
         if: runner.os != 'Windows' && matrix.smoke
         run: ./target/${{ matrix.target }}/release/koda --help
+
+      # ...and on the older distributions users run, not just the build host.
+      - name: Smoke test (Debian 12, Ubuntu 22.04)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          for image in debian:12 ubuntu:22.04; do
+            docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/k:ro" "$image" /k/koda --version \
+              || { echo "::error::the Linux binary does not run on $image"; exit 1; }
+          done
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'

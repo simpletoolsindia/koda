@@ -141,20 +141,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `prebuilt_runs`: whether v0.1.0's binary starts here. It was built on
+        # glibc 2.39, too new for Debian 12 and Ubuntu 22.04, so there the
+        # installer must notice and build from source instead -- which is
+        # what users there get today, so that path is tested end to end.
+        # Releases are now built on ubuntu-22.04; once one is published, pin
+        # it here and set these to true.
         include:
           - image: debian:12
-            prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git >/dev/null
+            prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git build-essential >/dev/null
+            prebuilt_runs: false
           - image: ubuntu:22.04
-            prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git >/dev/null
+            prep: apt-get update -qq && apt-get install -y -qq curl ca-certificates git build-essential >/dev/null
+            prebuilt_runs: false
           - image: fedora:41
             prep: dnf install -y -q curl git tar gzip findutils >/dev/null
+            prebuilt_runs: true
           - image: archlinux:latest
             prep: pacman -Sy --noconfirm --quiet curl git tar gzip >/dev/null
+            prebuilt_runs: true
     steps:
       - name: Prepare
         run: ${{ matrix.prep }}
       - uses: actions/checkout@v4
       - name: Install a prebuilt release
+        if: matrix.prebuilt_runs
         shell: bash
         run: |
           set -euo pipefail
@@ -162,6 +173,23 @@ jobs:
           prefix="$(mktemp -d)/koda"
           cd "$(mktemp -d)"
           KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh"
+          "$prefix/bin/koda" --version
+
+      # The fallback: the download is refused as unable to run, and koda is
+      # built from source with the Rust the user has.
+      - name: Fall back to building from source
+        if: ${{ !matrix.prebuilt_runs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd --version 2>&1 | head -1 || true
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
+          . "$HOME/.cargo/env"
+          prefix="$(mktemp -d)/koda"
+          cd "$(mktemp -d)"
+          KODA_VERSION=0.1.0 PREFIX="$prefix" bash < "$GITHUB_WORKSPACE/install.sh" 2>&1 | tee out.txt
+          grep -q "does not run here" out.txt \
+            || { echo "::error::expected the prebuilt binary to be refused here"; exit 1; }
           "$prefix/bin/koda" --version
 
   windows:
