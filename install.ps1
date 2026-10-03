@@ -124,6 +124,14 @@ function Get-Prebuilt {
             $toml = (Invoke-WebRequest -UseBasicParsing -Uri "$Raw/$Branch/Cargo.toml").Content
             if ($toml -match '(?m)^version = "([^"]+)"') { $version = $Matches[1] }
         } catch { }
+        # The public repo carries only the installers (the source is private),
+        # so there is no Cargo.toml there: take the latest published release.
+        if (-not $version) {
+            try {
+                $latest = Invoke-RestMethod -UseBasicParsing -Uri "https://api.github.com/repos/simpletoolsindia/koda/releases/latest"
+                $version = $latest.tag_name
+            } catch { }
+        }
         if (-not $version) { return $null }
     }
     $version = $version.TrimStart("v")

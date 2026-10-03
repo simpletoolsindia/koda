@@ -109,6 +109,17 @@ sha256_of() {
     fi
 }
 
+# The newest published release's version, from where /releases/latest redirects.
+latest_release() {
+    local url
+    if command -v curl >/dev/null 2>&1; then
+        url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 "${RELEASES%/download}/latest")" || return 1
+    else
+        url="$(wget -q -S --spider -T 10 "${RELEASES%/download}/latest" 2>&1 | sed -n 's/^ *Location: //p' | tail -1)" || return 1
+    fi
+    case "$url" in */tag/v*) echo "${url##*/tag/v}" ;; *) return 1 ;; esac
+}
+
 # The release target this machine runs, as the release workflow names it.
 target_triple() {
     case "$(uname -s)/$(uname -m)" in
@@ -140,6 +151,9 @@ download_prebuilt() {
     if [ -z "$version" ]; then
         version="$(fetch "$RAW/$BRANCH/Cargo.toml" 2>/dev/null \
             | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)" || true
+        # The public repo carries only the installers (the source is private),
+        # so there is no Cargo.toml there: take the latest published release.
+        [ -n "$version" ] || version="$(latest_release)" || true
         [ -n "$version" ] || return 1
     fi
     version="${version#v}"
