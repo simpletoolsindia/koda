@@ -1,0 +1,1052 @@
+# koda
+
+![Rust](https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust)
+![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-black?logo=apple)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![Binary](https://img.shields.io/badge/binary-~6%20MB-green)
+![Startup](https://img.shields.io/badge/startup-~3%20ms-green)
+[![Docs](https://img.shields.io/badge/docs-live-00E599)](https://simpletoolsindia.github.io/koda/)
+
+A terminal coding agent for **local** LLMs. It talks to anything speaking the
+OpenAI chat-completions API — Ollama, LM Studio, llama.cpp, MTPLX, vLLM — reads
+and edits your code, runs commands, and shows you a diff before it changes
+anything.
+
+Built for macOS on Apple Silicon. One binary, ~6 MB, 3 ms startup, no runtime
+dependencies.
+
+📖 **[Read the docs → simpletoolsindia.github.io/koda](https://simpletoolsindia.github.io/koda/)** —
+a full guide for beginners and developers: quickstart, every LLM provider
+(Ollama, LM Studio, llama.cpp, vLLM, MLX, OpenAI, OpenRouter, Groq and any
+OpenAI-compatible API), architecture and data-flow internals with diagrams, and
+detailed pages for every feature.
+
+```
+▌ the discount test fails — fix it                      ← warm tint, your message
+
+  plan                                     2/3 ████████░░░░
+  ✓ read the failing test
+  ✓ fix apply_discount
+  ◐ run the suite
+
+  ✓ codegraph symbol apply_discount  4ms                ← cool tint, tool block
+  ✓ read cart.py (21 lines)  2ms  ctrl+r
+  ✓ edit cart.py (1 replacement)  3ms
+   │      @@ -14,3 +14,3 @@
+   │   14  def apply_discount(amount, percent):
+   │   15 -    return amount - percent
+   │   15 +    return amount * (1 - percent / 100)
+  ✓ $ python3 -m pytest -q → exit 0  380ms
+
+Fixed. `apply_discount` subtracted the percent instead of applying it.
+
+ EXEC  ● ready  · 3/3 steps                     @ file · ctrl+p mode · /help
+ ❯
+ qwen2.5-coder:14b ❯ myproject ❯ main ❯ localhost:11434   4.1k tok  ██▎░░░░░ 27%
+```
+
+## Editions
+
+koda comes in two editions, kept on two branches:
+
+| Edition | Branch | What's different |
+|---|---|---|
+| **Official** | `master` | The standard build. `browse` drives [agent-browser](https://www.npmjs.com/package/agent-browser), which koda ships and installs itself. |
+| **Uncensored** | `uncensored` | Everything in Official, plus a **stealth browsing stack** so the `browse` tool isn't flagged by bot-detection (Cloudflare/DataDome-class fingerprinting). Drives your real Google Chrome, non-headless. |
+
+The uncensored edition is a superset — it tracks `master` and adds the stealth
+layer on top; the two are maintained separately and not merged into each other.
+Pick the install one-liner for the edition you want below. To switch an existing
+checkout: `git checkout master` or `git checkout uncensored`, then re-run
+`./install.sh`. The one-liners honour `KODA_BRANCH` if you want a specific branch.
+
+> The uncensored edition's stealth stack exists so an agent can read pages that
+> block automation. Respect each site's terms of service and robots policy; how
+> you use it is your call.
+
+## Install
+
+koda is one static binary with no runtime deps. The installers download the
+prebuilt binary for your platform when a release matches the version on
+`master` (verified against its SHA-256; a few seconds, no Rust needed), and
+otherwise build it from source, offering to install Rust if it's missing. The
+source is kept in `~/.cache/koda` (`%LOCALAPPDATA%\koda\cache` on Windows), so
+an update rebuilds only what changed. Run from a checkout, they build that
+checkout. `KODA_FROM_SOURCE=1` always builds the branch tip;
+`KODA_VERSION=0.1.0` installs a specific release.
+They also offer to install two optional extras, neither of which koda needs to
+run: ripgrep, for faster search, and tesseract, for
+[offline image OCR](#reading-files-text-csv-and-images). Both are a single
+`[Y/n]` at the end of the install and are skipped without one when the
+installer is piped (`curl | bash`), since it has no terminal to ask at. OCR has
+a second backend that needs no install at all — a vision model named in
+`ocr_model` — so declining tesseract does not cost you the feature.
+
+**macOS / Linux** — interactive menu (install / system-wide / update / uninstall):
+
+```sh
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
+./install.sh
+```
+
+Or the one-liner (clones for you) — **official** edition:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.sh | bash
+```
+
+…or the **uncensored** edition (stealth browsing):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/simpletoolsindia/koda/uncensored/install.sh | bash
+```
+
+It installs to `~/.local/bin` (no sudo). Install system-wide with
+`PREFIX=/usr/local ./install.sh`. On macOS it re-signs the copied binary so
+Gatekeeper doesn't kill it. If the bin dir isn't on your `PATH`, it tells you the
+one line to add.
+
+**Windows** — PowerShell (interactive menu; adds koda to your user `PATH`):
+
+```powershell
+git clone https://github.com/simpletoolsindia/koda.git; cd koda
+.\install.ps1
+```
+
+Or the one-liner:
+
+```powershell
+irm https://raw.githubusercontent.com/simpletoolsindia/koda/master/install.ps1 | iex
+```
+
+It installs to `%LOCALAPPDATA%\koda\bin`; override with `-Prefix`.
+
+**By hand** (any platform with Rust 1.82+):
+
+```sh
+git clone https://github.com/simpletoolsindia/koda.git && cd koda
+cargo build --release
+cp target/release/koda ~/.local/bin/     # or /usr/local/bin, or %LOCALAPPDATA%\koda\bin
+```
+
+## Point it at a model
+
+Run `koda`, press `/setup`, and fill in the endpoint, model and API key — it
+fetches the model list from whatever URL you type and writes your config for you.
+Or do it from the shell:
+
+```sh
+# Ollama
+brew install ollama && ollama serve
+ollama pull qwen2.5-coder:14b
+koda -u http://localhost:11434/v1 -m qwen2.5-coder:14b
+
+# LM Studio — start the server from the Developer tab
+koda -u http://localhost:1234/v1
+
+# llama.cpp
+llama-server -m model.gguf -c 32768 --jinja --port 8080
+koda -u http://localhost:8080/v1
+```
+
+Omit `-m` and koda uses the first model the server reports. `koda models` lists
+what is available.
+
+### Model choice matters more than anything else
+
+Tool calling is what makes an agent work, and small models are bad at it. On a
+32–64 GB Mac, in rough order: **Qwen2.5-Coder 14B/32B**, **Devstral Small**,
+**GLM-4 9B**. Below ~7B, expect the model to lose the tool format; koda's text
+protocol helps but cannot fix a model that will not follow instructions.
+
+Give it at least 16k context. Agent conversations fill up fast with file
+contents.
+
+## Modes
+
+`ctrl+p` cycles; the current mode is always in the status bar.
+
+| Mode | What it does |
+| --- | --- |
+| `PLAN` | Reads and thinks. The write and command tools are unavailable, so nothing on disk changes. Produces a plan and asks you to switch. |
+| `EXEC` | Normal operation. Edits and commands, each gated by approval. |
+| `VIBE` | Writes an explicit spec first (goal, done-when, files, validation), does the work, then checks the result against its own spec — and verifies any subagent's claims against the files before believing them. |
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `enter` | send · `ctrl+j` newline |
+| `ctrl+c` | interrupt · twice to quit · `ctrl+d` quit |
+| `ctrl+p` | cycle mode |
+| `ctrl+r` | expand the last tool output |
+| `ctrl+t` | expand the last reasoning block |
+| `pgup`/`pgdn` | scroll · `up`/`down` input history |
+| `ctrl+a/e/k/u/w` | line editing · `tab` complete a command |
+| `ctrl+l` | clear the screen (twice to confirm) |
+| `y` / `a` / `n` | at an approval prompt: once / always / deny |
+
+## Commands
+
+| Command | |
+| --- | --- |
+| `/setup` | endpoint, model and API key, written to your config |
+| `/mode` | plan, execute or vibe |
+| `/logs` | every request, tool call, timing and failure this session |
+| `/theme` | switch palette |
+| `/skills` | list skills · `/skills reload` after editing one |
+| `/websearch` | turn web search on or off |
+| `/compact` | summarize the conversation to free context |
+| `/resume` `/search` `/fork` | reopen, search by text, or branch a saved conversation |
+| `/orc` | orchestrate: split a task across role agents |
+| `/models` `/model` `/url` | what the server has, and what you are using |
+| `/auto` | cycle autonomy: ask → auto-write → full-auto |
+| `/reason` | reasoning effort: off, low, medium, high |
+| `/watch` | watch files for `AI!` / `AI?` comment triggers |
+| `/debug` | capture raw LLM requests & responses for inspection |
+| `/settings` | interactive settings page for everything below |
+| `/think` | show or hide model reasoning |
+| `/motion` `/reveal` | animation on/off · progressive text reveal on/off |
+| `/intro` | replay the opening titles |
+| `/mouse` | toggle mouse capture — on, the wheel scrolls and dragging selects & copies (remembered) |
+| `/undo` | put back the files the agent changed in the last turn |
+| `/keys` `/tools` `/copy` `/clear` `/cwd` `/help` `/quit` | |
+
+The full command list is in [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+
+## Debugging a program
+
+`print` is how you ask a program a question when you cannot ask it directly.
+koda can ask it directly. The `debug` tool drives a real debugger over the
+[Debug Adapter Protocol][dap] — the same adapters your editor uses — so the
+model can stop a program on a line and look at what is actually there:
+
+```
+launch / attach          start a program, or join one already running
+set_breakpoint           file + line — with a condition, a hit count, or a
+                         log_message, which prints instead of stopping
+set_function_breakpoint  break on a function by name, no line needed
+continue / step_over / step_in / step_out / pause
+stack_trace → scopes → variables      look around where it stopped
+evaluate                 ask the program a question in that frame
+breakpoints, output, status, terminate
+```
+
+Two of those are worth knowing about. A **logpoint** (`log_message`) is a print
+statement you never had to add to the file and never have to remember to
+remove — `"adding {r['amount']} to {total}"` on the line inside a loop prints
+the running total every pass and stops nothing. A **hit condition** (`>5`,
+`%10`) is counted inside the adapter, so skipping to the thousandth iteration
+costs one stop rather than a thousand.
+
+A session looks like this, verbatim from a run against `debugpy`:
+
+```
+Launched buggy.py under debugpy. It is stopped (entry) at buggy.py:1 in <module>.
+Breakpoint at buggy.py:5. 1 of 1 breakpoints in this file are verified.
+continue: it is stopped (breakpoint) at buggy.py:5 in average.
+Stack (innermost first):
+- #3 average at buggy.py:5
+- #4 main at buggy.py:9
+total = 49
+```
+
+There is a ready-made skill for this in `docs/skills/debugging.md` — copy it to
+`~/.config/koda/skills/` and koda will reach for the debugger on its own,
+install the adapter when it is missing, and watch a value across a loop with a
+logpoint instead of stopping ten times.
+
+One session at a time, and `list_adapters` says which debuggers this machine
+has. koda ships the registry, not the debuggers: `debugpy` for Python,
+`lldb-dap` for Rust and C, `dlv` for Go, `js-debug-adapter` for Node —
+whatever that language's community already ships. All of them over stdio,
+which is why `codelldb` is absent despite covering the same languages as
+`lldb-dap`: it is a TCP adapter, and an entry that starts fine and then never
+answers is worse than no entry at all. Reading a stopped
+program (`stack_trace`, `variables`, `evaluate`, `output`) counts as a read and
+does not stop to ask; running one (`launch`, `continue`, stepping) asks like
+any other command, unless autonomy is turned up.
+
+[dap]: https://microsoft.github.io/debug-adapter-protocol/
+
+## A little delight
+
+Three small things, all caused by something you did — never by a timer. That
+distinction is the whole design: every piece of terminal delight people keep
+(lazygit's explosion when you nuke the working tree, `sl` when you mistype
+`ls`) fires because of an action, and looping idle animation is disqualified
+three times over — WCAG 2.2.2 wants a pause control past five seconds,
+repainting at a few frames per second can permanently suppress the terminal's
+own cursor blink, and koda otherwise never wakes at all when idle.
+
+- **The intro.** The wordmark arrives on a wavefront rather than sitting there.
+  One second, and any keystroke ends it immediately — Neovim's rule: an intro
+  is gone the moment there is something real to show.
+- **A costume.** One turn in twelve, the thinking glyph in the status row wears
+  a different face. Zero extra cells, frames or wakeups; it ends when the turn
+  does.
+- **A visitor.** After a turn that did real work and ended well, roughly one
+  time in eight and never twice within ten minutes, a single braille cell hops
+  across the one row on screen that is always blank, for nine hundred
+  milliseconds, and walks off. It will not appear while anything waits on you,
+  while an overlay is open, while you are typing, or if you have scrolled up.
+
+And asking who made koda gets a short curtain call. `/motion off` turns all of
+it off; a terminal without box-drawing glyphs never sees it. The reasoning and
+the evidence are in
+[docs/research-tui-delight.md](docs/research-tui-delight.md).
+
+## Nudges
+
+Three things koda wants the model to do differently, all learned from reading
+real sessions in this repo: consult the code graph instead of grepping for a
+name, keep the task list moving, and hand a wide search to a subagent instead
+of running it in the main context. Each is in the system prompt, and each also
+has a nudge appended to a tool result at the moment it would help — because a
+model reads the result it just got far more carefully than a prompt it saw
+twenty steps ago.
+
+They share one mechanism, with one rule the three copies could not have
+enforced between them: **at most one nudge per tool result, and one of each per
+turn**. Two directives stapled to the same output compete with each other, and
+a nudge repeated is a nudge ignored.
+
+## Keeping the plan honest
+
+The `todo` tool draws the plan you see above the input. Left to itself a model
+writes that plan once and never touches it again — real sessions here show one
+`todo` call at the start and, at best, one at the end — so the list sits on step
+one while the work runs past it, which is worse than showing no plan at all.
+
+Two things keep it moving, both where the model is actually reading. Every
+`todo` result echoes the merged list back and names the step it is on, with what
+to send when that step is done. And if six tool calls go by without the list
+moving, the next result carries a reminder naming the stale step — once per
+turn, so it is a nudge and not a nag.
+
+## Watching it work
+
+A long turn used to look like a hung one. Three things now say otherwise.
+
+While the model is still *writing* a tool call — a `write_file` of a few hundred
+lines streams for a long time before the call is even made — the status row
+names the file and the size climbs: `writing src/context.rs · 12.4 KB`. The row
+carries a meter for the turn as a whole, `(1m 04s · ↓ 14.8k tok)`, so a wait is
+visibly work rather than a hang. And after a few seconds a tip appears beneath
+it, rotating every so often, for the moment when there is nothing else to read:
+
+```
+ ✳ writing src/context.rs · 12.4 KB (1m 04s · ↓ 14.8k tok)      esc interrupt
+   Tip: /undo puts back every file the agent changed in the last turn
+```
+
+## Autonomy
+
+koda has three autonomy tiers, cycled live with `/auto` (or set in `/settings`):
+
+| Tier | Behaviour |
+| --- | --- |
+| `ASK` (default) | Prompts before every write and command. |
+| `AUTO-WRITE` | Auto-approves file writes; still asks before running commands. |
+| `FULL-AUTO` | Approves everything — autonomous, no prompts. Shown in red in the status bar. |
+
+Approval prompts are a loud, docked block: amber for a write, red for a command, with a clear `y / a / n` action row. The agent can also ask *you* a question mid-task with the `ask_user` tool. That
+opens a centred dialog and takes the answer **in the dialog**: pick from the
+options with `↑↓` or `1`-`9`, or just start typing and the dialog turns into an
+answer field with the usual editing keys. Escape goes back to the options; it
+never sends you to the composer underneath, which is the part people answered
+in the wrong place.
+
+## Role agents and orchestration
+
+A skill file with a `role:` field becomes a specialised subagent:
+
+```markdown
+---
+name: qa-agent
+role: qa
+when: Testing a change end to end
+---
+Run the suite, report failures with the exact command and output.
+```
+
+`koda skills --init` writes a `dev` role example. The main agent can `delegate`
+a subtask to a role, and `/orc <task>` turns koda into an orchestrator: it
+decomposes the task, writes a goal/change/validation brief for each part, hands
+each to the right role agent, then integrates and verifies the results.
+
+## Images
+
+Mention an image the way you mention any file — `@screenshot.png` — and koda
+attaches it to the message for a vision-capable model (`.png`, `.jpg`, `.gif`,
+`.webp`). Non-image mentions stay as paths the model can open with `read_file`.
+A model with no vision simply never sees the extra content, so this is safe to
+leave on. Attachments are size-capped at `max_file_bytes`.
+
+## Tools
+
+| Tool | Approval | |
+| --- | --- | --- |
+| `read_file` | — | numbered lines, `offset`/`limit` for big files |
+| `list_dir` `find_files` `search` | — | gitignore-aware; glob and regex |
+| `codegraph` | — | where a symbol is defined and who uses it |
+| `skill` | — | project conventions, loaded on demand |
+| `todo` | — | the plan you see in the transcript, kept current as steps finish |
+| `debug` | ● | run a program under a real debugger: breakpoints, stepping, variables |
+| `remember` | — | durable facts, kept for next session |
+| `delegate` | — | hand a read-only investigation to a subagent |
+| `manage_skill` | asks | write a procedure it worked out as a skill; with `role`, a delegatable agent |
+| `web_search` | — | SearXNG or DuckDuckGo, off by default |
+| `web_fetch` | — | GET a URL and read it as text, off by default |
+| `ask_user` | — | asks *you* a question mid-task, answered in a centred dialog |
+| `write_file` `edit_file` | asks | shows a diff first |
+| `run_command` | asks | builds, tests, git |
+
+File tools run in-process, so they are fast and cannot be talked into doing
+something `sh` would.
+
+### Safety
+
+- Writes and commands need your approval. `y` once, `a` for the session, `n`
+  denies and tells the model to ask you instead.
+- Every write shows a unified diff **before** it is applied, and again after.
+- `sandbox = true` (the default) confines file tools to the workspace root.
+  Turn it off with `--no-sandbox` if you want to read across projects.
+- `-y` / `--yolo` skips approvals. Genuinely dangerous with a model that
+  hallucinates `rm -rf`; use it in a git repo with a clean tree.
+- Headless has nobody to ask, so a write without `--yolo` is denied and koda
+  exits 2.
+
+## Subagents
+
+`delegate` runs a child agent with its own context window and read-only tools.
+Its tokens never reach your transcript — only its written report — so a wide
+search costs you a paragraph instead of thirty files. Nested calls render with a
+rail:
+
+```
+✓ delegate: find every caller of parse_config  2.1s
+  │ ✓ codegraph symbol parse_config
+  │ ✓ read src/config.rs (240 lines)
+```
+
+In vibe mode the parent checks every path and line the report cites against the
+actual files, and sends it back for another pass if they do not hold.
+
+## Skills
+
+A skill is instructions loaded only when relevant, so the prompt stays short.
+The prompt carries one line per skill; the body arrives when the task matches.
+
+```sh
+koda skills --init      # writes a commented example
+koda skills             # list what is loaded, and from where
+```
+
+```markdown
+---
+name: migrations
+when: Writing or reviewing a database migration
+---
+
+Migrations live in db/migrate/, named <timestamp>_<verb>_<subject>.sql.
+
+- Always write the down migration.
+- Never DROP a column in the same release that stops writing to it.
+- Run `just db:check` afterwards — it catches missing FK indexes.
+```
+
+Read from `~/.config/koda/skills/` (yours) and `<project>/.koda/skills/` (the
+repo's — commit them). A project skill overrides a personal one of the same name.
+An unused skill costs about fifteen tokens.
+
+## Code graph
+
+On open, koda scans the project into a symbol graph — definitions, references,
+imports — so the model can ask where something lives instead of grepping for it.
+Three questions: `overview` maps the project, `symbol` locates a name and its
+users, `file` lists what a file defines and who depends on it. Regex-based rather
+than a full parser: accurate enough to point at the right file, which the model
+then reads properly.
+
+### Searching by intent
+
+`codegraph query=search text="where is retry handled"` answers the question the
+graph cannot: one that names no symbol. It is BM25 over definition-sized chunks
+— each definition plus the doc comment above it, which is the part a plain-words
+question actually matches.
+
+Most of the quality is in the tokeniser, not the ranking. Identifiers are
+emitted whole *and* split (`stream_with_retry` → `stream`, `retry`), so exact
+symbol lookup keeps its precision while prose can still reach code; language
+keywords and code-ambient English are dropped. `handle` is in that stoplist by
+measurement: without it, "where is retry handled" ranks a test asserting on the
+word "handles" above the retry code. Results are capped at two spans per file,
+because a file that merely *lists* the query's words — a stopword table, a match
+arm full of names — otherwise takes most of the page.
+
+Three signals are fused, not one. **Words** — BM25F over the body, with the file
+path, the symbol name and the doc prose weighted above it. **Structure** — a
+second, much thinner index over definition names and paths only, which answers
+"which file *is* this about" rather than "which file mentions it", and which
+abstains when the question names nothing it recognises. **Meaning** — vectors,
+when your endpoint has an embedding model (below). Measured over 35 labelled
+queries in `tests/retrieval_gold.txt`, adding the first two took P@1 from 0.429
+to 0.600 and MRR@10 from 0.617 to 0.709; `docs/research-hybrid-retrieval.md` §11
+has the full table, including the two things that were tried and made it worse.
+
+It builds in 66 ms over this repo (1,738 chunks, 68 files) across your cores, and
+queries in 58 µs. The result is cached in `.koda/index/` — about 1 MB — so a
+second session starts in **2.6 ms** with its embeddings intact rather than
+re-earning them. It stays current by itself: files koda writes are re-indexed on
+the spot, files changed by your editor or a `git checkout` are caught by the same
+sweep the graph uses, and only what changed is read. The directory is a cache in
+the strict sense — deleting it costs a rebuild and nothing else. `codegraph_search
+= false`, or **code search** on the `/settings` page, turns all of it off and
+removes it.
+
+**It also ranks by meaning, if your endpoint can.** Word matching alone cannot
+tell "rate limiting" from a frame *rate* — measured, and reproducible: on a
+small project the lexical half returns only the animation code for that query,
+and the hybrid half also finds `over_quota` and `cooldown_ms`.
+
+There is nothing to configure. koda asks the endpoint what models it has and
+uses an embedding model if it finds one — `/v1/embeddings` sits beside the chat
+route on Ollama, llama.cpp and LM Studio, so if you have `nomic-embed-text` or
+`bge-small-en-v1.5` pulled, this is already on. A setting nobody knows to set is
+a feature nobody gets. Name one in `embed_model` only to override the choice.
+
+The two rankings are combined with reciprocal rank fusion rather than a
+weighted sum, because BM25 scores and cosine similarities are not on a common
+scale and the better-performing alternative needs a weight tuned on labelled
+queries from your own repository, which nobody is going to produce. Embedding
+happens in the background after the first search, so a slow or missing server
+costs the search nothing — and if it fails once, the vector half is dropped for
+the session rather than fused in half-working. A ranking is only as good as its
+worst input. When only words ran, the result says so.
+
+Every constant here, and the evidence for it, is in
+[docs/research-hybrid-retrieval.md](docs/research-hybrid-retrieval.md).
+
+Two things push the model to actually use it, because a graph nothing consults
+is dead weight. The base rules no longer name a locating tool at all — a rule
+saying "use search to locate code" is the rule a small model follows, whatever
+the section further down asks for — so the codegraph block is the only answer to
+"how do I find this". And when a `search` is really a name lookup, the result
+comes back with the `codegraph` call to make instead, spelled out. That fires on
+the patterns models actually write (`fn build\(`, `impl Theme`, `\bTodoStatus\b`),
+not just on a bare identifier; prose like `error: connection reset` is left
+alone, because prose is what search is for.
+
+## Memory
+
+With `memory = true`, koda keeps `<project>/.koda/memory.md`: facts it recorded
+through `remember`, plus which commands succeeded and failed here. Next session
+starts knowing your test runner. It is plain markdown you can read, edit or
+delete — nothing is inferred behind your back and nothing is hidden.
+
+## Fitting a small context
+
+A local model with an 8k window spends most of it on tool results it can no
+longer use: the first read of a file that has since been edited twice, the
+listing from six steps back, the 400-line build log whose only payload was
+"ok". Dropping the oldest messages to make room frees exactly the wrong thing —
+the first message in a session is the description of the job.
+
+So when a request does not fit, koda decides what the model still needs, in
+escalating passes, stopping as soon as it fits:
+
+1. **Supersede** — a `read_file` answered again later, or a file edited since it
+   was read, is stale. Its body becomes one line saying what replaced it.
+2. **Squeeze** — what survives is truncated on a ladder. The step in flight
+   keeps everything, recent steps keep their detail, older ones keep their head
+   and tail, and anything naming what you just asked about keeps twice as much
+   as anything that does not.
+3. **Drop** — only now are whole exchanges removed, oldest first, and never the
+   opening request.
+
+This runs on a copy at send time: your history, the session file and `/compact`
+are untouched, so nothing is lost for good. Raise `context_tokens` and the next
+request carries the full detail again. Under budget it does nothing at all.
+`/compact` is still the tool for a session that has genuinely moved on — it
+writes a real summary; this keeps a long turn working in the meantime.
+
+The memory block scales the same way: one remembered fact per ~1k of window,
+between four and twenty, so a small model is not spending its context on notes
+instead of the task.
+
+## Web search
+
+Off by default. Turn it on with `/websearch` (or `web_search = true`). It has two
+backends, chosen automatically: your own **SearXNG** instance when `searx_url` is
+set (private, self-hosted; needs `json` in `search.formats` in its
+`settings.yml`), otherwise a fallback to **DuckDuckGo**'s keyless HTML endpoint so
+search works out of the box with nothing to host.
+
+```toml
+web_search = true
+searx_url = "http://localhost:8888"   # optional; omit to use DuckDuckGo
+```
+
+Toggle per session with `/websearch` — koda tells you which backend is active.
+Pick the backend explicitly in `/settings`: enable web search, choose DuckDuckGo
+or SearXNG (entering your instance's address inline), then close to confirm.
+
+## Fetching a web page
+
+With `web_fetch` on (off by default, toggle in `/settings`), the agent can GET a
+URL and read it as plain text — HTML stripped, output capped at
+`max_tool_output_bytes`. It is the companion to web search: search finds a page,
+`web_fetch` reads it. Only `http`/`https`; treat fetched content as untrusted.
+Because a model-supplied URL becomes a request from your machine, it is opt-in.
+
+## Running shell commands directly
+
+Prefix a line with `!` to run it as a shell command in the workspace, with no
+model call and no tokens spent — handy for the quick things you'd otherwise
+leave koda to do:
+
+```
+!git status
+!ls -la src
+!git commit -am "wip"
+```
+
+The command and its output appear in the transcript as a tool block, exactly
+like a command the agent runs, but the conversation context is untouched.
+
+**Live pages.** `web_fetch` is a plain GET; the **browser** setting (off by
+default, `/settings`) adds a `browse` tool that opens a URL in a real headless
+Chromium via `agent-browser` and reads it after its JavaScript has run — for the
+single-page apps and dashboards a fetch returns empty. By default it drives the Chrome you already have (`browser_channel`), and
+`browser_headless = false` opens a visible window. The engine ships with koda —
+the installer fetches it, and the first `browse` call fetches it if the installer
+did not — so there is nothing to install by hand.
+
+**Internal servers.** If your endpoint sits behind a proxy that re-signs TLS
+with a private CA, `insecure_tls = true` (globally or on one provider) accepts
+the certificate. It disables the check that the server is who it says it is, so
+prefer installing the CA; koda warns at startup whenever it is on.
+
+**Context budget.** `context_tokens` defaults to `110000` and is editable on
+`/setup`. A provider can carry its own, since context size belongs to the model
+behind the endpoint. When a turn outgrows it, koda curates the request rather
+than truncating the conversation — see below.
+
+**Multiple providers.** Give an endpoint a name in `/provider add` and it is
+saved; `/provider <name>` switches, `/settings` cycles, and the name replaces
+the host in the status bar. A provider names its own URL, key, model and image
+support, and anything it leaves out falls through to your top-level settings.
+
+Press `#` at the end of a prompt for a palette of actions on the text you have
+typed — copy it, copy or cut the current line, jump to the start or end, clear,
+undo, paste. Narrow with a few letters (`#cl` → `#clear`), `enter` to run. None
+of it reaches the model.
+
+`$` does the same for Python, so a calculation or a quick parse costs no turn
+and the answer is the interpreter's rather than a model's guess at it:
+
+```
+$ print(sum(range(1, 11)))
+$ import json; print(json.load(open("pkg.json"))["version"])
+```
+
+Like `!`, it never enters the conversation the model sees.
+
+## Reading files: text, CSV, and images
+
+`read_file` returns numbered lines for text. CSV/TSV files are rendered as an
+aligned table with a header rule, so the model reads columns reliably. Images
+(`@photo.png`) are attached to a vision model rather than read as text —
+`.png .jpg .jpeg .gif .webp .bmp .tiff .avif .svg` are recognized.
+
+PDF, Word and Excel are read too, and are on by default: `.pdf`, `.docx`,
+`.xlsx .xlsm .xls .ods`, alongside `.csv .tsv .tab`. Mention one with `@` and
+its text comes with your message — `@report.pdf summarise this`, `@data.csv
+which row is highest?` — so the model answers straight away instead of spending
+a turn asking to read what you just pointed at. Mentions of ordinary source
+files are left alone for the agent to fetch when it needs them. They add 1.4 MB to the
+binary, which is the price of "read this spreadsheet" working when it is asked.
+A packager who wants the smaller build can use `--no-default-features`. The
+design is in [docs/spec-doc-parsing.md](docs/spec-doc-parsing.md).
+
+Legacy `.doc` (the pre-2007 binary Word format) is **not** supported — only
+`.docx`. Convert it, or open it and save as `.docx`.
+
+**OCR fallback.** If you attach an image but your model isn't vision-capable,
+turn on `ocr` (in `/settings`, off by default) and koda extracts the image's
+text with the `tesseract` CLI and sends that instead — so a screenshot of an
+error still reaches a text-only model. Needs tesseract installed
+(`brew install tesseract`, `apt install tesseract-ocr`); if it's missing koda
+says so and skips the image. koda detects vision capability from the model name,
+so a vision model still gets the real image.
+
+Tesseract only reads printed text, and misses layout, tables, handwriting and
+anything that isn't text. Set `ocr_model` (in `/settings`, next to `ocr`) to a
+vision-capable model name — often one already reachable on the same endpoint,
+since most routers and local servers host several — and koda tries that first:
+it sends the image there, asks for a verbatim transcription plus a short
+description of any non-text content, and hands the reply to your active model
+in place of the picture. Tesseract remains the offline fallback if `ocr_model`
+is unset or the request fails.
+
+## Reasoning effort
+
+Thinking models can be told how hard to think. `/reason` cycles
+`off → low → medium → high` (or set `reasoning_effort` in config, or pass a level:
+`/reason high`). koda sends it as `reasoning_effort` on the request; servers that
+do not support the field simply ignore it, and `off` omits it entirely.
+
+## Watch mode
+
+Aider-style inline triggers. Turn it on with `/watch` (or `watch = true`), then
+end a comment with a trigger token and koda acts on it the moment it is idle:
+
+```python
+# implement binary search over `items`, return the index or -1  AI!
+```
+
+- `AI!` — implement the request in that file. koda reads it, makes the change,
+  and removes the trigger comment so it does not fire again.
+- `AI?` — answer the question (read-only; no edits).
+
+koda scans the workspace (gitignore-aware) every `watch_interval_ms` and only
+acts when no turn is running, nothing is queued, and no prompt is open.
+
+## Debug capture
+
+`/debug` (or `debug = true`, or `KODA_DEBUG=1`) records the exact request body
+koda sends to the model and the raw streamed response — the same idea as
+oh-my-pi's request-debug. Files land in `~/.local/state/koda/debug/` as
+`rr-session-N.json` (the request) and `rr-session-N.res.log` (the raw SSE),
+which is enough to reproduce a bad turn. `/debug` prints where they are.
+
+## Web control center
+
+An optional local page — served on `127.0.0.1` only — that traces every turn end
+to end and drives the running session. Open the URL koda prints at startup.
+
+- **Turn rail** — every turn, newest first, with status, duration, step and token
+  counts. The running turn is followed live.
+- **Trace waterfall** — that turn's steps in order with duration bars: model
+  calls, tool calls and compactions, with retries, failures and denied approvals
+  marked inline.
+- **Inspector** — the payloads behind a step: the exact request body sent, the raw
+  SSE stream received, the model's reasoning, and a tool's arguments, result and
+  diff. **Prompt Δ** diffs the prompt against the previous model call, so what
+  compaction dropped (or a learned rule added) is visible rather than silent.
+- **Control rail** — model, endpoint, mode, autonomy tier, reasoning effort, max
+  steps, feature toggles, project memory, learned-rule candidates, and saved
+  sessions (resume/fork). Edits apply to the *running* koda, not just to disk.
+- **Logs drawer** (`L`) and a **Manage** panel for the code graph, skills and role
+  agents, the system prompt, and raw request/response captures.
+- **`⌘K`** command palette: jump to a turn, switch model or mode, toggle a
+  feature, export a trace, or `@symbol` + `Shift+Enter` to query the code graph.
+
+### How to run it
+
+1. **Turn it on.** Either open `/settings` in koda and toggle **web ui** on (and
+   optionally set **ui detail** to simple/medium/high), or set it in config:
+
+   ```toml
+   web_ui = true
+   web_ui_port = 7717     # optional; the default
+   ui_detail = "medium"   # simple | medium | high
+   ```
+
+   The settings toggle is remembered; koda starts the server on the next launch.
+
+2. **Start koda.** On launch it prints the address:
+
+   ```
+   koda: web UI at http://127.0.0.1:7717
+   ```
+
+3. **Open that URL.** Turn tracing is on whenever the web UI is (`KODA_TRACE=1`
+   forces it on otherwise). The last 50 turns are kept in memory with truncated
+   payloads, so a long session stays bounded.
+
+Raw request/response *files* are separate: enable `/debug` (or `debug = true`,
+`KODA_DEBUG=1`) for the Manage panel's Raw Captures. The trace does not need it.
+
+The server has no extra dependencies (it is built on the async runtime koda
+already uses) and binds to localhost only, so nothing is exposed off your
+machine.
+
+## Skills koda writes for itself
+
+Skills are not only hand-written. When koda works out a procedure that was not
+obvious and will come up again — how to run this repo's integration suite, how to
+add a subsystem end to end, a release checklist — it calls `manage_skill` to write
+it down, so the next session starts with it instead of rediscovering it.
+
+The division is deliberate: a **fact** goes to `remember`, a **style rule** is
+learned and reviewed with `/learn`, and a **procedure** becomes a skill. Setting
+`role` makes the same file a delegatable agent (a role agent is just a skill with
+a role), which is how koda spins up a `qa` or `reviewer` agent for itself.
+
+Guards, because a directory full of near-duplicate skills is worse than none:
+writing one is approval-gated like any file write, a one-liner is refused as a
+fact rather than a procedure, an existing name must be updated explicitly, and a
+second skill claiming the same trigger is refused. Everything lands as an
+ordinary markdown file in `.koda/skills/`, so you can read, edit, commit or
+delete it — and `/skills` lists what koda has accumulated. See
+[docs/extensions.md](docs/extensions.md).
+
+## Custom tools
+
+Teach koda a project-specific action without touching Rust. Declare it in config
+as a `[[tools]]` table; `{arg}` placeholders are filled from the call and
+shell-quoted, and it runs through the same approval + shell path as any command:
+
+```toml
+[[tools]]
+name = "typecheck"
+description = "Type-check the project and report errors."
+command = "npm run -s typecheck"
+mutating = false
+
+[[tools]]
+name = "grep_todos"
+description = "Find TODO comments matching a term."
+command = "rg -n 'TODO.*{term}' ."
+args = ["term"]
+```
+
+Custom tools are offered only to the top-level agent and never in plan mode. The
+full extension guide (custom tools, skills, role agents) is in
+[docs/extensions.md](docs/extensions.md). To add a tool in Rust — one that needs
+koda's own state — follow the worked example in
+[docs/adding-a-builtin-tool.md](docs/adding-a-builtin-tool.md).
+
+## MCP servers
+
+koda speaks the Model Context Protocol, so a published server — Postgres,
+GitHub, Sentry, your company's internal API — lends koda its tools without a
+line of Rust. Declare one as an `[[mcp_server]]` table:
+
+```toml
+[[mcp_server]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+tools = ["search_issues", "get_issue"]   # optional: take only these
+
+[mcp_server.env]
+GITHUB_TOKEN = "${GH_TOKEN}"             # expands from koda's environment
+```
+
+Its tools arrive as `mcp__github__search_issues`. They ask before running —
+an MCP server runs somebody else's code — unless the server marks a tool
+read-only, or you set `trust = true` on that server. Hosted servers work too:
+set `url` instead of `command`.
+
+`/mcp` lists every server and what it lends; `koda mcp` does the same from a
+shell and is the first thing to run when a tool you expected is missing. Full
+guide: [docs/mcp.md](docs/mcp.md).
+
+## Language servers
+
+The code graph matches names; a language server resolves them. When one is
+installed for your project, the `lsp` tool answers the questions regexes cannot:
+
+```
+lsp action=definition  file=src/agent.rs line=412 symbol=execute
+lsp action=references  file=src/agent.rs line=412 symbol=execute
+lsp action=hover       file=src/agent.rs line=412 symbol=outcome
+lsp action=diagnostics file=src/agent.rs
+```
+
+Give it a line and the symbol as it appears there — you never work out a column.
+It costs nothing when no server is installed: koda checks the project's marker
+files, and if nothing matches, the tool is not even advertised. Servers start on
+first use, not at launch. `/lsp` reports what is installed and running. Full
+guide: [docs/lsp.md](docs/lsp.md).
+
+## Editing the system prompt
+
+The built-in system prompt is deliberately short, but you can replace it. Open
+`/settings`, select **system prompt**, and press enter to edit it inline (empty =
+the built-in). Your `instructions` are still appended either way, and per-tool
+prompt overrides can be set with a `[tool_prompts]` table in config.
+
+Whichever prompt is in force, koda appends the facts a model cannot know on its
+own: the workspace path, the project type, and the current date, time and UTC
+offset — so it dates a changelog entry from your clock instead of guessing a
+year from its training data.
+
+## When things go wrong
+
+Failures do not put stack traces on your screen. Transient ones — connection
+reset, 429, 5xx, an empty stream — are retried with backoff. What you see is one
+plain sentence; the full detail goes to the event log.
+
+```
+/logs          in the TUI
+~/.local/state/koda/koda.log
+```
+
+The status bar shows a count when anything was logged as a warning or error, so
+you know to look.
+
+## How it looks
+
+Blocks are grouped by a **tinted fill**, not a border: warm behind your messages,
+cool behind tool output, red behind failures. A fill costs no rows and the tint
+carries the block's kind, so the transcript reads as composed rather than printed.
+
+Structured output — `/help`, `/models`, `/theme`, `/skills`, `/tools` — renders as
+filled blocks with a bold amber heading, the title on the left and a hint on the
+right, sized to your terminal with long rows clipped.
+
+The bottom bar is chevron-separated segments, each in its own colour: model,
+project, branch, endpoint, then tokens and a context gauge with eighth-block
+precision. Above the input sits the mode chip, what the agent is doing, step
+progress, and only the keys that apply right now.
+
+The plan (`todo` tool) gets a standing block with a progress gauge: done steps are
+struck through and the step in flight is the only bold row.
+
+`/theme` shows a swatch of each palette so you can pick by eye. The default is the
+vibrant `neon` palette, because the fills need colours that can be predicted —
+`ansi` uses your terminal's own sixteen and drops the fills for a rule instead.
+
+## Themes
+
+`/theme` switches live, and with no argument shows a swatch of each palette so
+you can pick by eye. The default (`theme = "auto"`) resolves to the vibrant
+`neon` palette, because the block fills that give the transcript its shape need
+colours that can be predicted. The full set — dark: `dark`, `neon`, `ansi`,
+`catppuccin-mocha`, `tokyo-night`, `gruvbox-dark`, `nord`, `dracula`,
+`rose-pine`, `kanagawa`, `everforest`, `one-dark`, `github-dark`,
+`ayu-mirage`, `night-owl`; light: `solarized-light`, `catppuccin-latte`,
+`rose-pine-dawn`, `everforest-light`; and `mono`. `ansi` uses your terminal's own 16
+colours and drops the fills for a rule instead.
+
+`NO_COLOR=1` or `TERM=dumb` forces monochrome (`mono`) — hierarchy then comes
+from bold and dim alone. `icons = "ascii"` replaces box drawing and braille for
+terminals that cannot render them. The layout adapts at 92 and 64 columns.
+
+## Configuration
+
+`~/.config/koda/config.toml`, overridden by a `koda.toml` in your project, then
+environment (`KODA_BASE_URL`, `KODA_MODEL`, `KODA_API_KEY`, or the `OPENAI_*`
+equivalents), then CLI flags.
+
+```toml
+base_url = "http://localhost:11434/v1"
+api_key = "local"
+model = "qwen2.5-coder:14b"
+
+temperature = 0.2          # low is better for code
+top_p = 0.95
+max_tokens = 0             # 0 = server default
+context_tokens = 16000     # requests are curated to fit
+auto_compact_at = 0.85     # summarize at this fraction; 0 disables
+
+mode = "execute"           # plan | execute | vibe
+tool_protocol = "auto"     # auto | native | text
+max_steps = 24             # model<->tool round trips per turn
+auto_approve = false       # true = same as auto_tier = "full"
+auto_tier = "ask"          # ask | write | full — cycle live with /auto
+sandbox = true             # confine file tools to the workspace root
+
+subagents = true
+subagent_max_steps = 12
+subagent_review_rounds = 1 # vibe-mode re-prompts of a bad report
+max_subagent_depth = 1
+
+codegraph = true
+codegraph_search = true    # index the project for meaning-shaped search
+sessions = true            # save conversations for /resume, /search, /fork
+memory = true
+web_search = false         # falls back to DuckDuckGo when searx_url is unset
+searx_url = ""
+search_backend = "duckduckgo"  # duckduckgo | searxng — pick in /settings
+search_results = 6
+
+reasoning_effort = "off"   # off | low | medium | high — /reason
+watch = false              # act on AI! / AI? comment triggers — /watch
+watch_interval_ms = 1500
+
+web_ui = false             # serve the React logs/debug UI on 127.0.0.1
+web_ui_port = 7717
+ui_detail = "medium"       # web UI log detail: simple | medium | high
+
+debug = false              # dump raw requests/responses — /debug, or KODA_DEBUG=1
+
+max_retries = 3
+log_level = "info"         # debug | info | warn | error
+log_to_file = true
+log_detail = false         # verbose telemetry in /logs
+
+theme = "auto"             # auto resolves to the neon palette
+icons = "auto"
+motion = true              # animation; toggle with /motion
+reveal = true              # progressive text reveal; toggle with /reveal
+intro = true               # opening titles at launch (any key skips); replay with /intro
+mouse_capture = true       # on: wheel scrolls, drag selects; off: the terminal does both
+sync_output = true         # atomic frames (DEC 2026)
+shell = "/bin/sh"
+command_timeout_ms = 120000
+max_file_bytes = 262144
+max_tool_output_bytes = 24576
+
+system_prompt = ""         # override the built-in prompt; edit in /settings
+instructions = ""          # extra project rules for the prompt
+```
+
+koda also reads `AGENTS.md`, `CLAUDE.md` or `.koda.md` from the workspace root.
+
+## Tool protocols
+
+Local servers vary in how well they implement OpenAI tool calls:
+
+- `auto` (default) — advertise native `tools`, and also accept
+  `<tool_call>{...}</tool_call>` text blocks. If the server rejects the `tools`
+  field, koda switches to text mode and carries on.
+- `native` — native `tool_calls` only.
+- `text` — no `tools` field; the model is told to emit blocks. For models with no
+  tool support at all.
+
+Tool blocks are stripped from what you see, even when a tag arrives split across
+streaming chunks.
+
+## Why it stays fast
+
+- Each transcript block caches its rendered lines, so a streaming token
+  re-lays-out only the block that changed.
+- Redraws are coalesced: a burst of tokens is one frame, and nothing is drawn
+  when nothing changed.
+- Only the visible window of lines reaches the renderer.
+- File tools are in-process; no subprocess per read.
+- The code graph is two passes over the project, not a parse per query.
+- The system prompt is short on purpose — every token of it is a token the model
+  does not spend on your code.
+
+## Tests
+
+```sh
+cargo test          # unit tests
+bash tests/e2e.sh   # end-to-end against a mock server, including the TUI
+```
+
+For a JUnit XML report (what CI dashboards and IDEs read), run the suite under
+[cargo-nextest](https://nexte.st):
+
+```sh
+cargo nextest run --profile ci    # report: target/nextest/ci/junit.xml
+```
+
+CI does this on Linux, macOS and Windows, and publishes each report as a check
+on the commit.
+
+`tests/mock_server.py` is a scripted OpenAI-compatible SSE server covering both
+tool protocols, the fallback path, empty and reasoning-only replies, delegation,
+the code graph, and memory. `tests/tui_test.py` drives the real TUI through a
+pseudo-terminal and reconstructs the screen with a small VT100 interpreter, so it
+asserts on what a user actually sees.
+
+## License
+
+MIT
